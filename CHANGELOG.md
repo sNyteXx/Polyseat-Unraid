@@ -10,6 +10,26 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.39.0
+
+**A game can be uninstalled from every seat at once.** The library's button
+for a title used to take it out of the pool and leave the seats alone, and that
+lasted about a minute: the next pass found a finished install in any seat still
+holding it and took it straight back into the pool. Getting rid of a game meant
+uninstalling it inside every seat by hand. The button is now Uninstall, and it
+deletes the title from the pool, from every seat taking part in the library and
+from the host's library, Steam titles and shared folders alike.
+
+Nothing is deleted while anybody is playing it: if one copy is in use, by the
+same test that holds back an update, every copy stays and the message names the
+seat. A watched library the daemon only reads from refuses it as well, since its
+copy would come back. Each seat's `compatdata` for the title stays, because that
+is the Proton prefix and usually holds the saves; `shadercache` and
+`downloading` go. A seat that had uninstalled the title itself forgets that, so
+installing the game again later shares it like a new one.
+
+No provisioning needed, the daemon alone changes.
+
 ## 0.38.0
 
 **A game left running rendered flat out once nobody was watching.** A seat caps
