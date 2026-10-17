@@ -724,9 +724,12 @@ func (m *Manager) UnwatchLibrary(steamapps string) error {
 	return nil
 }
 
-// RemoveFromLibrary drops a title from the pool without touching the seats that
-// already have it.
-func (m *Manager) RemoveFromLibrary(appID string) error {
+// UninstallEverywhere takes a title out of the pool, every seat and the host's
+// library at once. Refused with ErrBusy while any of them is using its copy.
+//
+// The members are probed the way a pass probes them, so a seat counts as busy
+// exactly when it would not take an update either.
+func (m *Manager) UninstallEverywhere(appID string) error {
 	if m.pool == nil {
 		return fmt.Errorf("%w: %s", ErrNoLibrary, m.libraryErr)
 	}
@@ -734,7 +737,24 @@ func (m *Manager) RemoveFromLibrary(appID string) error {
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
 
-	if err := m.pool.Remove(appID); err != nil {
+	gone, err := m.pool.Uninstall(appID, m.members(true), func(f string, a ...any) {
+		m.log.Info("library: " + fmt.Sprintf(f, a...))
+	})
+
+	for _, move := range gone {
+		m.moved(move.Seat, "%s was uninstalled from every seat at once", move.Name)
+	}
+
+	if len(gone) > 0 {
+		m.notify()
+	}
+
+	var busy *library.BusyError
+	if errors.As(err, &busy) {
+		return fmt.Errorf("%w: %v", ErrBusy, err)
+	}
+
+	if err != nil {
 		return err
 	}
 

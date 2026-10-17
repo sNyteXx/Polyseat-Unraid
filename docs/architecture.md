@@ -408,6 +408,21 @@ It never deletes. A title uninstalled inside a seat is remembered as declined
 rather than restored on the next pass, which is the difference between a feature
 and something that keeps putting games back on a disk somebody was clearing.
 
+**Uninstalling everywhere is the one exception, and it is asked for by hand.**
+The interface's Uninstall takes a title out of the pool, every seat and the
+host's library in one step. Taking it out of the pool alone, which is what the
+button used to do, lasted a minute: any seat still holding a finished install
+offers it back to a pool that has none, so the only way to be rid of a game was
+to uninstall it inside every seat. It is all or nothing about the moment. If any
+member is using its copy, by the same test that holds back an update, nothing is
+deleted anywhere and the refusal names who; a watched library the daemon only
+reads refuses it too, since that copy would come straight back. The manifest
+goes before the files, so a removal stopped halfway leaves nothing a pass would
+take for a game. `shadercache` and `downloading` go with it, `compatdata` stays,
+because that is the Proton prefix and for most games the saves. Every mark for
+the title is dropped, the declined ones as well, so a fresh install later is
+shared like any other.
+
 **Only ever forward.** Build ids are compared as numbers, and the pool takes a
 copy only when it has none or when the library offering it is strictly newer.
 The first version compared for inequality in either direction, so a seat one

@@ -417,9 +417,8 @@ func (r Report) Quiet() bool {
 // in a seat is taken into the pool, and anything in the pool is offered to
 // every seat that has not already turned it down.
 //
-// Never deletes. A title removed from the pool by hand stays gone from the
-// pool but is left alone in the seats that already have it, and a title
-// uninstalled inside a seat is remembered as declined rather than restored.
+// Never deletes; that is Uninstall's, and only on request. A title uninstalled
+// inside a seat is remembered as declined rather than restored.
 // Both directions of that are deliberate: this daemon writes into libraries
 // that people are playing out of, and the worst thing it could do is make a
 // decision about somebody's disk that they did not ask for.
@@ -1093,6 +1092,10 @@ func (p *Pool) Remove(appID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	return p.removeLocked(appID)
+}
+
+func (p *Pool) removeLocked(appID string) error {
 	if name, ok := FolderName(appID); ok {
 		if err := safeName(name); err != nil {
 			return err
@@ -1132,6 +1135,241 @@ func (p *Pool) Remove(appID string) error {
 	}
 
 	return os.Remove(manifest)
+}
+
+// BusyError is an uninstall refused because a member is using its copy.
+type BusyError struct {
+	Name    string
+	Members []string
+}
+
+func (e *BusyError) Error() string {
+	return fmt.Sprintf("%s is in use in %s right now", e.Name, strings.Join(e.Members, ", "))
+}
+
+// Uninstall takes a title out of the pool and out of every member that has it.
+//
+// Remove alone cannot do this. A member that still has the title offers it
+// back on the next pass, because the pool has none and the member's copy is a
+// finished install, so a title removed from the pool returns within a minute
+// for as long as anybody keeps it. The only way to be rid of a game is to take
+// it from everywhere at once, and before this that meant uninstalling it by
+// hand in every seat.
+//
+// All or nothing about the moment: if any member is using its copy nothing is
+// deleted anywhere, and the error names who. A watched library the daemon may
+// not write into refuses it the same way, since that copy would come straight
+// back too.
+//
+// What Steam keeps per title beside the game goes with it, except compatdata:
+// that is the Wine prefix, and for most games it is where the saves are.
+func (p *Pool) Uninstall(appID string, members []Member, log Logger) ([]Move, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if log == nil {
+		log = func(string, ...any) {}
+	}
+
+	name, folder := FolderName(appID)
+
+	check := ManifestName(appID)
+	if folder {
+		check = name
+	}
+
+	if err := safeName(check); err != nil {
+		return nil, err
+	}
+
+	if !folder {
+		joined := map[string]bool{}
+
+		for _, m := range members {
+			if m.External() {
+				joined[m.Apps] = true
+			}
+		}
+
+		for _, source := range p.state.Sources {
+			if joined[source] {
+				continue
+			}
+
+			dir, err := openAnchored(source)
+			if err != nil {
+				continue
+			}
+
+			_, err = readAppAt(dir, ManifestName(appID))
+			dir.Close()
+
+			if err == nil {
+				return nil, fmt.Errorf("%s is also in %s, which the pool only reads from "+
+					"and would take it back from; uninstall it there first", appID, source)
+			}
+		}
+	}
+
+	type holding struct {
+		member Member
+		app    App
+	}
+
+	var (
+		have  []holding
+		busy  []string
+		title = name
+	)
+
+	for _, m := range members {
+		var (
+			app App
+			has bool
+		)
+
+		if folder {
+			dir, err := p.foldersDir(m)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", m.Name, err)
+			}
+
+			if dir == nil {
+				continue
+			}
+
+			has = isDirAt(dir, name)
+			dir.Close()
+		} else {
+			dir, err := p.appsDir(m)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", m.Name, err)
+			}
+
+			app, err = readAppAt(dir, ManifestName(appID))
+			dir.Close()
+
+			has = err == nil
+
+			if has {
+				if err := safeName(app.InstallDir); err != nil {
+					return nil, fmt.Errorf("%s: installdir: %w", m.Name, err)
+				}
+
+				title = app.Name
+			}
+		}
+
+		if !has {
+			continue
+		}
+
+		if !m.Updatable {
+			busy = append(busy, m.Name)
+		}
+
+		have = append(have, holding{member: m, app: app})
+	}
+
+	if !folder {
+		if app, err := ReadApp(filepath.Join(p.PoolApps(), ManifestName(appID))); err == nil && app.Name != "" {
+			title = app.Name
+		}
+	}
+
+	if len(busy) > 0 {
+		return nil, &BusyError{Name: title, Members: busy}
+	}
+
+	var gone []Move
+
+	for _, h := range have {
+		var err error
+
+		if folder {
+			err = p.dropFolder(h.member, name)
+		} else {
+			err = p.dropApp(h.member, h.app)
+		}
+
+		if err != nil {
+			// The pool keeps its copy, so that what is left can be tried again
+			// rather than being taken back into a pool that no longer has it.
+			if err := p.save(); err != nil {
+				return gone, err
+			}
+
+			return gone, fmt.Errorf("%s: %w", h.member.Name, err)
+		}
+
+		log("uninstalled %s from %s", title, h.member.Name)
+
+		gone = append(gone, Move{App: appID, Name: title, Seat: h.member.Name})
+	}
+
+	if err := p.removeLocked(appID); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return gone, err
+	}
+
+	// Every mark goes, declined ones included. A declined title stays declined
+	// even once the seat has it again, so a mark left here would keep a game
+	// somebody installs afresh later from ever being shared.
+	for _, seat := range p.state.Delivered {
+		delete(seat, appID)
+	}
+
+	return gone, p.save()
+}
+
+// dropApp removes one member's copy of a Steam title. The manifest goes first,
+// so that a removal stopped halfway leaves files no pass will take for a game.
+func (p *Pool) dropApp(m Member, app App) error {
+	dir, err := p.appsDir(m)
+	if err != nil {
+		return err
+	}
+
+	defer dir.Close()
+
+	if err := removeAllAt(dir, ManifestName(app.AppID)); err != nil {
+		return err
+	}
+
+	for _, sub := range []struct{ dir, name string }{
+		{commonDir, app.InstallDir},
+		{"shadercache", app.AppID},
+		{"downloading", app.AppID},
+	} {
+		parent, err := openDirAt(dir, sub.dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+
+		if err != nil {
+			return err
+		}
+
+		err = removeAllAt(parent, sub.name)
+		parent.Close()
+
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// dropFolder removes one member's copy of a shared folder.
+func (p *Pool) dropFolder(m Member, name string) error {
+	dir, err := p.foldersDir(m)
+	if err != nil || dir == nil {
+		return err
+	}
+
+	defer dir.Close()
+
+	return removeAllAt(dir, name)
 }
 
 // Offer clears a declined mark so the next sync hands the title over again.

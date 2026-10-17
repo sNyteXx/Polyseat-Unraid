@@ -1641,7 +1641,7 @@ func (s *Server) unwatchLibrary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) removeTitle(w http.ResponseWriter, r *http.Request) {
-	if err := s.manager.RemoveFromLibrary(r.PathValue("appid")); err != nil {
+	if err := s.manager.UninstallEverywhere(r.PathValue("appid")); err != nil {
 		fail(w, statusFor(err), err)
 
 		return

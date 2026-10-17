@@ -1286,16 +1286,18 @@ function titleRow(title) {
 
   const remove = document.createElement("button");
   remove.className = "quiet tiny danger";
-  remove.textContent = "Remove";
+  remove.textContent = "Uninstall";
   remove.title =
-    "Removes this title from the pool. The seats that have it keep it.";
+    "Uninstalls this from the pool, every seat and the host at once.";
   remove.onclick = () => {
+    const holders = inSeats.length ? inSeats.join(", ") : "no seat";
+
     if (
       !confirm(
-        `Remove "${title.name}" from the shared pool?\n\n` +
-          `The seats that already have it keep their copies, so this frees ` +
-          `nothing until the last of them uninstalls it. It will stop being ` +
-          `offered to new seats.`,
+        `Uninstall "${title.name}" everywhere?\n\n` +
+          `It is deleted from the shared pool and from every copy (${holders}). ` +
+          `Saves in each seat's Proton prefix stay. Nothing is deleted while ` +
+          `anybody is playing it.`,
       )
     ) {
       return;
