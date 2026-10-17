@@ -14,3 +14,6 @@ packaging/dist/
 # What packaging/sunshine/build.sh leaves next to itself. It is attached to a
 # release and named by its checksum in provision.go, never committed.
 packaging/sunshine/*.pkg.tar.zst
+
+# The same for packaging/mangohud-shim/build.sh.
+packaging/mangohud-shim/*.pkg.tar.zst

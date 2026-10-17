@@ -33,7 +33,7 @@ var assets embed.FS
 // This is the mechanism that fixes the sort of drift found at the end of M4,
 // where seat1 carried security.nesting and seat2 did not simply because seat1
 // was built earlier.
-const Generation = 66
+const Generation = 67
 
 // Player is the unprivileged user inside every seat that owns the session.
 const Player = "player"
@@ -133,6 +133,7 @@ func Steps() []Step {
 		{"network", (*Provisioner).stepNetwork},
 		{"packages", (*Provisioner).stepPackages},
 		{"sunshine", (*Provisioner).stepSunshine},
+		{"mangohud shim", (*Provisioner).stepMangoHudShim},
 		{"steam", (*Provisioner).stepSteam},
 		{"user", (*Provisioner).stepUser},
 		{"proton", (*Provisioner).stepProton},
@@ -731,26 +732,33 @@ func (p *Provisioner) stepSunshine(ctx context.Context) error {
 	// rate limit to be told what this source already says.
 	p.Log("installing sunshine %s", want)
 
-	// Downloaded here and pushed in, rather than handing pacman the URL.
-	// pacman applies RemoteFileSigLevel to a URL, which on Arch is Required,
-	// and it then fails looking for a .sig next to the package that nobody
-	// publishes. A local file falls under LocalFileSigLevel, which is
-	// Optional.
-	pkg, err := download(ctx, sunshinePackageURL())
+	return p.installOwnPackage(ctx, "sunshine", sunshinePackageURL(), sunshinePackageSHA256)
+}
+
+// installOwnPackage installs a package built here and attached to a release of
+// this repository, after checking it is the one this source names.
+//
+// Downloaded here and pushed in, rather than handing pacman the URL. pacman
+// applies RemoteFileSigLevel to a URL, which on Arch is Required, and it then
+// fails looking for a .sig next to the package that nobody publishes. A local
+// file falls under LocalFileSigLevel, which is Optional.
+//
+// And checked against the checksum in the source. It is a binary built by hand
+// and attached to a release, and a release asset can be replaced by anybody who
+// can write to the repository without a commit to show for it. That line
+// cannot.
+func (p *Provisioner) installOwnPackage(ctx context.Context, name, url, sha string) error {
+	pkg, err := download(ctx, url)
 	if err != nil {
 		return err
 	}
 
-	// And checked against what this source says the package is. It is a binary
-	// built by hand and attached to a release, and a release asset can be
-	// replaced by anybody who can write to the repository without a commit to
-	// show for it. This line cannot.
-	if got := fmt.Sprintf("%x", sha256.Sum256(pkg)); got != sunshinePackageSHA256 {
-		return fmt.Errorf("the sunshine package is not the one this version was built with: sha256 %s, want %s",
-			got, sunshinePackageSHA256)
+	if got := fmt.Sprintf("%x", sha256.Sum256(pkg)); got != sha {
+		return fmt.Errorf("the %s package is not the one this version was built with: sha256 %s, want %s",
+			name, got, sha)
 	}
 
-	const path = "/root/sunshine.pkg.tar.zst"
+	path := "/root/" + name + ".pkg.tar.zst"
 
 	if err := p.Client.PushFile(p.name(), path, pkg, 0o644, 0, 0); err != nil {
 		return err
@@ -928,6 +936,73 @@ func sunshinePackageURL() string {
 
 	return "https://github.com/superuser404notfound/Polyseat/releases/download/sunshine-" +
 		version + "/sunshine-" + version + "-x86_64.pkg.tar.zst"
+}
+
+// stepMangoHudShim installs MangoHud's OpenGL shim as a package of its own,
+// beside the distribution's MangoHud rather than over it. mangoHudPreload
+// points at it, and nothing else in the seat uses it.
+//
+// Since the Steam client of 2026-10-13, MangoHud 0.8.4's shim and Steam's
+// overlay cannot be preloaded together in that order, which is the order every
+// game Steam starts gets: the cap reaches Steam through polyseat-capped and
+// Steam appends gameoverlayrenderer.so. The overlay asks for the real dlopen
+// with dlsym(RTLD_NEXT), that call lands in the shim, and the shim resolves it
+// relative to itself, which hands the overlay its own dlopen. It then jumps
+// into itself forever, at 100 % of a core, before the first line of Steam's
+// launch script has run. Every game in every seat, native or Proton.
+//
+// MangoHud's master has a fix for it, 8bd15ed, and it is not one: lookups no
+// longer reach the overlay's own dlsym, which leaves its close() a no-op, so
+// any $(...) in a launch script waits forever for an end of file, and glxgears
+// with both preloaded segfaults. flightlessmango/MangoHud#2177. The patch in
+// packaging/mangohud-shim hands every name the shim does not hook on to the
+// next dlsym as a tail call instead, so RTLD_NEXT is resolved from the caller
+// and the overlay still sees the lookup.
+//
+// The version is MangoHud's release the shim is built from, and the build is
+// the package's pkgrel. Once a MangoHud release carries a fix that works beside
+// Steam's overlay, mangoHudPreload goes back to the distribution's shim and
+// this goes away.
+const (
+	MangoHudShimVersion = "0.8.4"
+	MangoHudShimBuild   = "1"
+)
+
+// mangoHudShimPackageSHA256 is the package named by MangoHudShimVersion and
+// MangoHudShimBuild, as packaging/mangohud-shim/build.sh printed it.
+const mangoHudShimPackageSHA256 = "753ef3315928a7fbfa63ccba4e59936331f9cd37693955d54231ba73d813053b"
+
+func mangoHudShimPackageURL() string {
+	version := MangoHudShimVersion + "-" + MangoHudShimBuild
+
+	return "https://github.com/superuser404notfound/Polyseat/releases/download/mangohud-shim-" +
+		version + "/polyseat-mangohud-shim-" + version + "-x86_64.pkg.tar.zst"
+}
+
+func (p *Provisioner) stepMangoHudShim(ctx context.Context) error {
+	installed, code, err := p.Client.Try(ctx, p.name(), "pacman", "-Q", "polyseat-mangohud-shim")
+	if err != nil {
+		return err
+	}
+
+	want := MangoHudShimVersion + "-" + MangoHudShimBuild
+
+	if code == 0 && mangoHudShimIsCurrent(installed) {
+		p.Log("mangohud shim %s already installed", want)
+
+		return nil
+	}
+
+	p.Log("installing mangohud shim %s", want)
+
+	return p.installOwnPackage(ctx, "polyseat-mangohud-shim", mangoHudShimPackageURL(), mangoHudShimPackageSHA256)
+}
+
+func mangoHudShimIsCurrent(out string) bool {
+	fields := strings.Fields(out)
+
+	return len(fields) == 2 && fields[0] == "polyseat-mangohud-shim" &&
+		fields[1] == MangoHudShimVersion+"-"+MangoHudShimBuild
 }
 
 // sunshineLatest is what LizardByte have published, for saying so and nothing

@@ -1161,7 +1161,12 @@ func launchTarget(launch string) string {
 // what a client picks, and polyseat-capped, which each game's own launcher entry
 // starts through, for what somebody picks on the desktop. The desktop itself deliberately has neither, because
 // MangoHud's shim kills applications that are not games. See polyseat-launcher.
-const mangoHudPreload = "/usr/$LIB/mangohud/libMangoHud_shim.so"
+//
+// The shim is Polyseat's own build, from stepMangoHudShim, because the
+// distribution's and Steam's overlay hang every game Steam starts when both are
+// preloaded. Its directory has a link to the distribution's
+// libMangoHud_opengl.so, which is where the shim looks for it.
+const mangoHudPreload = "/usr/$LIB/polyseat/mangohud/libMangoHud_shim.so"
 
 // cappedPath is where the seat keeps polyseat-capped, which every game entry
 // starts through. The value of mangoHudPreload is written out in that script as

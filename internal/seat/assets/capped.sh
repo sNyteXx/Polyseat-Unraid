@@ -39,8 +39,12 @@ fi
 export MANGOHUD=1
 
 # Single quotes, because the linker expands this and a shell must not.
+#
+# Polyseat's build of MangoHud's shim and not the distribution's: that one and
+# Steam's overlay together hang every game Steam starts. mangoHudPreload in
+# apps.go says why.
 # shellcheck disable=SC2016
-LD_PRELOAD='/usr/$LIB/mangohud/libMangoHud_shim.so'
+LD_PRELOAD='/usr/$LIB/polyseat/mangohud/libMangoHud_shim.so'
 export LD_PRELOAD
 
 exec "$@"

@@ -1,0 +1,53 @@
+diff --git a/src/gl/shim.c b/src/gl/shim.c
+index 3b039ef..0094abf 100644
+--- a/src/gl/shim.c
++++ b/src/gl/shim.c
+@@ -259,8 +259,48 @@ static void save_and_consume_real_dlerror()
+     memcpy(error_override, recent_error, error_length + 1);
+ }
+ 
++static void* find_hook(const char *name)
++{
++    if (!name)
++        return NULL;
++
++    for (unsigned i = 0; i < ARRAY_SIZE(hooks); i++)
++    {
++        if (!strcmp(hooks[i].name, name))
++            return hooks[i].ptr;
++    }
++
++    return NULL;
++}
++
++typedef void* (*dlsym_fn)(void*, const char*);
++static dlsym_fn next_dlsym = NULL;
++
++// The dlsym that comes after this one in the search order: another
++// interposer's, such as the one in Steam's gameoverlayrenderer.so, or libc's
++// when there is none.
++static dlsym_fn get_next_dlsym(void)
++{
++    if (!next_dlsym)
++    {
++        next_dlsym = (dlsym_fn)real_dlsym(RTLD_NEXT, "dlsym");
++        if (!next_dlsym)
++            next_dlsym = real_dlsym;
++    }
++    return next_dlsym;
++}
++
+ void* dlsym(void *handle, const char *name)
+ {
++    // A name this shim does not hook is not its business. Hand it on as a tail
++    // call, so the next dlsym sees our caller's return address, which is what
++    // RTLD_NEXT is resolved against, and so a later interposer still sees the
++    // lookup. Resolving it here with libc's dlsym made RTLD_NEXT relative to
++    // the shim: Steam's overlay then got its own dlopen back as the real one
++    // and jumped into itself forever.
++    if (!find_hook(name))
++        __attribute__((musttail)) return get_next_dlsym()(handle, name);
++
+     save_and_consume_real_dlerror();
+     // const char* dlsym_enabled = getenv("MANGOHUD_DLSYM");
+     const char* dlsym_RTLD_DEFAULT_env = getenv("MANGOHUD_DLSYM_RTLD_DEFAULT_FIX");

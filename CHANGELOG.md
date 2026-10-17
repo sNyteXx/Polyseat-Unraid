@@ -10,6 +10,36 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.40.0
+
+**No game started out of Steam any more, in any seat.** Steam showed it as
+running, nothing came up, and the launch held a core at 100 % until Steam was
+restarted. Native and Proton alike, found with Valheim and Dredge in vince and
+reproduced in joser. It came with the Steam client of 2026-10-13 and not with
+anything in Polyseat: the last game that started in vince did so that morning.
+
+The framerate cap reaches Steam through `polyseat-capped`, so MangoHud's OpenGL
+shim is preloaded into everything Steam starts, and Steam appends its overlay
+behind it. With the new overlay that pair hangs any program at all before
+`main`, `/bin/true` included. The overlay asks for the real `dlopen` with
+`dlsym(RTLD_NEXT)`, the shim answers that call from inside itself, and so hands
+the overlay its own `dlopen` back, which it then jumps into forever. MangoHud's
+master has a fix that trades this hang for another one, in every `$(...)` of a
+launch script, and a segfault under OpenGL (flightlessmango/MangoHud#2177).
+
+Seats now get the shim from a package of Polyseat's own, MangoHud 0.8.4's with
+one patch that hands every lookup it does not hook on to the next `dlsym`, and
+it installs beside the distribution's MangoHud rather than over it. OpenGL
+games keep their cap: glxgears with the overlay preloaded runs at the 30 fps it
+was capped to, Valheim native under OpenGL starts with MangoHud loaded, and
+Dredge starts under Proton. `packaging/mangohud-shim` has the measurements and
+how to build it.
+
+**Seats need provisioning again**, recipe generation 67: `polyseat-capped`
+points at the new shim, and the recipe installs it. Updating a seat's software
+installs the package too, but only provisioning rewrites the script that uses
+it.
+
 ## 0.39.0
 
 **A game can be uninstalled from every seat at once.** The library's button

@@ -1621,6 +1621,13 @@ of them being configured. Measured in a seat: 1519 fps uncapped, 58.3 with a
 60 fps client connected, and a game that was already respecting vsync loses
 nothing worth measuring.
 
+**The shim is Polyseat's own build** since 0.40.0, installed beside the
+distribution's MangoHud at `/usr/$LIB/polyseat/mangohud/`. MangoHud 0.8.4's shim
+and Steam's overlay hang every game Steam starts once both are preloaded, which
+since the Steam client of 2026-10-13 is every game in every seat;
+[packaging/mangohud-shim](../packaging/mangohud-shim/README.md) has the reason
+and the patch.
+
 **The cap is never taken off again.** Until 0.38.0 it was, when the client left,
 on the belief that MangoHud reads its file once at application start. It
 rereads it while a game runs. So the cap did reach a game started for an earlier
