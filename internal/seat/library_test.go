@@ -139,7 +139,15 @@ func TestIdleProbeNoticesEveryWayTheLibraryIsUsed(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		held(t, games, steam, exec.Command(binary, "30"))
+		// Started under the name it was copied from. Ubuntu 26.04 ships the
+		// Rust coreutils, where sleep is one binary for every utility that
+		// picks which one to be from argv[0]: run as "game" it exited at once,
+		// nothing was mapped for the probe to find, and CI failed here from
+		// the runner image of 2026-10-21 on with no change to the probe.
+		cmd := exec.Command(binary, "30")
+		cmd.Args[0] = "sleep"
+
+		held(t, games, steam, cmd)
 	})
 
 	// And back to idle once the holders are gone, or the first game anybody
