@@ -69,6 +69,13 @@ type LibraryStatus struct {
 	// them, see foldersetup.go. Always a list, never null.
 	Setups []FolderSetup `json:"setups"`
 
+	// HostFolders is the host's ~/Games/shared, or empty when it has none and
+	// so takes no part in the folders. Lutris lists the games of the host's
+	// own Lutris, so that one installed somewhere else can be moved in with a
+	// button. Both see lutrisshare.go; Lutris is always a list, never null.
+	HostFolders string           `json:"host_folders,omitempty"`
+	Lutris      []HostLutrisGame `json:"lutris"`
+
 	library.Inventory
 }
 
@@ -280,6 +287,14 @@ func (m *Manager) openLibrary() {
 	}
 
 	m.setups = setups
+
+	lutris, err := openLutrisShares(filepath.Join(m.cfg.StateDir, lutrisShareFile))
+	if err != nil {
+		m.log.Warn("the record of Lutris entries carried between members could not "+
+			"be read, so it starts over", "err", err)
+	}
+
+	m.lutris = lutris
 
 	m.log.Info("shared library ready", "dir", m.cfg.LibraryDir)
 }
@@ -541,6 +556,11 @@ func (m *Manager) syncLibrary(ctx context.Context) {
 	// asks nothing when nothing waits.
 	m.settleSoon()
 
+	// Likewise every pass, for the same reason, and cheap when nothing moved:
+	// it asks a member's Lutris only when a folder went somewhere or the
+	// host's Lutris changed. See lutrisshare.go.
+	m.lutrisAfter(report)
+
 	for _, problem := range report.Problems {
 		m.log.Warn("library", "problem", problem)
 	}
@@ -638,30 +658,41 @@ func (m *Manager) Library() LibraryStatus {
 	// Out of the list just built rather than by asking again, which is what
 	// this used to do: a second stat of the library and, back when the list
 	// carried the idle probe, a second walk over /proc for a path.
-	var receiving string
+	var receiving, folders string
 
 	for _, member := range members {
 		if member.Name == hostMember {
-			receiving = member.Apps
+			receiving, folders = member.Apps, member.Folders
 		}
 	}
 
 	return LibraryStatus{
-		Available:  true,
-		Root:       m.pool.Root(),
-		Candidates: steamLibraries(m.pool.Root(), sources),
-		Sources:    sources,
-		Receiving:  receiving,
-		Outside:    m.outside(),
-		Setups:     m.folderSetupsWaiting(),
-		Inventory:  inv,
+		Available:   true,
+		Root:        m.pool.Root(),
+		Candidates:  steamLibraries(m.pool.Root(), sources),
+		Sources:     sources,
+		Receiving:   receiving,
+		Outside:     m.outside(),
+		Setups:      m.folderSetupsWaiting(),
+		HostFolders: folders,
+		Lutris:      m.hostLutrisGames(),
+		Inventory:   inv,
 	}
 }
 
 // SyncLibrary runs a pass now rather than waiting for the timer.
+//
+// It also has every member's Lutris read again. The timer only does that when
+// a folder moved, so an entry somebody added by hand for a folder that was
+// already there waits for this button; a scan reads a database and a few
+// files, and a press is a moment somebody chose, not one more thing on a timer.
 func (m *Manager) SyncLibrary(ctx context.Context) error {
 	if m.pool == nil {
 		return fmt.Errorf("%w: %s", ErrNoLibrary, m.libraryErr)
+	}
+
+	if m.lutris != nil {
+		m.lutris.markAll()
 	}
 
 	m.syncLibrary(ctx)
@@ -758,9 +789,21 @@ func (m *Manager) UninstallEverywhere(appID string) error {
 		return err
 	}
 
-	// A folder that leaves the pool takes its approval with it, see forget.
-	if name, ok := library.FolderName(appID); ok && m.setups != nil {
-		return m.setups.forget(name)
+	// A folder that leaves the pool takes its approval with it, see forget,
+	// and the way to start it: the entries written for it are taken back by
+	// the next Lutris round, which finds the folder gone.
+	if name, ok := library.FolderName(appID); ok {
+		if m.lutris != nil {
+			if err := m.lutris.forgetRecipe(name); err != nil {
+				m.log.Warn("the record of carried Lutris entries could not be written", "err", err)
+			}
+
+			m.lutrisSoon()
+		}
+
+		if m.setups != nil {
+			return m.setups.forget(name)
+		}
 	}
 
 	return nil

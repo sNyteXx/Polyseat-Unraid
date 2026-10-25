@@ -87,11 +87,11 @@ var probeHost = hostIdle
 // hostSharedDir is where the host keeps the launcher agnostic folders, below
 // the home of whoever owns the library the pool gives games to.
 //
-// The same shape a seat has, deliberately. A seat's Lutris is built with
-// game_path at /home/player/games and its shared folders are the shared/
-// beneath that, so the host reads ~/Games/shared and its Lutris wants game_path
-// at ~/Games. That is also Lutris's own default on a fresh install, which means
-// the ordinary way of installing a game is already the right one.
+// The same shape a seat has, deliberately: a seat's folders are the shared/
+// below its games directory, and so are the host's, below ~/Games. A seat's
+// Lutris is built with game_path pointing into shared/; the host's keeps its
+// own default of ~/Games, one level above, which is why the Library section
+// offers to move a host Lutris game in, see lutrisshare.go.
 const hostSharedDir = "Games/shared"
 
 // hostFolders is the host's side of the launcher agnostic pool, or empty when

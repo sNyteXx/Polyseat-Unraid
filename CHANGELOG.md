@@ -10,6 +10,34 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## Unreleased
+
+**A game installed through Lutris now turns up in every seat's Lutris**, and
+from there in Moonlight and the app grid. The pool always carried the folder,
+but the Lutris entry stayed behind on the machine that installed it, so the
+other seats had the files and nothing that started them unless the folder
+brought a `polyseat-setup.sh`. The daemon now reads the entry where the game
+was installed and writes one in every member the folder reaches, as that
+member's own person, pointing at its own copy and naming its own Proton build
+(the host's `Proton-CachyOS Latest` is a seat's `proton-cachyos`). Only the
+program, prefix, working directory, arguments, architecture and build travel;
+launch hooks and environment do not, and every path is held inside the folder.
+An entry the daemon wrote goes again when its folder does. Folders with a
+`polyseat-setup.sh` are left to it, so Viva Pinata is unchanged.
+
+**The host's Lutris games can be shared with a button.** Lutris installs to
+`~/Games` by default, one level above `~/Games/shared`, and a game unpacked by
+hand lands there too. The Library section lists them, and Share moves one into
+`~/Games/shared` on the same disk and points the host's entry at the new place.
+Refused while the game is running, and never offered for `~/Games/umu`.
+
+None of it is on a timer. Lutris is read after a folder moved, at startup,
+when the host's Lutris changed, and on Sync now, which also picks up an entry
+added by hand; the read does not start Lutris and takes about 60 ms in a seat.
+
+No provisioning needed: the helper is handed to the seat with every call, and
+it uses the Python and PyYAML that Lutris already brings.
+
 ## 0.40.0
 
 **No game started out of Steam any more, in any seat.** Steam showed it as

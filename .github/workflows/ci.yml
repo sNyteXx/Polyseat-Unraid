@@ -46,7 +46,9 @@ jobs:
       # skips its icon tests (librsvg), its box art tests (Pillow) and every one
       # of its gamepad pointer tests (evdev, which the helper imports at the
       # top). The first run of this workflow skipped seventeen tests, and that
-      # is how these three were found rather than guessed at.
+      # is how these three were found rather than guessed at. PyYAML is the
+      # fourth: the helper that carries Lutris entries between members reads
+      # and writes Lutris's YAML, and its tests skip without it.
       #
       # The bridge is a real one by the name the network tests look for. They
       # ask sysfs whether an interface is a bridge, which is a question only a
@@ -55,7 +57,7 @@ jobs:
       - name: A filesystem that can share blocks, and the helpers the tests use
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq btrfs-progs librsvg2-bin python3-pil python3-evdev
+          sudo apt-get install -y -qq btrfs-progs librsvg2-bin python3-pil python3-evdev python3-yaml
           truncate -s 512M /tmp/reflink.img
           mkfs.btrfs -q /tmp/reflink.img
           sudo mkdir -p /mnt/reflink

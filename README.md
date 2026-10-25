@@ -274,8 +274,11 @@ link somebody else could have put in its way.
 
 **Launchers other than Steam work too.** Each seat has a `shared/` directory
 where one folder is one game, and a seat's Lutris already installs there, so a
-game installed the ordinary way appears in the other seats by itself. Heroic and
-Bottles get there by pointing them at the same directory. A folder can bring a
+game installed the ordinary way appears in the other seats by itself, and in
+their Lutris too: the daemon writes the entry there from the one the game was
+installed with. On the host, the Library section lists Lutris's games and
+moves one into `~/Games/shared` with a button. Heroic and Bottles get there by
+pointing them at the same directory. A folder can bring a
 `polyseat-setup.sh` that registers the game wherever it arrives, and that
 script runs only once somebody has read it and allowed it in the Library section
 of the interface, because any seat can put a folder in the pool and the script

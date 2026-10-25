@@ -340,7 +340,7 @@ func TestRunBoundedEndsEverything(t *testing.T) {
 
 			start := time.Now()
 
-			_, err := runBounded(ctx, dir, script, []string{"PATH=" + os.Getenv("PATH")}, nil)
+			_, err := runBounded(ctx, dir, []string{script}, []string{"PATH=" + os.Getenv("PATH")}, nil)
 			if err == nil {
 				t.Error("a run that was ended reported success")
 			}

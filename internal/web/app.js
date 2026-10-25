@@ -992,6 +992,7 @@ function renderLibrary() {
         // Worth the most here of anywhere: an empty pool on a machine that has
         // a Steam library full of games is exactly the state this is for.
         ...watching(library),
+        ...lutrisSharing(library),
         aside,
       ].filter(Boolean),
     );
@@ -1023,8 +1024,98 @@ function renderLibrary() {
     "seat can only play what its own Steam account owns.";
 
   body.replaceChildren(
-    ...[...setupsWaiting(library), table, note, ...watching(library), aside].filter(Boolean),
+    ...[
+      ...setupsWaiting(library),
+      table,
+      note,
+      ...watching(library),
+      ...lutrisSharing(library),
+      aside,
+    ].filter(Boolean),
   );
+}
+
+// The games in the host's own Lutris, and which of them are on their way to
+// the seats.
+//
+// A game is shared by where its files are: below ~/Games/shared it goes into
+// the pool, and every seat it reaches gets an entry in its own Lutris. One
+// installed or unpacked anywhere else stays on this host until it is moved,
+// which is what the button does. Asked per game rather than done for every
+// game, because a launcher like the EA App keeps its sign in inside its folder
+// and would carry it into every seat.
+function lutrisSharing(pool) {
+  const games = pool.lutris || [];
+  if (games.length === 0) return [];
+
+  const out = [];
+
+  out.push(
+    Object.assign(document.createElement("p"), {
+      className: "hint",
+      textContent: pool.host_folders
+        ? "Lutris on this host. A game in " +
+          pool.host_folders +
+          " reaches every seat and appears in its Lutris by itself; Share " +
+          "moves one there, on the same disk, without copying it."
+        : "Lutris on this host. Its games stay here until ~/Games/shared " +
+          "exists: create it, and each game can be moved there to reach the " +
+          "seats.",
+    }),
+  );
+
+  const list = document.createElement("ul");
+  list.className = "devices";
+
+  games.forEach((game) => {
+    const row = document.createElement("li");
+
+    row.append(
+      Object.assign(document.createElement("span"), { textContent: game.name }),
+    );
+
+    if (game.shared) {
+      row.append(
+        Object.assign(document.createElement("span"), {
+          className: "badge",
+          textContent: "shared",
+          title: "In " + game.folder + ", so it goes to every seat.",
+        }),
+      );
+    } else if (game.problem) {
+      row.append(
+        Object.assign(document.createElement("small"), {
+          textContent: "cannot be shared: " + game.problem,
+        }),
+      );
+    } else if (pool.host_folders) {
+      const share = document.createElement("button");
+      share.className = "quiet tiny";
+      share.textContent = "Share";
+      share.title = "Moves " + game.folder + " into " + pool.host_folders + ".";
+      share.onclick = () => {
+        if (
+          !confirm(
+            `Move ${game.folder} into ${pool.host_folders}?\n\n` +
+              `Lutris here is pointed at the new place. The game then goes ` +
+              `to every seat in the pool and is added to its Lutris there. ` +
+              `Whatever it keeps in its own folder goes with it.`,
+          )
+        ) {
+          return;
+        }
+
+        run(() => api("POST", apiPath`/api/library/lutris/${game.slug}/share`));
+      };
+      row.append(share);
+    }
+
+    list.append(row);
+  });
+
+  out.push(list);
+
+  return out;
 }
 
 // The setup scripts shared folders carry, waiting for somebody to allow them.

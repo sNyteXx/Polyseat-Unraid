@@ -33,8 +33,11 @@ import (
 // it, and neither can be copied between machines - a host install names a
 // runner under ~/.local/share/lutris/runners that no seat has.
 //
-// So the folder registers itself, in whatever it has arrived in, and this runs
-// it. That is not a manifest: the daemon reads nothing out of the script and
+// For a game Lutris installed, the daemon now carries the entry itself, see
+// lutrisshare.go, and leaves a folder with a script to the script. That covers
+// the ordinary case; the script remains for a game that needs more than an
+// entry, a prefix built or DLLs put in place. The folder registers itself, in
+// whatever it has arrived in, and this runs it. That is not a manifest: the daemon reads nothing out of the script and
 // has no opinion about what is in it. It is the same bargain the rest of this
 // side makes, that a directory is the unit and what is inside it is its own
 // business.
@@ -704,7 +707,7 @@ func runSetupOnHost(ctx context.Context, dir, name string, owner library.Owner) 
 		"XDG_RUNTIME_DIR=/run/user/" + strconv.Itoa(owner.UID),
 	}
 
-	return runBounded(ctx, work, filepath.Join(work, folderSetup), env, &syscall.Credential{
+	return runBounded(ctx, work, []string{filepath.Join(work, folderSetup)}, env, &syscall.Credential{
 		Uid: uint32(owner.UID),
 		Gid: uint32(owner.GID),
 	})
@@ -725,8 +728,8 @@ const setupTail = 8 << 10
 // the group on its way.
 //
 // cred is nil only in a test, which cannot change user.
-func runBounded(ctx context.Context, dir, program string, env []string, cred *syscall.Credential) (string, error) {
-	cmd := exec.CommandContext(ctx, program)
+func runBounded(ctx context.Context, dir string, argv []string, env []string, cred *syscall.Credential) (string, error) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = env
 

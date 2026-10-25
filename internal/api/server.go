@@ -205,6 +205,7 @@ func New(manager *seat.Manager, credentials *auth.Store, updates *update.Checker
 	guarded.HandleFunc("DELETE /api/library/{appid}", s.removeTitle)
 	guarded.HandleFunc("POST /api/library/{appid}/offer/{seat}", s.offerTitle)
 	guarded.HandleFunc("POST /api/library/setups/{folder}", s.allowFolderSetup)
+	guarded.HandleFunc("POST /api/library/lutris/{slug}/share", s.shareLutrisGame)
 	guarded.HandleFunc("POST /api/seats/{name}/{action}", s.seatAction)
 
 	mux.Handle("/api/", s.requireSession(guarded))
@@ -1533,6 +1534,10 @@ func (s *Server) libraryStatus() seat.LibraryStatus {
 		status.Setups = []seat.FolderSetup{}
 	}
 
+	if status.Lutris == nil {
+		status.Lutris = []seat.HostLutrisGame{}
+	}
+
 	for i, title := range status.Titles {
 		if title.In == nil {
 			status.Titles[i].In = []string{}
@@ -1688,6 +1693,18 @@ func (s *Server) allowFolderSetup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		fail(w, statusFor(err), err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, s.libraryStatus())
+}
+
+// shareLutrisGame moves one game of the host's own Lutris into ~/Games/shared,
+// which is what puts it in the pool and from there in every seat's Lutris.
+func (s *Server) shareLutrisGame(w http.ResponseWriter, r *http.Request) {
+	if err := s.manager.ShareHostLutrisGame(r.Context(), r.PathValue("slug")); err != nil {
 		fail(w, statusFor(err), err)
 
 		return

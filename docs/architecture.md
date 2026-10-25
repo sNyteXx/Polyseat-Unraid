@@ -609,21 +609,70 @@ library the pool gives Steam titles to. It is read when it exists and not
 otherwise, so making the directory is what switches the host on and removing it
 is what switches it off; the daemon never creates it, for the same reason it
 never creates anything else in somebody's own library. The shape matches a seat
-on purpose: a seat's Lutris has `game_path` at `/home/player/games` with
-`shared/` beneath it, so the host's wants `~/Games`, which is where Lutris
-installs by default anyway. Both have to be real directories, not links to
-somewhere else, for the reason in "Library pool" above. A library owned by root
+on purpose: a seat's Lutris has `game_path` at `/home/player/games/shared`, so
+whatever it installs lands in the pool, and the host's equivalent is
+`~/Games/shared` below `~/Games`, which is where Lutris installs by default. The
+default puts a game one level too high on the host, and so does unpacking one
+by hand next to the others; see the Share button below. Both have to be real
+directories, not links to somewhere else, for the reason in "Library pool"
+above. A library owned by root
 or a system account, below uid 1000, takes no part in the folders at all: the
 search for a host library includes `/root`, and what arrives here is meant for a
 person's own Lutris.
 
-What travels is the directory, and only the directory. A Lutris installation is
-a folder plus a row in that machine's `pga.db` plus a YAML under
-`~/.config/lutris/games/`, and the last two are per machine and per user; they
-are not replicated and could not sensibly be, since the runner a host install
-names lives under `~/.local/share/lutris/runners` and a seat has no such path.
-So a game installed on the host arrives in every seat as files that nothing in
-that seat's Lutris knows about. Registering it there is the folder's own job.
+What travels is the directory. A Lutris installation is a folder plus a row in
+that machine's `pga.db` plus a YAML under `~/.config/lutris/games/`, and the
+last two are per machine and per user. Until 0.41 they did not travel at all,
+so a game installed on the host arrived in every seat as files that nothing in
+that seat's Lutris knew about, and registering it was the folder's own job.
+
+**The daemon now carries the entry instead**, see `lutrisshare.go`. After a
+pass in which a folder moved, at startup, when the host's Lutris changed, and
+when somebody presses Sync now, and at no other time, it reads every running member's Lutris with a
+small helper run as that member's person (the player in a seat, the library's
+owner on the host, never root), and keeps a recipe per folder from the first
+member whose own entry points into it: name, slug, runner, the program
+relative to the folder, prefix and working directory if they are inside it,
+arguments, architecture and the Wine or Proton build. Wherever the folder has
+arrived and nothing in that Lutris points into it, an entry is written from the
+recipe, named `<slug>-polyseat`, with every path pointing into that member's
+own copy. A build name is translated when the receiver has it under another
+name, which it does: the host calls Proton CachyOS `Proton-CachyOS Latest` and
+a seat `proton-cachyos`. Where nothing of that kind exists, the entry names no
+build and Lutris uses its default.
+
+The recipe is a short list on purpose. Lutris also has commands it runs around
+a launch and an environment it gives the game, and neither travels, because a
+folder can come from any seat and the entry is one somebody else will start.
+The paths are checked to stay inside the folder, so an entry can start the
+folder's own files and nothing else, which is what a Steam title from the pool
+does too. Writing an entry runs nothing, and that is why it needs no approval
+where `polyseat-setup.sh` does. A prefix outside the folder, `umu-default` for
+a game added by hand, is not carried: the receiver gets its own, which keeps
+the saves in the seat.
+
+There is no Lutris timer, on purpose. The minute pass looks at two files on the
+host with `stat` and asks nothing of a seat. The scan itself does not start
+Lutris, which is what the minute stutter of 0.13.1 was, but reads `pga.db` and
+the YAML with Python: 57 to 65 ms in a seat and 23 to 28 ms on the host,
+measured on 2026-10-25. An entry added by hand in a seat for a folder already
+there is therefore only noticed on the next folder that moves, or on Sync now.
+
+An entry is written once. One the player removes stays removed, a slug the
+member already uses for something else is left alone, and an entry the daemon
+wrote is taken back when its folder is gone from that member, by an uninstall
+from every seat or by hand. A folder that carries a `polyseat-setup.sh` is left
+to the script, which writes its own.
+
+**On the host, sharing a Lutris game is a button.** The Library section lists
+the host's Lutris games: shared, shareable, or why not. Share renames the
+game's directory from `~/Games/<name>` into `~/Games/shared/<name>`, on one
+filesystem and never as a copy, rewrites every path in the host's own entries
+that pointed at the old place, and runs a pass. It refuses while anything on
+the host has the files open, and it never moves `~/Games/umu`, where every
+Proton game without a prefix of its own keeps one. Per game rather than for
+everything below `~/Games`, because a launcher like the EA App keeps its
+sign-in inside its folder and would carry it into every seat.
 
 **A folder may carry `polyseat-setup.sh`**, and once somebody has allowed it the
 daemon runs it wherever that folder has been delivered: inside the container as
