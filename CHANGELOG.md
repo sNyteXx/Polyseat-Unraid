@@ -10,6 +10,15 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.41.1
+
+**0.41.0 did not start.** The route behind the new Share button overlapped
+with the one that offers a title to a seat, and Go's router refuses such a pair
+when it is registered, so the daemon panicked before it served anything and
+the web interface never came up. The route has its own path now, and a test
+builds the whole router so a clash like it fails there and not on a host.
+Nothing else changed, and no seat needs building again.
+
 ## 0.41.0
 
 **A game installed through Lutris now turns up in every seat's Lutris**, and
