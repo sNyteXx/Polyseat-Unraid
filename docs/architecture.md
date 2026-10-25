@@ -622,7 +622,7 @@ person's own Lutris.
 
 What travels is the directory. A Lutris installation is a folder plus a row in
 that machine's `pga.db` plus a YAML under `~/.config/lutris/games/`, and the
-last two are per machine and per user. Until 0.41 they did not travel at all,
+last two are per machine and per user. Until 0.41.0 they did not travel at all,
 so a game installed on the host arrived in every seat as files that nothing in
 that seat's Lutris knew about, and registering it was the folder's own job.
 

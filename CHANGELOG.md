@@ -10,7 +10,7 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
-## Unreleased
+## 0.41.0
 
 **A game installed through Lutris now turns up in every seat's Lutris**, and
 from there in Moonlight and the app grid. The pool always carried the folder,
