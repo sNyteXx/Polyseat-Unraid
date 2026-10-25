@@ -1,7 +1,7 @@
 # Maintainer: rooky <superuser404@tuta.com>
 
 pkgname=polyseat
-pkgver=0.41.0
+pkgver=0.41.1
 pkgrel=1
 pkgdesc="Several people playing on one Linux PC at once, each in an isolated seat streamed to their own Moonlight client"
 arch=('x86_64')
@@ -48,7 +48,7 @@ optdepends=(
 install=polyseat.install
 
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('a1a041d32762f819c7eb37e8f3c671bcc55c8f7d254e965ad848c7cbc85ff683')
+sha256sums=('f2c6f6883ad3f8aeac3c8bc288a11357e48dea2f3ff5ba40c218dac82638e9c3')
 
 _src="Polyseat-$pkgver"
 
