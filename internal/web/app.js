@@ -1105,7 +1105,7 @@ function lutrisSharing(pool) {
           return;
         }
 
-        run(() => api("POST", apiPath`/api/library/lutris/${game.slug}/share`));
+        run(() => api("POST", apiPath`/api/library/share/${game.slug}`));
       };
       row.append(share);
     }

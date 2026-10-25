@@ -205,7 +205,7 @@ func New(manager *seat.Manager, credentials *auth.Store, updates *update.Checker
 	guarded.HandleFunc("DELETE /api/library/{appid}", s.removeTitle)
 	guarded.HandleFunc("POST /api/library/{appid}/offer/{seat}", s.offerTitle)
 	guarded.HandleFunc("POST /api/library/setups/{folder}", s.allowFolderSetup)
-	guarded.HandleFunc("POST /api/library/lutris/{slug}/share", s.shareLutrisGame)
+	guarded.HandleFunc("POST /api/library/share/{slug}", s.shareLutrisGame)
 	guarded.HandleFunc("POST /api/seats/{name}/{action}", s.seatAction)
 
 	mux.Handle("/api/", s.requireSession(guarded))
