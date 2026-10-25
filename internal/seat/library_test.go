@@ -81,6 +81,17 @@ func held(t *testing.T, games, steam string, cmd *exec.Cmd) {
 	t.Fatal("the probe never noticed the process using the library, so an update would have replaced the files underneath it")
 }
 
+// TestHelperWaits is not a test. It is what the mapped executable case starts
+// a copy of this binary as, and only waits when asked to.
+func TestHelperWaits(t *testing.T) {
+	wait, err := time.ParseDuration(os.Getenv("POLYSEAT_TEST_WAIT"))
+	if err != nil {
+		return
+	}
+
+	time.Sleep(wait)
+}
+
 // The probe decides whether a seat's copy of a game may be replaced while the
 // seat is running. Getting it wrong in this direction corrupts an install, so
 // each of the three ways a file can be in use is checked separately: they are
@@ -124,9 +135,16 @@ func TestIdleProbeNoticesEveryWayTheLibraryIsUsed(t *testing.T) {
 	t.Run("a mapped executable", func(t *testing.T) {
 		// A running game is found by its maps rather than by an open
 		// descriptor, because an executable is mapped and then closed.
-		src, err := exec.LookPath("sleep")
+		//
+		// The program mapped is a copy of this test binary, told to do nothing
+		// but wait. It used to be a copy of sleep, until the CI runner moved
+		// to Ubuntu 26.04: its Rust coreutils are one binary for every utility
+		// that decides which one to be from the path it was run as, so the
+		// copy, run as "game", printed "unknown program" and exited before
+		// the probe could see it mapped. argv[0] does not change that.
+		src, err := os.Executable()
 		if err != nil {
-			t.Skip("no sleep to copy")
+			t.Skip("this test binary cannot find itself to copy")
 		}
 
 		body, err := os.ReadFile(src)
@@ -139,13 +157,8 @@ func TestIdleProbeNoticesEveryWayTheLibraryIsUsed(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Started under the name it was copied from. Ubuntu 26.04 ships the
-		// Rust coreutils, where sleep is one binary for every utility that
-		// picks which one to be from argv[0]: run as "game" it exited at once,
-		// nothing was mapped for the probe to find, and CI failed here from
-		// the runner image of 2026-10-21 on with no change to the probe.
-		cmd := exec.Command(binary, "30")
-		cmd.Args[0] = "sleep"
+		cmd := exec.Command(binary, "-test.run=^TestHelperWaits$")
+		cmd.Env = append(os.Environ(), "POLYSEAT_TEST_WAIT=30s")
 
 		held(t, games, steam, cmd)
 	})
