@@ -760,7 +760,10 @@ func (m *Manager) UnwatchLibrary(steamapps string) error {
 //
 // The members are probed the way a pass probes them, so a seat counts as busy
 // exactly when it would not take an update either.
-func (m *Manager) UninstallEverywhere(appID string) error {
+//
+// closeHost allows closing the host's Steam for it, see quietSteams. Without
+// it a running Steam on the host keeps the title until it restarts.
+func (m *Manager) UninstallEverywhere(appID string, closeHost bool) error {
 	if m.pool == nil {
 		return fmt.Errorf("%w: %s", ErrNoLibrary, m.libraryErr)
 	}
@@ -768,7 +771,12 @@ func (m *Manager) UninstallEverywhere(appID string) error {
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
 
-	gone, err := m.pool.Uninstall(appID, m.members(true), func(f string, a ...any) {
+	members := m.members(true)
+
+	resume := m.quietSteams(appID, members, closeHost)
+	defer resume()
+
+	gone, err := m.pool.Uninstall(appID, members, func(f string, a ...any) {
 		m.log.Info("library: " + fmt.Sprintf(f, a...))
 	})
 
@@ -805,6 +813,117 @@ func (m *Manager) UninstallEverywhere(appID string) error {
 			return m.setups.forget(name)
 		}
 	}
+
+	return nil
+}
+
+// quietSteams closes the Steams that hold a title about to be uninstalled, and
+// answers with what starts them again afterwards.
+//
+// A Steam reads its library when it starts and not again. Files deleted under
+// a running one leave it holding the title as installed, and its next update
+// finds them missing and downloads the whole game again: 56 GB on the host the
+// day after an uninstall, which the pool then handed back to every seat. So
+// each Steam is closed before its copy goes and started after, and comes up
+// reading a library without it.
+//
+// A seat's only when nobody is streaming from it, the same question
+// provisioning asks before it closes one, and the host's only when somebody
+// said yes to it. One that stays open is written into the log; the pool
+// withholds what it downloads, so the cost is that seat's disk, not every
+// seat's.
+func (m *Manager) quietSteams(appID string, members []library.Member, closeHost bool) func() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+
+	var (
+		closed  []*Provisioner
+		hostUID = -1
+	)
+
+	holders, title := m.pool.Holders(appID, members)
+
+	for _, name := range holders {
+		if name == hostMember {
+			for _, member := range members {
+				if member.Name != hostMember || !hostSteamRunning(member.Owner.UID) {
+					continue
+				}
+
+				switch {
+				case !closeHost:
+					m.moved(hostMember, "Steam on the host is running and was left open, "+
+						"it lists %s as installed until it restarts", title)
+				case closeHostSteam(ctx, member.Owner.UID):
+					hostUID = member.Owner.UID
+				default:
+					m.moved(hostMember, "Steam on the host did not close, "+
+						"it lists %s as installed until it restarts", title)
+				}
+			}
+
+			continue
+		}
+
+		s, err := m.store.Get(name)
+		if err != nil {
+			continue
+		}
+
+		if status, err := m.client.Status(name); err != nil || status != "Running" {
+			continue
+		}
+
+		p := &Provisioner{
+			Client:  m.client,
+			Seat:    s,
+			Image:   m.cfg.Image,
+			Library: m.pool,
+			Log:     func(f string, a ...any) { m.logf(s.Name, f, a...) },
+			uid:     s.PlayerUID,
+		}
+
+		quiet, err := p.steamQuiet(ctx)
+
+		switch {
+		case err != nil || !quiet:
+			m.logf(name, "Steam here stays open and lists %s as installed until it "+
+				"restarts; restart it, or its next update downloads the game again", title)
+		case p.closedSteam:
+			closed = append(closed, p)
+		}
+	}
+
+	return func() {
+		cancel()
+
+		for _, p := range closed {
+			p.ResumeSteam(context.Background())
+		}
+
+		if hostUID >= 0 {
+			if err := startHostSteam(hostUID); err != nil {
+				m.log.Warn("Steam on the host could not be started again", "err", err)
+			}
+		}
+	}
+}
+
+// ReadmitTitle lets a title withheld since its uninstall into the pool again,
+// and runs a pass so it reaches the seats now.
+func (m *Manager) ReadmitTitle(ctx context.Context, appID string) error {
+	if m.pool == nil {
+		return fmt.Errorf("%w: %s", ErrNoLibrary, m.libraryErr)
+	}
+
+	m.syncMu.Lock()
+	err := m.pool.Readmit(appID)
+	m.syncMu.Unlock()
+
+	if err != nil {
+		return err
+	}
+
+	m.syncLibrary(ctx)
 
 	return nil
 }

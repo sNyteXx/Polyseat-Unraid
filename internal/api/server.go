@@ -204,6 +204,7 @@ func New(manager *seat.Manager, credentials *auth.Store, updates *update.Checker
 	guarded.HandleFunc("POST /api/library/unwatch", s.unwatchLibrary)
 	guarded.HandleFunc("DELETE /api/library/{appid}", s.removeTitle)
 	guarded.HandleFunc("POST /api/library/{appid}/offer/{seat}", s.offerTitle)
+	guarded.HandleFunc("POST /api/library/readmit/{appid}", s.readmitTitle)
 	guarded.HandleFunc("POST /api/library/setups/{folder}", s.allowFolderSetup)
 	guarded.HandleFunc("POST /api/library/share/{slug}", s.shareLutrisGame)
 	guarded.HandleFunc("POST /api/seats/{name}/{action}", s.seatAction)
@@ -1538,6 +1539,10 @@ func (s *Server) libraryStatus() seat.LibraryStatus {
 		status.Lutris = []seat.HostLutrisGame{}
 	}
 
+	if status.Withheld == nil {
+		status.Withheld = []library.Title{}
+	}
+
 	for i, title := range status.Titles {
 		if title.In == nil {
 			status.Titles[i].In = []string{}
@@ -1645,8 +1650,23 @@ func (s *Server) unwatchLibrary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.libraryStatus())
 }
 
+// removeTitle uninstalls a title everywhere. ?host_steam=close is the
+// interface's way of saying that somebody agreed to Steam on the host being
+// closed for it and started again.
 func (s *Server) removeTitle(w http.ResponseWriter, r *http.Request) {
-	if err := s.manager.UninstallEverywhere(r.PathValue("appid")); err != nil {
+	closeHost := r.URL.Query().Get("host_steam") == "close"
+
+	if err := s.manager.UninstallEverywhere(r.PathValue("appid"), closeHost); err != nil {
+		fail(w, statusFor(err), err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, s.libraryStatus())
+}
+
+func (s *Server) readmitTitle(w http.ResponseWriter, r *http.Request) {
+	if err := s.manager.ReadmitTitle(r.Context(), r.PathValue("appid")); err != nil {
 		fail(w, statusFor(err), err)
 
 		return

@@ -160,6 +160,20 @@ type state struct {
 	// in here is still offered as a candidate in the interface, since the point
 	// is to stop the daemon deciding, not to stop the person deciding again.
 	Unwatched []string `json:"unwatched,omitempty"`
+
+	// Withheld are Steam titles somebody uninstalled everywhere, by app id,
+	// with the name to show them by. No library hands one of these to the
+	// pool again until somebody says so.
+	//
+	// Because a Steam that was running when its copy was deleted never noticed:
+	// it reads its library once, at start, and until it restarts it holds the
+	// title as installed. The next update then finds every file missing and
+	// downloads the whole game again, and the pool took that for somebody
+	// installing it and gave it straight back to every seat. Measured on
+	// 2026-10-27, 56 GB the day after an uninstall. A copy that comes back is
+	// therefore left where it is and listed, and Readmit is the way back for a
+	// game somebody really did install again.
+	Withheld map[string]string `json:"withheld,omitempty"`
 }
 
 const (
@@ -610,6 +624,10 @@ func (p *Pool) harvestFrom(steamapps *os.File, apps []App, from string, owner Ow
 		}
 
 		if !settled(app, p.Settle) {
+			continue
+		}
+
+		if _, held := p.state.Withheld[app.AppID]; held {
 			continue
 		}
 
@@ -1313,12 +1331,80 @@ func (p *Pool) Uninstall(appID string, members []Member, log Logger) ([]Move, er
 
 	// Every mark goes, declined ones included. A declined title stays declined
 	// even once the seat has it again, so a mark left here would keep a game
-	// somebody installs afresh later from ever being shared.
+	// somebody installs afresh later from ever being shared once it is
+	// readmitted.
 	for _, seat := range p.state.Delivered {
 		delete(seat, appID)
 	}
 
+	// Folders are not withheld. Nothing puts a deleted folder back by itself,
+	// so one that turns up again was put there by somebody.
+	//
+	// A title still named by its id was found nowhere, and is not worth a
+	// record of its own; one already withheld keeps the name it had.
+	if _, held := p.state.Withheld[appID]; !folder && title != name && !held {
+		if p.state.Withheld == nil {
+			p.state.Withheld = map[string]string{}
+		}
+
+		p.state.Withheld[appID] = title
+	}
+
 	return gone, p.save()
+}
+
+// Holders names the members that have a Steam title installed, which is where
+// a Steam has to be told before the title is taken away under it, and the
+// title's name as the first of them has it.
+func (p *Pool) Holders(appID string, members []Member) ([]string, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if _, folder := FolderName(appID); folder || safeName(ManifestName(appID)) != nil {
+		return nil, appID
+	}
+
+	var (
+		out   []string
+		title = appID
+	)
+
+	for _, m := range members {
+		dir, err := p.appsDir(m)
+		if err != nil {
+			continue
+		}
+
+		app, err := readAppAt(dir, ManifestName(appID))
+		dir.Close()
+
+		if err != nil {
+			continue
+		}
+
+		if len(out) == 0 && app.Name != "" {
+			title = app.Name
+		}
+
+		out = append(out, m.Name)
+	}
+
+	return out, title
+}
+
+// Readmit lets a withheld title into the pool again, from whichever library
+// has it, on the next pass.
+func (p *Pool) Readmit(appID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if _, held := p.state.Withheld[appID]; !held {
+		return fmt.Errorf("%s: %w", appID, os.ErrNotExist)
+	}
+
+	delete(p.state.Withheld, appID)
+
+	return p.save()
 }
 
 // dropApp removes one member's copy of a Steam title. The manifest goes first,
@@ -1433,6 +1519,11 @@ type Inventory struct {
 	// whether any of this was worth building.
 	Bytes int64 `json:"bytes"`
 	Saved int64 `json:"saved"`
+
+	// Withheld are titles uninstalled everywhere that some member has again,
+	// with In naming who. Listed so that a game somebody installed again can be
+	// let back in, and one a Steam downloaded again by itself can be seen.
+	Withheld []Title `json:"withheld"`
 }
 
 // Inventory reads the pool and every seat.
@@ -1563,6 +1654,26 @@ func (p *Pool) Inventory(members []Member) (Inventory, error) {
 	}
 
 	sort.Slice(inv.Titles, func(i, j int) bool { return inv.Titles[i].Name < inv.Titles[j].Name })
+
+	for appID, name := range p.state.Withheld {
+		title := Title{Kind: "steam", AppID: appID, Name: name}
+
+		for _, m := range members {
+			if _, present := seatApps[m.Name][appID]; present {
+				title.In = append(title.In, m.Name)
+			}
+		}
+
+		if len(title.In) == 0 {
+			continue
+		}
+
+		sort.Strings(title.In)
+
+		inv.Withheld = append(inv.Withheld, title)
+	}
+
+	sort.Slice(inv.Withheld, func(i, j int) bool { return inv.Withheld[i].Name < inv.Withheld[j].Name })
 
 	return inv, nil
 }

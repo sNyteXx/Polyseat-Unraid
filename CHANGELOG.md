@@ -10,6 +10,28 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.42.0
+
+**A game uninstalled everywhere no longer comes back.** Uninstall deleted every
+copy, but a Steam that was running at the time never noticed: Steam reads its
+library when it starts and not again, so it kept the game as installed, and
+its next update found every file missing and downloaded all of it again. The
+pool took that for a fresh install and gave the game straight back to every
+seat. Assassin's Creed Black Flag Resynced did exactly that, 56 GB on the host
+the day after it was uninstalled.
+
+Two things now prevent it. Steam in every seat that has the game is closed
+before its copy goes and started again after, unless somebody is streaming
+from that seat. Steam on the host is closed and started again only if you say
+yes to the question Uninstall now asks, since somebody may be sitting at it.
+And a Steam game uninstalled everywhere is withheld: if any library has it
+again, the pool leaves that copy where it is and the Library section lists it
+under the table, with **Share again** for a game you really did install again
+and **Uninstall** for one Steam fetched by itself. Folder games are not
+withheld; nothing puts a deleted folder back on its own.
+
+No seat needs building again.
+
 ## 0.41.1
 
 **0.41.0 did not start.** The route behind the new Share button overlapped

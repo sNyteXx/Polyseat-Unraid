@@ -991,6 +991,7 @@ function renderLibrary() {
         }),
         // Worth the most here of anywhere: an empty pool on a machine that has
         // a Steam library full of games is exactly the state this is for.
+        ...withheldTitles(library),
         ...watching(library),
         ...lutrisSharing(library),
         aside,
@@ -1028,11 +1029,59 @@ function renderLibrary() {
       ...setupsWaiting(library),
       table,
       note,
+      ...withheldTitles(library),
       ...watching(library),
       ...lutrisSharing(library),
       aside,
     ].filter(Boolean),
   );
+}
+
+// Titles uninstalled everywhere that some library has again.
+//
+// The pool does not take these back by itself. A Steam that was running
+// through the uninstall still holds the title as installed and downloads all of
+// it again with its next update, and that looks exactly like somebody
+// installing it. So each one waits here: shared again if somebody did install
+// it, uninstalled again if not.
+function withheldTitles(pool) {
+  const titles = pool.withheld || [];
+  if (titles.length === 0) return [];
+
+  const list = document.createElement("ul");
+  list.className = "devices";
+
+  titles.forEach((title) => {
+    const row = document.createElement("li");
+
+    row.append(
+      Object.assign(document.createElement("span"), { textContent: title.name }),
+      Object.assign(document.createElement("small"), {
+        textContent: " back in " + title.in.join(", "),
+      }),
+    );
+
+    const share = document.createElement("button");
+    share.className = "quiet tiny";
+    share.textContent = "Share again";
+    share.title = "Takes it into the pool and gives it to every seat again.";
+    share.onclick = () =>
+      run(() => api("POST", apiPath`/api/library/readmit/${title.appid}`));
+
+    row.append(" ", share, " ", uninstallButton(title));
+    list.append(row);
+  });
+
+  return [
+    Object.assign(document.createElement("p"), {
+      className: "hint",
+      textContent:
+        "Uninstalled everywhere, and back since. A Steam that was open during " +
+        "the uninstall downloads a game again by itself, so these stay where " +
+        "they are until you decide.",
+    }),
+    list,
+  ];
 }
 
 // The games in the host's own Lutris, and which of them are on their way to
@@ -1375,6 +1424,21 @@ function titleRow(title) {
   const actions = document.createElement("td");
   actions.className = "right";
 
+  actions.append(uninstallButton(title));
+  row.append(name, size, where, actions);
+
+  return row;
+}
+
+// The Uninstall button of one title, in the table and among the withheld.
+//
+// Steam in the seats is closed for it and started again by the daemon, unless
+// somebody is streaming. Steam on the host is asked about, because somebody
+// may be sitting at it: left open, it keeps listing the game and its next
+// update downloads it again.
+function uninstallButton(title) {
+  const inSeats = title.in || [];
+
   const remove = document.createElement("button");
   remove.className = "quiet tiny danger";
   remove.textContent = "Uninstall";
@@ -1394,13 +1458,28 @@ function titleRow(title) {
       return;
     }
 
-    run(() => api("DELETE", apiPath`/api/library/${title.appid}`));
+    let path = apiPath`/api/library/${title.appid}`;
+
+    // Asked whether or not Steam is open there. Finding out is a walk over
+    // /proc, and this page reads the pool far too often to do that each time;
+    // the daemon looks for itself and does nothing when Steam is closed.
+    if (
+      title.kind !== "folder" &&
+      inSeats.includes("host") &&
+      confirm(
+        `If Steam is open on this host, may it be closed for the uninstall ` +
+          `and started again afterwards?\n\n` +
+          `Left open, it keeps listing "${title.name}" as installed and ` +
+          `downloads all of it again with its next update.`,
+      )
+    ) {
+      path += "?host_steam=close";
+    }
+
+    run(() => api("DELETE", path));
   };
 
-  actions.append(remove);
-  row.append(name, size, where, actions);
-
-  return row;
+  return remove;
 }
 
 function bytes(n) {

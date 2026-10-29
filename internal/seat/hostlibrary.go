@@ -2,11 +2,15 @@ package seat
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/superuser404notfound/Polyseat/internal/library"
 )
@@ -260,4 +264,101 @@ func using(link string, needle []byte) bool {
 	}
 
 	return bytes.HasPrefix([]byte(target), needle)
+}
+
+// hostSteamRunning reports whether a Steam client of this uid is running.
+//
+// A variable so that a test can answer for it: the person running the tests
+// owns the test's library, and their own Steam would otherwise decide what a
+// test sees.
+var hostSteamRunning = func(uid int) bool {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+
+		proc := filepath.Join("/proc", entry.Name())
+
+		info, err := os.Stat(proc)
+		if err != nil {
+			continue
+		}
+
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || int(st.Uid) != uid {
+			continue
+		}
+
+		if comm, err := os.ReadFile(filepath.Join(proc, "comm")); err == nil &&
+			string(bytes.TrimSpace(comm)) == "steam" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// inHostSession runs a command in the user manager of whoever owns uid, which
+// is where their desktop session put its environment. Steam started from the
+// daemon directly would have neither a display nor a bus to find.
+//
+// opts are systemd-run's own, argv what it runs.
+func inHostSession(ctx context.Context, uid int, opts []string, argv ...string) error {
+	who := ownerOf(uid)
+	if who == nil || uid < minOwnerUID {
+		return fmt.Errorf("uid %d is nobody's desktop", uid)
+	}
+
+	args := append([]string{"--user", "--machine=" + who.Username + "@.host", "--collect", "--quiet"}, opts...)
+
+	out, err := exec.CommandContext(ctx, "systemd-run", append(args, argv...)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+	}
+
+	return nil
+}
+
+// closeHostSteam asks the host's Steam to leave and waits until it has.
+// `steam -shutdown` hands the request to the running client, the way
+// steamQuiet does it in a seat. A variable for the same reason as
+// hostSteamRunning.
+var closeHostSteam = func(ctx context.Context, uid int) bool {
+	if err := inHostSession(ctx, uid, []string{"--wait"}, "steam", "-shutdown"); err != nil {
+		return false
+	}
+
+	deadline := time.Now().Add(steamShutdownWait)
+
+	for time.Now().Before(deadline) {
+		if !hostSteamRunning(uid) {
+			return true
+		}
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Second):
+		}
+	}
+
+	return false
+}
+
+// startHostSteam puts a Steam closed by closeHostSteam back, minimised, so the
+// host is left the way it was found apart from the title.
+//
+// ExitType=cgroup because the unit has to last as long as Steam does, and the
+// script systemd starts is not the process that stays: by default the unit
+// would end with the script and take the client down with it.
+var startHostSteam = func(uid int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), quickTimeout)
+	defer cancel()
+
+	return inHostSession(ctx, uid, []string{"--property=ExitType=cgroup"}, "steam", "-silent")
 }

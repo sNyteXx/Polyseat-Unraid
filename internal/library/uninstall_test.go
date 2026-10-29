@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -37,6 +38,10 @@ func TestUninstallTakesATitleFromEverywhere(t *testing.T) {
 		mkdirs(t, filepath.Join(pool.SeatApps(seat), "compatdata", "440"), filepath.Join(pool.SeatApps(seat), "shadercache", "440"))
 		write(t, filepath.Join(pool.SeatApps(seat), "compatdata", "440", "save.dat"), "save", 0o644)
 		write(t, filepath.Join(pool.SeatApps(seat), "shadercache", "440", "cache.bin"), "cache", 0o644)
+	}
+
+	if got, name := pool.Holders("440", all); !slices.Equal(got, []string{"seat1", "seat2", host.Name}) || name != "Team Fortress 2" {
+		t.Errorf("Holders = %v, %q, want seat1, seat2 and %s, Team Fortress 2", got, name, host.Name)
 	}
 
 	gone, err := pool.Uninstall("440", all, nil)
@@ -78,9 +83,33 @@ func TestUninstallTakesATitleFromEverywhere(t *testing.T) {
 		t.Error("the next pass brought the title back")
 	}
 
-	// A fresh install later is shared like any other, including with the seat
-	// that had declined the old one.
+	// The copy coming back, the way a Steam that was running through the
+	// uninstall brings it back. It stays where it is and is listed.
 	install(t, pool.SeatApps("seat2"), "440", "Team Fortress 2", "Team Fortress 2", "1001", StateInstalled)
+
+	if _, err := pool.Sync(all, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Lstat(filepath.Join(pool.PoolApps(), ManifestName("440"))); err == nil {
+		t.Error("a copy that came back after the uninstall went into the pool")
+	}
+
+	inv, err := pool.Inventory(all)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(inv.Withheld) != 1 || inv.Withheld[0].Name != "Team Fortress 2" ||
+		len(inv.Withheld[0].In) != 1 || inv.Withheld[0].In[0] != "seat2" {
+		t.Errorf("withheld = %+v, want Team Fortress 2 in seat2", inv.Withheld)
+	}
+
+	// Readmitted, it is shared like any other, including with the seat that
+	// had declined the old one.
+	if err := pool.Readmit("440"); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := pool.Sync(all, nil); err != nil {
 		t.Fatal(err)

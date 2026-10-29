@@ -1,6 +1,7 @@
 package seat
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -506,4 +507,100 @@ func reflinkDirFor(t *testing.T) string {
 		"reflink=1.", candidates)
 
 	return ""
+}
+
+// A Steam left running through an uninstall holds the title as installed and
+// downloads all of it again with its next update. So the host's is closed
+// before its copy goes and started after, and only when somebody agreed to it.
+func TestUninstallClosesHostSteamAroundTheDelete(t *testing.T) {
+	for _, agreed := range []bool{true, false} {
+		root := reflinkDirFor(t)
+
+		pool, err := library.Open(filepath.Join(root, "library"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		host := filepath.Join(root, "home", "player", ".local", "share", "Steam", "steamapps")
+		game := filepath.Join(host, "common", "Black Flag")
+
+		if err := os.MkdirAll(game, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		manifest := filepath.Join(host, library.ManifestName("3751950"))
+		if err := os.WriteFile(manifest, []byte(`"AppState"
+{
+	"appid"		"3751950"
+	"name"		"Black Flag"
+	"StateFlags"		"4"
+	"installdir"		"Black Flag"
+	"buildid"		"1"
+}
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := pool.AddSource(host, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		store, err := OpenStore(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var calls []string
+
+		defer func(probe func(string, int) bool, running func(int) bool,
+			closing func(context.Context, int) bool, starting func(int) error) {
+			probeHost, hostSteamRunning, closeHostSteam, startHostSteam = probe, running, closing, starting
+		}(probeHost, hostSteamRunning, closeHostSteam, startHostSteam)
+
+		probeHost = func(string, int) bool { return true }
+		hostSteamRunning = func(int) bool { return true }
+
+		closeHostSteam = func(context.Context, int) bool {
+			if _, err := os.Stat(manifest); err != nil {
+				t.Error("Steam was closed after its copy was already gone")
+			}
+
+			calls = append(calls, "close")
+
+			return true
+		}
+
+		startHostSteam = func(int) error {
+			if _, err := os.Stat(manifest); err == nil {
+				t.Error("Steam was started again with the copy still there")
+			}
+
+			calls = append(calls, "start")
+
+			return nil
+		}
+
+		m := &Manager{
+			pool:  pool,
+			store: store,
+			log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+
+		if err := m.UninstallEverywhere("3751950", agreed); err != nil {
+			t.Fatalf("UninstallEverywhere: %v", err)
+		}
+
+		want := []string{"close", "start"}
+		if !agreed {
+			want = nil
+		}
+
+		if !slices.Equal(calls, want) {
+			t.Errorf("agreed=%v: Steam on the host saw %v, want %v", agreed, calls, want)
+		}
+
+		if _, err := os.Stat(game); err == nil {
+			t.Errorf("agreed=%v: the host kept its copy", agreed)
+		}
+	}
 }

@@ -420,8 +420,23 @@ reads refuses it too, since that copy would come straight back. The manifest
 goes before the files, so a removal stopped halfway leaves nothing a pass would
 take for a game. `shadercache` and `downloading` go with it, `compatdata` stays,
 because that is the Proton prefix and for most games the saves. Every mark for
-the title is dropped, the declined ones as well, so a fresh install later is
-shared like any other.
+the title is dropped, the declined ones as well, so that once the title is
+readmitted a fresh install is shared like any other.
+
+**Steam has to be told, and a title that comes back is withheld.** A Steam
+reads its library when it starts and not again. One that is running while its
+copy is deleted keeps the title as installed, and its next update finds every
+file missing and downloads all of it again; the pool took that for an install
+and gave the game back to every seat. That happened on 2026-10-27, 56 GB on the
+host the day after an uninstall. So the daemon closes Steam in each seat that
+holds the title before deleting its copy and starts it again after, unless
+somebody is streaming from that seat, by the same test provisioning uses before
+it closes Steam. On the host it does so only when the person pressing Uninstall
+agrees, through `systemd-run --user` into their session, since somebody may be
+sitting at it. And a Steam title uninstalled everywhere is withheld: a library
+that has it again keeps its copy, the pool does not take it, and the interface
+lists it under the table with Share again and Uninstall. Folders are not
+withheld, because nothing puts a deleted folder back by itself.
 
 **Only ever forward.** Build ids are compared as numbers, and the pool takes a
 copy only when it has none or when the library offering it is strictly newer.
