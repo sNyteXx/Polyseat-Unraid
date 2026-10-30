@@ -1,0 +1,1130 @@
+#!/bin/bash
+# polyseatctl - Polyseat/Incus runtime controller for Unraid.
+#
+# WIP / DO NOT USE: every mutating command is refused on a real host while
+# POLYSEAT_RELEASE_GATE is "closed" (the committed value). The only other way
+# to mutate is the private sandbox mode (POLYSEAT_ROOT=/tmp/polyseat-ctl-*),
+# which itself refuses to run on Unraid.
+#
+# Dependencies on the host: bash, jq, tar, gzip, sha256sum, flock, ssh-keygen,
+# ldconfig, getconf. No Python, no systemd, no package manager.
+#
+# Design rules: no recursive deletion (only exact, manifest-listed paths),
+# nothing is trusted before signature+checksum+listing checks, live state is
+# switched by one atomic rename behind a fsynced journal, failures fail closed.
+
+set -u -o pipefail
+umask 077
+
+POLYSEAT_RELEASE_GATE="closed"   # closed | test-host | open (set only by a release render)
+CTL_VERSION="0.1.0-wip"
+PLUGIN="polyseat-unraid"
+SIGN_IDENTITY="polyseat-unraid-release"
+SIGN_NAMESPACE="polyseat-unraid-bundle"
+DISPOSABLE_MARKER_TEXT="polyseat-unraid-disposable-test-host-v1"
+
+MAX_ARCHIVE_BYTES=$((256 * 1024 * 1024))
+MAX_TOTAL_BYTES=$((512 * 1024 * 1024))
+SAFE_PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+SHA_RE='^[0-9a-f]{64}$'
+
+EX_USAGE=1 EX_BLOCKED=2 EX_CORRUPT=3 EX_HEALTH=4 EX_VERIFY=5 EX_SPACE=6 EX_PENDING=7
+
+LOG_ENABLED=0
+LOCK_HELD=0
+APPROVED=0
+
+# ---------------------------------------------------------------- paths ----
+init_paths() {
+  ROOT="${POLYSEAT_ROOT:-}"
+  FLASH_DIR="$ROOT/boot/config/plugins/$PLUGIN"
+  CFG="$FLASH_DIR/$PLUGIN.cfg"
+  BUNDLE_DIR="$FLASH_DIR/bundles"
+  STATE_DIR="$FLASH_DIR/state"
+  SIGNERS="$FLASH_DIR/allowed_signers"
+  MARKER="$FLASH_DIR/DISPOSABLE_TEST_HOST"
+  RAM_DIR="$ROOT/usr/local/$PLUGIN"
+  SLOTS="$RAM_DIR/slots"
+  CURRENT="$RAM_DIR/current"
+  RUN_DIR="$ROOT/var/run/$PLUGIN"
+  LOG_DIR="$ROOT/var/log/$PLUGIN"
+  SUBID_DIR="${POLYSEAT_SUBID_DIR:-$ROOT/etc}"
+  UNRAID_VERSION_FILE="$ROOT/etc/unraid-version"
+  PIDFILE="$RUN_DIR/incusd.pid"
+  LOCKFILE="$RUN_DIR/lock"
+}
+
+sandbox() { [[ -n "$ROOT" ]]; }
+
+# ------------------------------------------------------------- logging ----
+log() {
+  local level=$1 msg=$2 line
+  line="$(date -u +%Y-%m-%dT%H:%M:%SZ) [$level] $msg"
+  if [[ $LOG_ENABLED -eq 1 ]]; then
+    local file="$LOG_DIR/$PLUGIN.log"
+    if [[ -f $file && ! -L $file ]] && [[ $(stat -c %s "$file" 2>/dev/null || echo 0) -gt 1048576 ]]; then
+      mv -f -- "$file" "$file.1"
+    fi
+    if [[ ! -L $file ]]; then
+      printf '%s\n' "$line" >> "$file"
+    fi
+    if ! sandbox && command -v logger >/dev/null 2>&1; then
+      logger -t "$PLUGIN" -- "[$level] $msg" || true
+    fi
+  fi
+  [[ $level == debug ]] || printf '%s\n' "$line" >&2
+}
+
+die() {
+  local code=$1
+  shift
+  log error "$*"
+  exit "$code"
+}
+
+crash_point() {
+  if sandbox && [[ ${POLYSEAT_CRASH_AT:-} == "$1" ]]; then
+    exit 99
+  fi
+}
+
+# ------------------------------------------------------------- helpers ----
+version_ge() { # $1 >= $2
+  [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
+}
+
+fs_type() { stat -f -c %T -- "$1" 2>/dev/null || echo unknown; }
+
+fs_has_perms() {
+  case "$(fs_type "$1")" in
+    vfat | msdos | exfat | fuseblk | ntfs | unknown) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+sync_path() { sync -f -- "$1" 2>/dev/null || sync; }
+
+free_kb() {
+  if sandbox && [[ -n ${POLYSEAT_FAKE_FREE_KB:-} ]]; then
+    printf '%s\n' "$POLYSEAT_FAKE_FREE_KB"
+    return
+  fi
+  df -Pk -- "$1" | awk 'NR==2 {print $4}'
+}
+
+check_private_file() { # regular, not a symlink, owned by us, no group/other access
+  local f=$1 mode owner
+  [[ -f $f && ! -L $f ]] || return 1
+  fs_has_perms "$f" || return 0
+  owner=$(stat -c %u -- "$f") || return 1
+  mode=$(stat -c %a -- "$f") || return 1
+  [[ $owner == "$(id -u)" ]] || return 1
+  (( (8#$mode & 8#077) == 0 ))
+}
+
+write_json_atomic() { # path json-text
+  local path=$1 text=$2 dir tmp
+  dir=$(dirname -- "$path")
+  tmp=$(mktemp "$dir/.txn-XXXXXX") || return 1
+  if ! printf '%s\n' "$text" | jq -c -S . > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  sync_path "$tmp"
+  mv -T -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }
+  sync_path "$dir"
+}
+
+cfg_get() { # KEY default
+  local key=$1 default=$2 value=""
+  if [[ -f $CFG && ! -L $CFG ]]; then
+    value=$(awk -F= -v k="$key" '$1==k { v=$2; gsub(/^"|"$/, "", v); print v; exit }' "$CFG")
+  fi
+  printf '%s\n' "${value:-$default}"
+}
+
+# ---------------------------------------------------------------- gate ----
+require_mutation_allowed() {
+  if sandbox; then
+    [[ $ROOT =~ ^/tmp/polyseat-ctl-[A-Za-z0-9_-]{6,}$ ]] ||
+      die $EX_BLOCKED "sandbox root must be a direct /tmp/polyseat-ctl-* directory"
+    [[ ! -e /etc/unraid-version ]] ||
+      die $EX_BLOCKED "sandbox mode is refused on an Unraid host"
+    [[ -d $ROOT && ! -L $ROOT && $(stat -c %u -- "$ROOT") == "$(id -u)" ]] ||
+      die $EX_BLOCKED "sandbox root must be a real directory owned by the caller"
+    case "$(stat -c %a -- "$ROOT")" in
+      700 | 711) ;;
+      *) die $EX_BLOCKED "sandbox root must have mode 0700 or 0711" ;;
+    esac
+    return 0
+  fi
+  case "$POLYSEAT_RELEASE_GATE" in
+    open) ;;
+    test-host)
+      [[ -f $MARKER && ! -L $MARKER && "$(head -n1 -- "$MARKER")" == "$DISPOSABLE_MARKER_TEXT" ]] ||
+        die $EX_BLOCKED "test build: DISPOSABLE_TEST_HOST marker missing; refusing on this host"
+      ;;
+    *) die $EX_BLOCKED "WIP release gate is closed: host mutation refused" ;;
+  esac
+  [[ $(id -u) -eq 0 ]] || die $EX_BLOCKED "root required"
+}
+
+require_approval() {
+  [[ $APPROVED -eq 1 ]] || die $EX_BLOCKED "explicit --approve required for '$1'"
+}
+
+acquire_lock() {
+  [[ $LOCK_HELD -eq 1 ]] && return 0
+  mkdir -p -- "$RUN_DIR" "$LOG_DIR" || die $EX_BLOCKED "cannot create runtime directories"
+  LOG_ENABLED=1
+  exec 9> "$LOCKFILE" || die $EX_BLOCKED "cannot open lock file"
+  flock -w 120 9 || die $EX_PENDING "another polyseatctl operation is running"
+  LOCK_HELD=1
+}
+
+# --------------------------------------------------------------- state ----
+PTR_CURRENT=""
+PTR_PREVIOUS=""
+JR_PHASE=""
+JR_TARGET=""
+JR_PREVIOUS=""
+JR_WAS_RUNNING=0
+
+read_pointer() {
+  local f="$STATE_DIR/pointer.json"
+  PTR_CURRENT="" PTR_PREVIOUS=""
+  if [[ ! -e $f && ! -L $f ]]; then
+    return 0
+  fi
+  check_private_file "$f" || die $EX_CORRUPT "untrusted pointer state file"
+  jq -e 'type=="object" and (keys==["current","previous"]) and
+         all(.[]; .==null or (type=="string" and test("^[0-9a-f]{64}$")))' "$f" >/dev/null 2>&1 ||
+    die $EX_CORRUPT "corrupt pointer state"
+  PTR_CURRENT=$(jq -r '.current // ""' "$f")
+  PTR_PREVIOUS=$(jq -r '.previous // ""' "$f")
+}
+
+write_pointer() { # current previous
+  local c=$1 p=$2
+  write_json_atomic "$STATE_DIR/pointer.json" \
+    "$(jq -n --arg c "$c" --arg p "$p" '{current: (if $c=="" then null else $c end), previous: (if $p=="" then null else $p end)}')" ||
+    die $EX_CORRUPT "cannot write pointer state"
+}
+
+read_journal() {
+  local f="$STATE_DIR/journal.json"
+  JR_PHASE="" JR_TARGET="" JR_PREVIOUS=""
+  if [[ ! -e $f && ! -L $f ]]; then
+    return 0
+  fi
+  check_private_file "$f" || die $EX_CORRUPT "untrusted journal file"
+  jq -e 'type=="object" and (keys==["phase","previous","target","was_running"]) and
+         (.phase=="activating" or .phase=="rolling-back") and (.was_running|type=="boolean") and
+         all(.previous,.target; .==null or (type=="string" and test("^[0-9a-f]{64}$")))' "$f" >/dev/null 2>&1 ||
+    die $EX_CORRUPT "corrupt transaction journal"
+  JR_PHASE=$(jq -r '.phase' "$f")
+  JR_WAS_RUNNING=$(jq -r 'if .was_running then 1 else 0 end' "$f")
+  JR_TARGET=$(jq -r '.target // ""' "$f")
+  JR_PREVIOUS=$(jq -r '.previous // ""' "$f")
+}
+
+write_journal() { # phase target previous was_running(0|1)
+  write_json_atomic "$STATE_DIR/journal.json" \
+    "$(jq -n --arg ph "$1" --arg t "$2" --arg p "$3" --argjson w "$4" \
+      '{phase:$ph, target:(if $t=="" then null else $t end), previous:(if $p=="" then null else $p end), was_running:($w==1)}')" ||
+    die $EX_CORRUPT "cannot write journal"
+}
+
+clear_journal() {
+  rm -f -- "$STATE_DIR/journal.json"
+  sync_path "$STATE_DIR"
+}
+
+require_no_journal() {
+  read_journal
+  [[ -z $JR_PHASE ]] || die $EX_PENDING "unfinished transaction ($JR_PHASE): run 'recover --approve' first"
+}
+
+ensure_state_dirs() {
+  mkdir -p -- "$FLASH_DIR" "$BUNDLE_DIR" "$STATE_DIR" "$RAM_DIR" "$SLOTS" ||
+    die $EX_BLOCKED "cannot create plugin directories"
+}
+
+# ------------------------------------------------------- bundle checks ----
+BUNDLE_OVERRIDE_BASE=""
+
+bundle_path() { # sha suffix
+  if [[ -n $BUNDLE_OVERRIDE_BASE ]]; then
+    printf '%s%s\n' "$BUNDLE_OVERRIDE_BASE" "$2"
+  else
+    printf '%s/%s%s\n' "$BUNDLE_DIR" "$1" "$2"
+  fi
+}
+bundle_archive() { bundle_path "$1" .tar.gz; }
+bundle_manifest() { bundle_path "$1" .manifest.json; }
+bundle_sig() { bundle_path "$1" .manifest.json.sig; }
+
+validate_manifest_file() { # manifest sha
+  local manifest=$1 sha=$2
+  jq -e --arg sha "$sha" '
+    def ver: type=="string" and test("^[0-9][0-9A-Za-z.+_-]{0,40}$");
+    (type=="object") and (.schema==1)
+    and (.name|type=="string" and test("^[a-z][a-z0-9-]{1,40}$"))
+    and (.version|ver) and (.incus_version|ver) and (.min_unraid|ver)
+    and (.min_glibc|ver) and (.min_kernel|ver)
+    and (.archive_sha256==$sha)
+    and (.needed_libs|type=="array" and length<=64 and all(.[]; type=="string" and test("^[A-Za-z0-9_.+-]+$")))
+    and (.files|type=="array" and length>0 and length<=128)
+    and all(.files[]; (keys==["mode","path","sha256","size"])
+        and (.path|type=="string" and test("^payload(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)+$"))
+        and (.sha256|type=="string" and test("^[0-9a-f]{64}$"))
+        and (.mode==420 or .mode==493)
+        and (.size|type=="number" and .==floor and .>=0 and .<=536870912))
+    and ((.files|map(.path)|length)==(.files|map(.path)|unique|length))
+    and ((.files|map(.size)|add)<=536870912)
+  ' "$manifest" >/dev/null 2>&1
+}
+
+verify_signature() { # manifest sig
+  local manifest=$1 sig=$2
+  if sandbox && [[ ${POLYSEAT_TEST_UNSIGNED:-} == 1 ]]; then
+    log warn "TEST ONLY: signature check skipped (sandbox)"
+    return 0
+  fi
+  [[ -f $SIGNERS && ! -L $SIGNERS && -f $sig && ! -L $sig ]] || return 1
+  ssh-keygen -Y verify -f "$SIGNERS" -I "$SIGN_IDENTITY" -n "$SIGN_NAMESPACE" \
+    -s "$sig" < "$manifest" >/dev/null 2>&1
+}
+
+mode_to_octal() { # -rwxr-xr-x -> 755 ; anything unusual (setuid, sticky) -> empty
+  local m=${1:1} out=0 i part
+  [[ ${#1} -eq 10 && $m =~ ^[r-][w-][x-][r-][w-][x-][r-][w-][x-]$ ]] || return 1
+  for i in 0 3 6; do
+    part=0
+    [[ ${m:i:1} == r ]] && part=$((part + 4))
+    [[ ${m:i+1:1} == w ]] && part=$((part + 2))
+    [[ ${m:i+2:1} == x ]] && part=$((part + 1))
+    out=$((out * 8 + part))
+  done
+  printf '%o\n' "$out"
+}
+
+# Verify archive entries against the manifest WITHOUT extracting anything.
+verify_archive_listing() { # archive manifest
+  local archive=$1 manifest=$2 listing want got line mode_s owner size name mode total=0 want_mode want_size
+  local -a lines
+  listing=$(mktemp) || return 1
+  if ! tar --quoting-style=escape --numeric-owner -tvzf "$archive" > "$listing" 2>/dev/null; then
+    rm -f -- "$listing"
+    return 1
+  fi
+  mapfile -t lines < "$listing"
+  rm -f -- "$listing"
+  want=$(jq -r '.files[].path' "$manifest" | sort)
+  got=""
+  for line in "${lines[@]}"; do
+    mode_s=${line%% *}
+    [[ ${mode_s:0:1} == "-" ]] || return 1
+    owner=$(awk '{print $2}' <<< "$line")
+    size=$(awk '{print $3}' <<< "$line")
+    name=$(sed -E 's/^[^ ]+ +[^ ]+ +[0-9]+ +[0-9-]+ +[0-9:]+ //' <<< "$line")
+    [[ $owner == "0/0" && $size =~ ^[0-9]+$ ]] || return 1
+    [[ $name =~ ^payload(/[A-Za-z0-9_+-][A-Za-z0-9_.+-]*)+$ ]] || return 1
+    mode=$(mode_to_octal "$mode_s") || return 1
+    want_mode=$(jq -r --arg n "$name" '.files[]|select(.path==$n)|.mode' "$manifest")
+    want_size=$(jq -r --arg n "$name" '.files[]|select(.path==$n)|.size' "$manifest")
+    [[ -n $want_mode && $((8#$mode)) -eq $want_mode && $size -eq $want_size ]] || return 1
+    total=$((total + size))
+    got+="$name"$'\n'
+  done
+  [[ $total -le $MAX_TOTAL_BYTES ]] || return 1
+  got=$(printf '%s' "$got" | sort)
+  [[ "$got" == "$want" ]]   # exact set: no extras, no duplicates, nothing missing
+}
+
+# Full read-only verification of the three flash files of one bundle.
+verify_bundle_files() { # sha
+  local sha=$1 archive manifest sig actual
+  [[ $sha =~ $SHA_RE ]] || return 1
+  archive=$(bundle_archive "$sha") manifest=$(bundle_manifest "$sha") sig=$(bundle_sig "$sha")
+  [[ -f $archive && ! -L $archive && -f $manifest && ! -L $manifest ]] || { log error "bundle $sha: files missing"; return 1; }
+  [[ $(stat -c %s -- "$archive") -le $MAX_ARCHIVE_BYTES ]] || { log error "bundle $sha: archive too large"; return 1; }
+  actual=$(sha256sum -- "$archive" | awk '{print $1}')
+  [[ $actual == "$sha" ]] || { log error "bundle $sha: archive checksum mismatch"; return 1; }
+  validate_manifest_file "$manifest" "$sha" || { log error "bundle $sha: manifest invalid"; return 1; }
+  verify_signature "$manifest" "$sig" || { log error "bundle $sha: manifest signature invalid or untrusted"; return 1; }
+  verify_archive_listing "$archive" "$manifest" || { log error "bundle $sha: archive contents differ from manifest"; return 1; }
+  verify_archive_member_hashes "$archive" "$manifest" || { log error "bundle $sha: member checksums differ from manifest"; return 1; }
+}
+
+# One streaming pass over the archive; members are hashed on the fly and never written to disk.
+verify_archive_member_hashes() { # archive manifest
+  local archive=$1 manifest=$2 got want
+  # shellcheck disable=SC2016  # expands in tar's own shell, per member
+  got=$(tar -xzf "$archive" --to-command='printf "%s  %s\n" "$(sha256sum | cut -d" " -f1)" "$TAR_FILENAME"' 2>/dev/null | sort) || return 1
+  want=$(jq -r '.files[] | "\(.sha256)  \(.path)"' "$manifest" | sort)
+  [[ -n $got && "$got" == "$want" ]]
+}
+
+host_unraid_version() {
+  [[ -r $UNRAID_VERSION_FILE ]] || return 1
+  awk -F'"' '/^version=/ {print $2; exit}' "$UNRAID_VERSION_FILE"
+}
+
+check_host_compat() { # manifest
+  local manifest=$1 unraid glibc kernel lib missing=0
+  unraid=$(host_unraid_version) || { log error "cannot read Unraid version"; return 1; }
+  version_ge "$unraid" "$(jq -r .min_unraid "$manifest")" || { log error "Unraid $unraid is older than required"; return 1; }
+  glibc=$(getconf GNU_LIBC_VERSION | awk '{print $2}')
+  version_ge "$glibc" "$(jq -r .min_glibc "$manifest")" || { log error "glibc $glibc is older than required"; return 1; }
+  kernel=$(uname -r | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+  version_ge "$kernel" "$(jq -r .min_kernel "$manifest")" || { log error "kernel $kernel is older than required"; return 1; }
+  while IFS= read -r lib; do
+    if ! ldconfig -p 2>/dev/null | awk -v l="$lib" '$1==l && /x86-64/ {f=1} END {exit !f}'; then
+      log error "required host library missing: $lib"
+      missing=1
+    fi
+  done < <(jq -r '.needed_libs[]' "$manifest")
+  [[ $missing -eq 0 ]]
+}
+
+# ---------------------------------------------------------------- slots ----
+slot_dir() { printf '%s/%s\n' "$SLOTS" "$1"; }
+
+expected_slot_listing() { # manifest
+  jq -r '.files[].path' "$1" | awk '
+    { print "f " $0; n=split($0, p, "/"); d=""; for (i=1; i<n; i++) { d = (d=="" ? p[i] : d "/" p[i]); print "d " d } }
+    END { print "f slot.json" }' | sort -u
+}
+
+verify_slot() { # sha  (manifest must be on flash)
+  local sha=$1 slot manifest expect actual mode path want
+  slot=$(slot_dir "$sha") manifest=$(bundle_manifest "$sha")
+  [[ -d $slot && ! -L $slot && -f $manifest ]] || return 1
+  expect=$(expected_slot_listing "$manifest")
+  actual=$(find "$slot" -mindepth 1 -printf '%y %P\n' | sort -u)
+  [[ "$actual" == "$expect" ]] || return 1
+  (cd "$slot" && jq -r '.files[] | "\(.sha256)  \(.path)"' "$manifest" | sha256sum --check --strict --quiet) >/dev/null 2>&1 || return 1
+  while IFS=' ' read -r want path; do
+    mode=$(stat -c %a -- "$slot/$path") || return 1
+    [[ $mode == "$(printf '%o' "$want")" ]] || return 1
+  done < <(jq -r '.files[] | "\(.mode) \(.path)"' "$manifest")
+}
+
+# Remove exactly the files a manifest lists (plus slot.json), then empty
+# directories bottom-up. Never recursive; leftovers are reported, not deleted.
+remove_slot_exact() { # sha
+  local sha=$1 slot manifest path leftover=0
+  slot=$(slot_dir "$sha")
+  [[ -d $slot && ! -L $slot ]] || return 0
+  manifest=$(bundle_manifest "$sha")
+  if [[ ! -f $manifest ]]; then
+    log warn "slot $sha left in place: manifest unavailable for exact removal"
+    return 1
+  fi
+  while IFS= read -r path; do
+    if [[ -f $slot/$path && ! -L $slot/$path ]]; then
+      rm -f -- "$slot/$path"
+    fi
+  done < <(jq -r '.files[].path' "$manifest")
+  rm -f -- "$slot/slot.json"
+  while IFS= read -r path; do
+    rmdir -- "$slot/$path" 2>/dev/null || leftover=1
+  done < <(jq -r '.files[].path' "$manifest" | awk '
+      { n=split($0,p,"/"); d=""; for (i=1;i<n;i++) { d=(d==""?p[i]:d "/" p[i]); print d } }' |
+      sort -u | awk '{ print gsub("/","/") " " $0 }' | sort -rn | cut -d' ' -f2-)
+  rmdir -- "$slot" 2>/dev/null || leftover=1
+  [[ $leftover -eq 0 ]] || log warn "slot $sha has undeclared leftovers; left in place"
+  return $leftover
+}
+
+cleanup_stale_incoming() { # sha : only while holding the lock, so nothing is in progress
+  local sha=$1 incoming manifest
+  incoming=$(stage_incoming_name "$sha") manifest=$(bundle_manifest "$sha")
+  [[ -d $incoming && ! -L $incoming && -f $manifest ]] || return 0
+  log warn "removing stale incoming slot for $sha (exact files only)"
+  remove_slot_exact_path "$incoming" "$manifest"
+}
+
+stage_incoming_name() { printf '%s/.incoming-%s\n' "$SLOTS" "$1"; }
+
+# Build a verified slot in RAM from the flash archive. Additive only.
+materialize_slot() { # sha
+  local sha=$1 slot archive manifest incoming total need have
+  slot=$(slot_dir "$sha") archive=$(bundle_archive "$sha") manifest=$(bundle_manifest "$sha")
+  if [[ -d $slot ]]; then
+    if verify_slot "$sha"; then
+      return 0
+    fi
+    log warn "slot $sha failed verification; removing exact files and rebuilding"
+    remove_slot_exact "$sha" || { log error "corrupt slot cannot be removed exactly"; return 1; }
+  fi
+  verify_bundle_files "$sha" || return $EX_VERIFY
+  check_host_compat "$manifest" || return $EX_VERIFY
+  total=$(jq '[.files[].size]|add' "$manifest")
+  need=$(( (total * 2) / 1024 + 65536 ))
+  have=$(free_kb "$SLOTS")
+  if [[ $have -lt $need ]]; then
+    log error "insufficient RAM-disk space: need ${need}KB, have ${have}KB"
+    return $EX_SPACE
+  fi
+  incoming=$(stage_incoming_name "$sha")
+  cleanup_stale_incoming "$sha"
+  if [[ -e $incoming ]]; then
+    log error "stale incoming directory could not be removed exactly; inspect and remove manually"
+    return 1
+  fi
+  mkdir -m 0755 -- "$incoming" || return 1
+  if ! (umask 022; jq -r '.files[].path' "$manifest" |
+        tar -xzf "$archive" -C "$incoming" --no-same-owner --no-same-permissions \
+            --no-overwrite-dir --verbatim-files-from -T -) 2>/dev/null; then
+    log error "extraction failed"
+    remove_slot_exact_path "$incoming" "$manifest"
+    return 1
+  fi
+  crash_point after_extract
+  while IFS=' ' read -r mode path; do
+    chmod "$(printf '%o' "$mode")" -- "$incoming/$path" || return 1
+  done < <(jq -r '.files[] | "\(.mode) \(.path)"' "$manifest")
+  printf '{"sha256":"%s","created":"%s"}\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$incoming/slot.json"
+  chmod 0644 -- "$incoming/slot.json"
+  # The final name must be verified against flash metadata exactly like a live slot.
+  if ! verify_incoming "$incoming" "$manifest"; then
+    log error "extracted tree differs from manifest"
+    remove_slot_exact_path "$incoming" "$manifest"
+    return $EX_VERIFY
+  fi
+  mv -T -- "$incoming" "$slot" || return 1
+  sync_path "$SLOTS"
+  smoke_slot "$sha" || {
+    log error "bundle binaries do not run on this host (missing library or ABI problem)"
+    remove_slot_exact "$sha"
+    return $EX_VERIFY
+  }
+}
+
+verify_incoming() { # dir manifest
+  local dir=$1 manifest=$2 expect actual
+  expect=$(expected_slot_listing "$manifest")
+  actual=$(find "$dir" -mindepth 1 -printf '%y %P\n' | sort -u)
+  [[ "$actual" == "$expect" ]] || return 1
+  (cd "$dir" && jq -r '.files[] | "\(.sha256)  \(.path)"' "$manifest" | sha256sum --check --strict --quiet) >/dev/null 2>&1
+}
+
+remove_slot_exact_path() { # dir manifest : exact cleanup of a failed incoming dir
+  local dir=$1 manifest=$2 path
+  [[ -d $dir && ! -L $dir ]] || return 0
+  while IFS= read -r path; do
+    [[ -f $dir/$path && ! -L $dir/$path ]] && rm -f -- "$dir/$path"
+  done < <(jq -r '.files[].path' "$manifest")
+  rm -f -- "$dir/slot.json"
+  while IFS= read -r path; do
+    rmdir -- "$dir/$path" 2>/dev/null || true
+  done < <(jq -r '.files[].path' "$manifest" | awk '
+      { n=split($0,p,"/"); d=""; for (i=1;i<n;i++) { d=(d==""?p[i]:d "/" p[i]); print d } }' |
+      sort -u | awk '{ print gsub("/","/") " " $0 }' | sort -rn | cut -d' ' -f2-)
+  rmdir -- "$dir" 2>/dev/null || log warn "incoming directory left in place: undeclared content"
+}
+
+run_clean() { # command... : minimal environment, bounded runtime
+  env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C timeout 15 "$@"
+}
+
+smoke_slot() { # sha: new binaries must execute and report the manifest's version
+  local sha=$1 slot want out
+  slot=$(slot_dir "$sha")
+  want=$(jq -r .incus_version "$(bundle_manifest "$sha")")
+  for bin in incus incusd; do
+    out=$(run_clean "$slot/payload/bin/$bin" --version 2>&1) || return 1
+    [[ $out == *"$want"* ]] || return 1
+  done
+}
+
+switch_current() { # sha ("" removes the link)
+  local tmp="$RAM_DIR/.current.new"
+  rm -f -- "$tmp"
+  if [[ -z $1 ]]; then
+    rm -f -- "$CURRENT"
+    return 0
+  fi
+  ln -s -- "slots/$1" "$tmp" || return 1
+  mv -T -- "$tmp" "$CURRENT"
+}
+
+current_sha_from_link() {
+  local t
+  t=$(readlink -- "$CURRENT" 2>/dev/null) || return 1
+  t=${t#slots/}
+  [[ $t =~ $SHA_RE ]] && printf '%s\n' "$t"
+}
+
+# ------------------------------------------------------------- subuid ----
+SUBID_BEGIN="# BEGIN polyseat-unraid (managed block; removed on uninstall)"
+SUBID_END="# END polyseat-unraid"
+
+subid_block_line() { printf 'root:%s:%s\n' "$(cfg_get SUBID_START 1000000)" "$(cfg_get SUBID_COUNT 1000000000)"; }
+
+subid_file_ensure() { # file
+  local file=$1 line tmp start count
+  line=$(subid_block_line)
+  start=$(cfg_get SUBID_START 1000000) count=$(cfg_get SUBID_COUNT 1000000000)
+  [[ $start =~ ^[0-9]+$ && $count =~ ^[0-9]+$ && $count -ge 65536 && $((start + count)) -le 4294967296 ]] ||
+    { log error "invalid SUBID_START/SUBID_COUNT"; return 1; }
+  if [[ -f $file ]] && grep -qxF -- "$SUBID_BEGIN" "$file"; then
+    awk -v b="$SUBID_BEGIN" -v e="$SUBID_END" -v l="$line" '
+      $0==b {inb=1; next} $0==e {inb=0; next} inb {if ($0==l) ok=1; else bad=1} END {exit (ok && !bad) ? 0 : 1}' "$file" ||
+      { log error "$file: managed block was modified; refusing"; return 1; }
+    return 0
+  fi
+  if [[ -f $file ]] && ! awk -F: -v s="$start" -v c="$count" '
+      /^#/ || NF<3 {next} ($2+0) <= s+c-1 && ($2+$3-1) >= s {bad=1} END {exit bad}' "$file"; then
+    log error "$file: requested ID range overlaps an existing allocation"
+    return 1
+  fi
+  tmp=$(mktemp "$(dirname -- "$file")/.polyseat-subid-XXXXXX") || return 1
+  { [[ -f $file ]] && cat -- "$file"; printf '%s\n%s\n%s\n' "$SUBID_BEGIN" "$line" "$SUBID_END"; } > "$tmp"
+  chmod 0644 -- "$tmp"
+  mv -T -- "$tmp" "$file"
+}
+
+subid_file_remove() { # file
+  local file=$1 tmp line
+  [[ -f $file ]] || return 0
+  grep -qxF -- "$SUBID_BEGIN" "$file" || return 0
+  line=$(subid_block_line)
+  awk -v b="$SUBID_BEGIN" -v e="$SUBID_END" -v l="$line" '
+    $0==b {inb=1; next} $0==e {inb=0; next} inb {if ($0!=l) bad=1} END {exit bad ? 1 : 0}' "$file" ||
+    { log warn "$file: managed block modified; left untouched"; return 1; }
+  tmp=$(mktemp "$(dirname -- "$file")/.polyseat-subid-XXXXXX") || return 1
+  awk -v b="$SUBID_BEGIN" -v e="$SUBID_END" '$0==b {inb=1; next} $0==e {inb=0; next} !inb' "$file" > "$tmp"
+  chmod 0644 -- "$tmp"
+  mv -T -- "$tmp" "$file"
+}
+
+# ---------------------------------------------------------- data dir ----
+DATA_REAL=""
+INCUS_DIR=""
+
+validate_data_dir() {
+  local d anc mode
+  d=$(cfg_get DATA_DIR "")
+  [[ -n $d ]] || { log error "DATA_DIR is not configured (select a pool path first)"; return 1; }
+  [[ $d =~ ^/mnt/[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || { log error "DATA_DIR must be an absolute path below /mnt"; return 1; }
+  case "$d" in
+    /mnt/user | /mnt/user/* | /mnt/user0 | /mnt/user0/* | /mnt/disks | /mnt/remotes/* | /mnt/addons/*)
+      log error "DATA_DIR must be on a real pool or disk, not a FUSE/user share"; return 1 ;;
+  esac
+  [[ $d != *..* ]] || { log error "DATA_DIR contains '..'"; return 1; }
+  DATA_REAL="$ROOT$d"
+  [[ -d $DATA_REAL && ! -L $DATA_REAL ]] || { log error "DATA_DIR does not exist or is a symlink"; return 1; }
+  [[ "$(realpath -e -- "$DATA_REAL")" == "$(realpath -m -- "$DATA_REAL")" ]] || { log error "DATA_DIR resolves through a symlink"; return 1; }
+  case "$(fs_type "$DATA_REAL")" in
+    zfs | xfs | btrfs | ext2/ext3 | ext4) ;;
+    tmpfs | overlay | overlayfs)
+      sandbox || { log error "unsupported DATA_DIR filesystem: $(fs_type "$DATA_REAL")"; return 1; } ;;
+    *) log error "unsupported DATA_DIR filesystem: $(fs_type "$DATA_REAL")"; return 1 ;;
+  esac
+  anc=$DATA_REAL
+  while [[ $anc != "/" && $anc != "$ROOT" && -n $anc ]]; do
+    mode=$(stat -c %a -- "$anc")
+    (( (8#$mode & 8#001) != 0 )) || { log error "$anc is not traversable by guest UIDs (needs o+x); not changing user directories"; return 1; }
+    anc=$(dirname -- "$anc")
+  done
+  INCUS_DIR="$DATA_REAL/incus"
+}
+
+# ------------------------------------------------------------ service ----
+svc_pid() {
+  local pid cmd
+  [[ -f $PIDFILE && ! -L $PIDFILE ]] || return 1
+  pid=$(cat -- "$PIDFILE")
+  [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || return 1
+  [[ $cmd == *"$SLOTS/"*"/payload/bin/incusd"* ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+run_incus() { # args...
+  # Never fall back to Incus' default state directory: it could belong to someone else.
+  [[ -n $INCUS_DIR && $INCUS_DIR == "$DATA_REAL/incus" ]] || { log error "refusing to run incus without a validated INCUS_DIR"; return 1; }
+  env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" INCUS_CONF="$RUN_DIR/client" \
+    timeout "${INCUS_CMD_TIMEOUT:-20}" "$CURRENT/payload/bin/incus" "$@"
+}
+
+health_check() {
+  local pid addr
+  pid=$(svc_pid) || { log error "health: daemon process not running"; return 1; }
+  [[ -S $INCUS_DIR/unix.socket ]] || { log error "health: management socket missing"; return 1; }
+  run_incus info >/dev/null 2>&1 || { log error "health: 'incus info' failed"; return 1; }
+  addr=$(run_incus config get core.https_address 2>/dev/null) || { log error "health: cannot read listener config"; return 1; }
+  [[ -z $addr ]] || { log error "health: unexpected network listener configured: $addr"; return 1; }
+  log debug "health ok (pid $pid)"
+}
+
+svc_start() {
+  local timeout i foreign slot_real
+  [[ -L $CURRENT ]] || { log error "no active bundle"; return 1; }
+  slot_real=$(readlink -f -- "$CURRENT") || return 1
+  validate_data_dir || return 1
+  if svc_pid >/dev/null; then
+    log info "service already running"
+    return 0
+  fi
+  foreign=$(pgrep -x incusd || true)
+  [[ -z $foreign ]] || { log error "another incusd process exists (pid ${foreign//$'\n'/,}); refusing to start"; return 1; }
+  if [[ ! -d $INCUS_DIR ]]; then
+    (umask 022; mkdir -- "$INCUS_DIR") || return 1
+    chmod 0711 -- "$INCUS_DIR" || return 1
+  fi
+  if [[ -L $INCUS_DIR ]] || (( (8#$(stat -c %a -- "$INCUS_DIR") & 8#001) == 0 )); then
+    log error "$INCUS_DIR must be a real directory traversable by guest UIDs"
+    return 1
+  fi
+  mkdir -p -- "$RUN_DIR/client" || return 1
+  subid_file_ensure "$SUBID_DIR/subuid" && subid_file_ensure "$SUBID_DIR/subgid" || return 1
+  rm -f -- "$PIDFILE"
+  (
+    umask 022
+    cd / || exit 1
+    # shellcheck disable=SC2016  # $$ and $@ must expand in the child shell
+    exec setsid env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
+      INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
+      INCUS_SKIP_INSTANCE_TYPES=true \
+      bash -c 'echo $$ > "$1"; shift; exec "$@"' polyseat-launch "$PIDFILE" \
+      "$slot_real/payload/bin/incusd" --group "" --logfile "$LOG_DIR/incusd.log" \
+      > "$LOG_DIR/incusd.out" 2>&1 < /dev/null 9>&-
+  ) &
+  timeout=$(cfg_get HEALTH_TIMEOUT 60)
+  [[ $timeout =~ ^[0-9]+$ ]] || timeout=60
+  for ((i = 0; i < timeout * 2; i++)); do
+    sleep 0.5
+    if health_check 2>/dev/null; then
+      log info "service started and healthy"
+      return 0
+    fi
+    svc_pid >/dev/null || { [[ $i -gt 6 ]] && break; }
+  done
+  log error "service did not become healthy within ${timeout}s"
+  svc_stop daemon || true
+  return 1
+}
+
+svc_stop() { # full|daemon
+  local mode=$1 pid i
+  pid=$(svc_pid) || { rm -f -- "$PIDFILE"; return 0; }
+  if [[ $mode == full && -L $CURRENT ]]; then
+    if validate_data_dir 2>/dev/null; then
+      INCUS_CMD_TIMEOUT=150 run_incus admin shutdown --timeout 120 >/dev/null 2>&1 || log warn "graceful 'admin shutdown' failed; signalling daemon"
+    else
+      log warn "DATA_DIR not valid; skipping graceful instance shutdown and signalling daemon only"
+    fi
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  for ((i = 0; i < 60; i++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    log warn "daemon did not exit; sending SIGKILL to verified pid $pid"
+    kill -KILL "$pid" 2>/dev/null || true
+    sleep 0.5
+  fi
+  rm -f -- "$PIDFILE"
+  ! kill -0 "$pid" 2>/dev/null
+}
+
+# --------------------------------------------------------- transaction ----
+want_running_after() { # was_running
+  [[ $1 -eq 1 || $(cfg_get SERVICE disabled) == enabled ]]
+}
+
+restore_previous() { # previous was_running : switch live state back to previous
+  local previous=$1 was=$2
+  svc_stop daemon || log warn "could not stop daemon during restore"
+  if [[ -n $previous ]]; then
+    materialize_slot "$previous" || { log error "previous bundle cannot be restored"; return 1; }
+  fi
+  switch_current "$previous" || return 1
+  write_pointer "$previous" ""
+  if [[ -n $previous ]] && want_running_after "$was"; then
+    svc_start || { log error "previous bundle restored but service did not start"; return 1; }
+  fi
+}
+
+prune_unreferenced() {
+  local sha f
+  read_pointer
+  for f in "$SLOTS"/*; do
+    [[ -d $f && ! -L $f ]] || continue
+    sha=$(basename -- "$f")
+    [[ $sha =~ $SHA_RE ]] || continue
+    [[ $sha == "$PTR_CURRENT" || $sha == "$PTR_PREVIOUS" ]] && continue
+    remove_slot_exact "$sha" || true
+  done
+  for f in "$BUNDLE_DIR"/*.tar.gz "$BUNDLE_DIR"/*.manifest.json "$BUNDLE_DIR"/*.manifest.json.sig; do
+    [[ -f $f && ! -L $f ]] || continue
+    sha=$(basename -- "$f")
+    sha=${sha%%.*}
+    [[ $sha =~ $SHA_RE ]] || continue
+    [[ $sha == "$PTR_CURRENT" || $sha == "$PTR_PREVIOUS" ]] && continue
+    # Slot removal needs the manifest; only drop it once no slot remains.
+    [[ -d $(slot_dir "$sha") ]] && continue
+    rm -f -- "$f"
+  done
+}
+
+space_check_flash() { # bytes
+  local need=$(( $1 / 1024 + 16384 )) have
+  have=$(free_kb "$BUNDLE_DIR")
+  [[ $have -ge $need ]] || { log error "insufficient flash space: need ${need}KB, have ${have}KB"; return 1; }
+}
+
+cmd_stage() { # archive manifest sig
+  local archive=${1:-} manifest=${2:-} sig=${3:-} sha base file rc=0
+  require_approval stage
+  [[ -f $archive && ! -L $archive && -f $manifest && ! -L $manifest && -f $sig && ! -L $sig ]] ||
+    die $EX_USAGE "usage: stage ARCHIVE MANIFEST SIGNATURE --approve"
+  ensure_state_dirs
+  sha=$(sha256sum -- "$archive" | awk '{print $1}')
+  base="$BUNDLE_DIR/.incoming-$sha"
+  for file in "$base.tar.gz" "$base.manifest.json" "$base.manifest.json.sig"; do
+    [[ -L $file ]] && die $EX_BLOCKED "refusing symlinked scratch file"
+    rm -f -- "$file"
+  done
+  space_check_flash "$(stat -c %s -- "$archive")" || exit $EX_SPACE
+  if ! { cp -- "$archive" "$base.tar.gz" && cp -- "$manifest" "$base.manifest.json" && cp -- "$sig" "$base.manifest.json.sig"; }; then
+    rm -f -- "$base.tar.gz" "$base.manifest.json" "$base.manifest.json.sig"
+    die $EX_SPACE "cannot copy bundle to flash"
+  fi
+  sync_path "$BUNDLE_DIR"
+  BUNDLE_OVERRIDE_BASE=$base
+  verify_bundle_files "$sha" && check_host_compat "$base.manifest.json" || rc=1
+  BUNDLE_OVERRIDE_BASE=""
+  if [[ $rc -ne 0 ]]; then
+    rm -f -- "$base.tar.gz" "$base.manifest.json" "$base.manifest.json.sig"
+    die $EX_VERIFY "bundle verification failed; nothing was staged"
+  fi
+  if ! { mv -T -- "$base.tar.gz" "$(bundle_archive "$sha")" &&
+         mv -T -- "$base.manifest.json" "$(bundle_manifest "$sha")" &&
+         mv -T -- "$base.manifest.json.sig" "$(bundle_sig "$sha")"; }; then
+    die $EX_CORRUPT "failed to publish staged files"
+  fi
+  sync_path "$BUNDLE_DIR"
+  log info "staged bundle $sha"
+  printf '%s\n' "$sha"
+}
+
+cmd_activate() { # sha
+  local target=${1:-} previous was_running=0 rc
+  require_approval activate
+  [[ $target =~ $SHA_RE ]] || die $EX_USAGE "usage: activate SHA256 --approve"
+  ensure_state_dirs
+  require_no_journal
+  read_pointer
+  previous=$PTR_CURRENT
+  if [[ $previous == "$target" ]]; then
+    log info "bundle $target is already active"
+    return 0
+  fi
+  materialize_slot "$target"
+  rc=$?
+  [[ $rc -eq 0 ]] || exit "$rc"
+  if [[ -n $previous ]]; then
+    materialize_slot "$previous" || die $EX_VERIFY "current bundle cannot be re-verified; refusing an update without rollback target"
+  fi
+  svc_pid >/dev/null && was_running=1
+  write_journal activating "$target" "$previous" "$was_running"
+  crash_point after_journal
+  if [[ $was_running -eq 1 ]]; then
+    svc_stop daemon || { clear_journal; die $EX_BLOCKED "could not stop the running daemon; nothing changed"; }
+  fi
+  switch_current "$target" || { restore_previous "$previous" "$was_running"; clear_journal; die $EX_CORRUPT "could not switch bundle"; }
+  crash_point after_switch
+  write_pointer "$target" "$previous"
+  crash_point after_pointer
+  if want_running_after "$was_running"; then
+    if ! svc_start; then
+      log error "activation failed health check: rolling back"
+      restore_previous "$previous" "$was_running" || log error "ROLLBACK ALSO FAILED: manual intervention required"
+      clear_journal
+      die $EX_HEALTH "health check failed; previous bundle restored"
+    fi
+    crash_point after_start
+  fi
+  clear_journal
+  prune_unreferenced
+  log info "activated bundle $target (previous: ${previous:-none})"
+}
+
+cmd_update() { # archive manifest sig
+  local sha
+  require_approval update
+  sha=$(cmd_stage "$@" | tail -n1) || exit $?
+  cmd_activate "$sha"
+}
+
+cmd_rollback() {
+  local was=0 previous bad
+  require_approval rollback
+  ensure_state_dirs
+  require_no_journal
+  read_pointer
+  [[ -n $PTR_CURRENT ]] || { log info "nothing to roll back"; return 0; }
+  previous=$PTR_PREVIOUS bad=$PTR_CURRENT
+  [[ -n $previous ]] || die $EX_BLOCKED "no previous bundle recorded"
+  materialize_slot "$previous" || die $EX_VERIFY "previous bundle cannot be verified; refusing rollback"
+  svc_pid >/dev/null && was=1
+  write_journal rolling-back "$bad" "$previous" "$was"
+  crash_point after_journal
+  restore_previous "$previous" "$was" || { clear_journal; die $EX_HEALTH "rollback target did not start; state restored to previous bundle, service down"; }
+  clear_journal
+  prune_unreferenced
+  log info "rolled back to $previous"
+}
+
+sweep_stale_incoming() {
+  local stale name sha
+  for stale in "$SLOTS"/.incoming-*; do
+    [[ -d $stale && ! -L $stale ]] || continue
+    name=$(basename -- "$stale")
+    sha=${name#.incoming-}
+    if [[ $sha =~ $SHA_RE ]]; then
+      cleanup_stale_incoming "$sha"
+    fi
+    [[ ! -e $stale ]] || log warn "stale incoming slot remains: $name (undeclared content; remove manually)"
+  done
+}
+
+cmd_recover() {
+  local was=0
+  require_approval recover
+  ensure_state_dirs
+  read_journal
+  read_pointer
+  if [[ -z $JR_PHASE ]]; then
+    sweep_stale_incoming
+    log info "no unfinished transaction"
+    return 0
+  fi
+  sweep_stale_incoming
+  log warn "recovering unfinished '$JR_PHASE' transaction (target ${JR_TARGET:-none}): restoring ${JR_PREVIOUS:-<none>}"
+  svc_pid >/dev/null && was=1
+  [[ $JR_WAS_RUNNING -eq 1 ]] && was=1
+  restore_previous "$JR_PREVIOUS" "$was" || die $EX_CORRUPT "recovery failed; journal kept for inspection"
+  clear_journal
+  log info "recovery complete"
+}
+
+cmd_uninstall() {
+  local sha f path
+  require_approval uninstall
+  ensure_state_dirs
+  read_journal
+  [[ -z $JR_PHASE ]] || die $EX_PENDING "unfinished transaction; run recover first"
+  read_pointer
+  svc_stop full || die $EX_BLOCKED "could not stop the daemon; uninstall aborted before any removal"
+  switch_current ""
+  for f in "$SLOTS"/*; do
+    [[ -d $f && ! -L $f ]] || continue
+    sha=$(basename -- "$f")
+    [[ $sha =~ $SHA_RE ]] && remove_slot_exact "$sha"
+  done
+  for f in "$BUNDLE_DIR"/*; do
+    [[ -f $f && ! -L $f ]] || continue
+    path=$(basename -- "$f")
+    sha=${path%%.*}
+    if [[ $sha =~ $SHA_RE && $path =~ ^[0-9a-f]{64}\.(tar\.gz|manifest\.json|manifest\.json\.sig)$ ]] && [[ ! -d $(slot_dir "$sha") ]]; then
+      rm -f -- "$f"
+    fi
+  done
+  rm -f -- "$STATE_DIR/pointer.json" "$STATE_DIR/journal.json"
+  subid_file_remove "$SUBID_DIR/subuid" || true
+  subid_file_remove "$SUBID_DIR/subgid" || true
+  rm -f -- "$PIDFILE"
+  rmdir -- "$RUN_DIR/client" 2>/dev/null || true
+  rmdir -- "$SLOTS" "$RAM_DIR" 2>/dev/null || true
+  rmdir -- "$BUNDLE_DIR" "$STATE_DIR" 2>/dev/null || true
+  log info "uninstalled; settings and DATA_DIR were not touched"
+}
+
+cmd_boot() {
+  local rc
+  ensure_state_dirs
+  read_journal
+  if [[ -n $JR_PHASE ]]; then
+    APPROVED=1
+    cmd_recover
+    return
+  fi
+  sweep_stale_incoming
+  read_pointer
+  if [[ -z $PTR_CURRENT ]]; then
+    log info "boot: no bundle installed"
+    return 0
+  fi
+  materialize_slot "$PTR_CURRENT"
+  rc=$?
+  [[ $rc -eq 0 ]] || die "$rc" "boot: active bundle cannot be materialized; service not started"
+  switch_current "$PTR_CURRENT" || die $EX_CORRUPT "boot: cannot link active bundle"
+  if [[ $(cfg_get SERVICE disabled) == enabled ]]; then
+    svc_start || die $EX_HEALTH "boot: service failed to start"
+  else
+    log info "boot: service is disabled in settings; not starting"
+  fi
+}
+
+# ------------------------------------------------------------ read-only ----
+STATE_NAME=""
+state_name() {
+  STATE_NAME=ABSENT
+  if [[ -e "$STATE_DIR/journal.json" ]]; then
+    STATE_NAME=JOURNAL_PENDING
+    return
+  fi
+  [[ -e "$STATE_DIR/pointer.json" ]] || return 0
+  if ! (read_pointer) >/dev/null 2>&1; then
+    STATE_NAME=CORRUPT
+    return
+  fi
+  read_pointer
+  [[ -n $PTR_CURRENT ]] || return 0
+  if svc_pid >/dev/null; then STATE_NAME=RUNNING; else STATE_NAME=ACTIVE; fi
+}
+
+cmd_status() {
+  local json=0 state version=""
+  [[ ${1:-} == --json ]] && json=1
+  state_name
+  state=$STATE_NAME
+  if [[ $state == JOURNAL_PENDING ]] && (read_pointer) >/dev/null 2>&1; then
+    read_pointer
+  fi
+  if [[ -n $PTR_CURRENT && -f $(bundle_manifest "$PTR_CURRENT") ]]; then
+    version=$(jq -r .version "$(bundle_manifest "$PTR_CURRENT")" 2>/dev/null || true)
+  fi
+  if [[ $json -eq 1 ]]; then
+    jq -n --arg state "$state" --arg cur "$PTR_CURRENT" --arg prev "$PTR_PREVIOUS" --arg ver "$version" \
+      --arg ctl "$CTL_VERSION" --arg gate "$POLYSEAT_RELEASE_GATE" --arg data "$(cfg_get DATA_DIR "")" \
+      '{state:$state,current:$cur,previous:$prev,version:$ver,controller:$ctl,release_gate:$gate,data_dir:$data}'
+  else
+    printf 'state=%s\ncurrent=%s\nprevious=%s\nversion=%s\ncontroller=%s\nrelease_gate=%s\nservice_setting=%s\ndata_dir=%s\n' \
+      "$state" "${PTR_CURRENT:-}" "${PTR_PREVIOUS:-}" "$version" "$CTL_VERSION" "$POLYSEAT_RELEASE_GATE" \
+      "$(cfg_get SERVICE disabled)" "$(cfg_get DATA_DIR "")"
+  fi
+  [[ $state != CORRUPT ]] || exit $EX_CORRUPT
+}
+
+cmd_verify() { # [sha]
+  local sha=${1:-} bad=0
+  if [[ -z $sha ]]; then
+    read_pointer
+    for sha in $PTR_CURRENT $PTR_PREVIOUS; do
+      if verify_bundle_files "$sha"; then printf 'OK %s\n' "$sha"; else printf 'FAIL %s\n' "$sha"; bad=1; fi
+    done
+    [[ -n $PTR_CURRENT ]] || echo "nothing installed"
+  else
+    if verify_bundle_files "$sha"; then printf 'OK %s\n' "$sha"; else printf 'FAIL %s\n' "$sha"; bad=1; fi
+  fi
+  [[ $bad -eq 0 ]] || exit $EX_VERIFY
+}
+
+cmd_health() {
+  validate_data_dir || exit $EX_BLOCKED
+  health_check || exit $EX_HEALTH
+  echo healthy
+}
+
+cmd_preflight() {
+  local kernel ok=1
+  kernel=$(uname -r | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+  chk() { if "$@"; then echo "PASS: $DESC"; else echo "FAIL: $DESC"; ok=0; fi; }
+  DESC="kernel $kernel >= 6.12"; chk version_ge "$kernel" 6.12
+  DESC="cgroup v2 unified hierarchy"; chk test "$(fs_type /sys/fs/cgroup)" = cgroup2fs
+  DESC="user namespaces enabled"; chk test "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)" -gt 0
+  DESC="/dev/net/tun present"; chk test -c /dev/net/tun
+  DESC="newuidmap/newgidmap present"; chk command -v newuidmap newgidmap
+  DESC="jq, tar, ssh-keygen present"; chk command -v jq tar ssh-keygen
+  if [[ -s /etc/subuid ]]; then echo "INFO: /etc/subuid has entries"; else echo "INFO: /etc/subuid empty (plugin would add a managed block at service start)"; fi
+  [[ -e /sys/kernel/security/lsm ]] && echo "INFO: LSM: $(cat /sys/kernel/security/lsm)" || echo "INFO: no LSM (no AppArmor/SELinux confinement)"
+  pgrep -x incusd >/dev/null && echo "WARN: an incusd is already running" || echo "INFO: no foreign incusd"
+  echo "INFO: read-only checks only; nothing was changed"
+  [[ $ok -eq 1 ]] || exit $EX_BLOCKED
+}
+
+cmd_diagnose() {
+  echo "== polyseatctl $CTL_VERSION (gate: $POLYSEAT_RELEASE_GATE)"
+  echo "== host"
+  echo "kernel=$(uname -r) glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null) unraid=$(host_unraid_version 2>/dev/null || echo unknown)"
+  echo "cgroup=$(fs_type /sys/fs/cgroup) subuid_entries=$(grep -vc '^#' /etc/subuid 2>/dev/null || echo 0)"
+  echo "== status"
+  cmd_status
+  echo "== managed processes"
+  if svc_pid >/dev/null 2>&1; then echo "incusd pid=$(svc_pid)"; else echo "incusd not running (by this plugin)"; fi
+  echo "== last log lines (redacted)"
+  if [[ -f $LOG_DIR/$PLUGIN.log ]]; then
+    tail -n 50 -- "$LOG_DIR/$PLUGIN.log" | sed -E 's/((TOKEN|PASS(WORD)?|SECRET|KEY)[A-Za-z_]*)[=:] *[^ ]+/\1=<redacted>/Ig'
+  fi
+}
+
+# ---------------------------------------------------------------- main ----
+usage() {
+  cat >&2 <<'EOF'
+usage: polyseatctl COMMAND [args]
+ read-only:  status [--json] | verify [SHA] | health | preflight | diagnose | version
+ service:    start | stop | restart | boot
+ installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
+                            rollback | recover | uninstall
+EOF
+  exit $EX_USAGE
+}
+
+main() {
+  local cmd=${1:-} arg args=()
+  [[ -n $cmd ]] || usage
+  shift
+  for arg in "$@"; do
+    if [[ $arg == --approve ]]; then APPROVED=1; else args+=("$arg"); fi
+  done
+  init_paths
+  if [[ -n $ROOT ]] && ! [[ $ROOT =~ ^/tmp/polyseat-ctl-[A-Za-z0-9_-]{6,}$ ]]; then
+    die $EX_BLOCKED "POLYSEAT_ROOT must be /tmp/polyseat-ctl-*"
+  fi
+  case "$cmd" in
+    version) echo "polyseatctl $CTL_VERSION"; return 0 ;;
+    status) cmd_status "${args[@]}"; return ;;
+    verify) cmd_verify "${args[@]}"; return ;;
+    health) cmd_health; return ;;
+    preflight) cmd_preflight; return ;;
+    diagnose) cmd_diagnose; return ;;
+    stage | activate | update | rollback | recover | uninstall | start | stop | restart | boot) ;;
+    *) usage ;;
+  esac
+  require_mutation_allowed
+  ensure_state_dirs
+  acquire_lock
+  case "$cmd" in
+    stage) cmd_stage "${args[@]}" ;;
+    activate) cmd_activate "${args[@]}" ;;
+    update) cmd_update "${args[@]}" ;;
+    rollback) cmd_rollback ;;
+    recover) cmd_recover ;;
+    uninstall) cmd_uninstall ;;
+    boot) cmd_boot ;;
+    start)
+      require_no_journal
+      read_pointer
+      [[ -n $PTR_CURRENT ]] || die $EX_BLOCKED "no bundle installed"
+      materialize_slot "$PTR_CURRENT" || die $EX_VERIFY "active bundle failed verification"
+      switch_current "$PTR_CURRENT"
+      svc_start || exit $EX_HEALTH
+      ;;
+    stop) svc_stop full ;;
+    restart)
+      require_no_journal
+      svc_stop daemon
+      svc_start || exit $EX_HEALTH
+      ;;
+  esac
+}
+
+main "$@"

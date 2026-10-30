@@ -48,11 +48,12 @@ def _entries(payload: Path) -> list[tuple[str, Path, int]]:
 
 def build(payload: Path, out_dir: Path, *, name: str, version: str,
           incus_version: str, min_unraid: str, min_glibc: str,
-          needed_libs: list[str], source_date_epoch: int = 0) -> tuple[Path, Path]:
+          needed_libs: list[str], min_kernel: str = "6.12",
+          source_date_epoch: int = 0) -> tuple[Path, Path]:
     if not SAFE_NAME.fullmatch(name) or not SAFE_VERSION.fullmatch(version):
         raise BundleError("unsafe bundle name or version")
     for label, value in (("incus_version", incus_version), ("min_unraid", min_unraid),
-                         ("min_glibc", min_glibc)):
+                         ("min_glibc", min_glibc), ("min_kernel", min_kernel)):
         if not SAFE_VERSION.fullmatch(value):
             raise BundleError(f"unsafe {label}")
     if any(not SAFE_SONAME.fullmatch(lib) for lib in needed_libs):
@@ -89,6 +90,7 @@ def build(payload: Path, out_dir: Path, *, name: str, version: str,
         "incus_version": incus_version,
         "min_unraid": min_unraid,
         "min_glibc": min_glibc,
+        "min_kernel": min_kernel,
         "needed_libs": sorted(set(needed_libs)),
         "archive_sha256": digest,
         "source_date_epoch": source_date_epoch,
