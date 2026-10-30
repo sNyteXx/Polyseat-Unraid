@@ -1,8 +1,11 @@
 # 🚧 WIP — DO NOT USE — Security and rollback contract
 
 **No Unraid installation, service control, migration, upgrade or rollback is
-enabled in this branch.** The contract is the minimum review bar for any
-future installer, not evidence that one is safe.
+enabled in this branch.** `plugin/src/emhttp/scripts/polyseatctl` implements
+this contract in bash but refuses every host mutation while its committed
+release gate is `closed` ([lifecycle](plugin-lifecycle.md)). It has only been
+exercised in `/tmp/polyseat-ctl-*` sandboxes with stub daemons. The contract is
+the minimum review bar, not evidence that the implementation is safe on Unraid.
 
 `unraid/lab/` contains **pure Python policy models** and a strictly confined
 **disposable filesystem transaction rehearsal**, not host executors:
@@ -30,7 +33,7 @@ filesystems, process rollback or host compatibility**.
 - The Incus administrative socket stays local with root-only access until
   separately reviewed; no Docker socket or host network namespace exposure.
 
-## Future state machine (not implemented)
+## State machine (implemented in `polyseatctl`; unproven on Unraid)
 
 | State | Allowed operator action | Required evidence |
 |---|---|---|

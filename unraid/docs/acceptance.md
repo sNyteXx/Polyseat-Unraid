@@ -5,18 +5,18 @@ only with recorded evidence from the relevant disposable test environment.
 
 | Gate | Requirement | Status |
 |---|---|---|
-| A | Read-only host diagnostics on actual Unraid release | Script present; real host not validated |
+| A | Read-only host diagnostics on actual Unraid release | **Done once, read-only, on one 7.3.3 host** ([inventory](host-inventory-unraid-7.3.3.md)); a disposable test system is still needed for any mutating evidence |
 | B1 | Immutable Incus/raft/cowsql source pins, Ubuntu build proof | Incus **7.5.1** compiled and passed the no-GPU CLI smoke ([proof](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221184)); **not** Unraid runtime evidence |
-| B2 | Complete runtime bundle, SBOM, signature/provenance and ABI test | Build-input SBOM generator added; complete runtime closure, signing, audit and Unraid ABI **TODO** |
-| C | Non-systemd service lifecycle, boot persistence, UID mapping | Incus daemon starts/stops without systemd on disposable Ubuntu Actions; persistent Unraid supervisor/boot **TODO** |
+| B2 | Complete runtime bundle, SBOM, signature/provenance and ABI test | Offline ABI closure check against real Unraid 7.3.3 sonames/symbol versions, reproducible bundle builder and signature verification are implemented and tested; liblxc/cowsql runtime closure, runtime SBOM, release signing key and vulnerability audit **TODO** |
+| C | Non-systemd service lifecycle, boot persistence, UID mapping | `polyseatctl` start/stop/restart/boot/health implemented and tested with stub daemons; real `incusd` under the controller, `cgroup2-unraid` interplay, idmapped mounts and Unraid boot **TODO** |
 | D | Network isolation without Docker, libvirt or bridge changes | Offline plan rejects `br0`, NAT, host and bridged modes; real reachable isolation **TODO** |
 | E | One seat with verified host GPU ownership, NVIDIA NVENC and input | Active VM/vfio conflicts blocked in fixtures; physical GPU/NVENC **TODO** |
 | F | Two seats and Moonlight soak test | TODO |
 | G | Shared library and per-seat storage on selected filesystem | TODO |
-| H | Backup, stage, upgrade, rollback and uninstall without data loss | Real atomic pointer/journal/rollback **only inside a private disposable `/tmp` filesystem lab**; host integration, backup/upgrade/uninstall and Unraid trials **TODO** |
+| H | Backup, stage, upgrade, rollback and uninstall without data loss | Controller implements verified staging, journal, atomic switch, health-check rollback, recovery, manual rollback and exact-path uninstall; 54+ sandbox tests incl. hostile archives, corrupt/missing lib, failed start, no space, crash at each step, corrupt state. **Not run on Unraid**; power-loss and flash-filesystem behaviour **TODO** |
 | I | Steam/Proton/Once Human and anti-cheat | Unverified; no compatibility guarantee |
 
-There is no installable `.plg` until B2–H have passed. Production deployment
+There is no installable `.plg` (only a non-installable template) until B2–H have passed. Production deployment
 or GOW migration requires a separate, explicit operator decision.
 
 **All status items that mention offline tests are simulator evidence, not
