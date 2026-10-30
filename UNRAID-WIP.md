@@ -1,25 +1,42 @@
-# 🚧 WIP — DO NOT USE — EXPERIMENTAL UNRAID PORT
+# 🚧 WIP — DO NOT USE — Experimental Unraid port
 
-> **DANGER: NOT INSTALLABLE OR SUPPORTED.** Do not run Polyseat host preparation, Incus initialization, network bridging, or GPU passthrough changes on a production Unraid server. This branch is a feasibility scaffold only. It has not been validated on Unraid hardware. GOW must remain installed until an independently verified migration.
+> **Not installable or supported.** This branch is a feasibility project, not an
+> Unraid release. Do not run upstream `polyseat-prepare`, initialize Incus,
+> modify bridges, change GPU passthrough, or install anything on a production
+> Unraid host. Keep the existing GOW installation intact.
 
 ## Goal
-Native Unraid plugin lifecycle for Polyseat without replacing Unraid's Docker, libvirt, network bridge, or NVIDIA host driver. This is **not** a production-ready implementation.
 
-## Gates
-1. Read-only preflight on Unraid 7.3.x: kernel features, cgroup v2, namespaces, NVIDIA, mount filesystems, existing bridge and occupied ports.
-2. Build Incus userspace in isolated CI and verify host kernel requirements; do not assume systemd or apt/pacman/dnf.
-3. Demonstrate isolated Incus startup and shutdown without touching br0, Docker or libvirt.
-4. Validate NVIDIA device mapping and NVENC with one headless seat, no Steam.
-5. Validate Sunshine/Moonlight, then a second seat, input separation, disk and memory isolation.
-6. Test shared library filesystem semantics; ZFS is not an automatic substitute for Btrfs/XFS reflinks.
-7. Explicit operator-approved migration and rollback, then optional GOW removal.
+Evaluate a native Unraid plugin lifecycle for Polyseat without replacing or
+modifying Unraid's Docker, libvirt, existing network bridges, host NVIDIA
+driver, or game data. No installable `.plg` is shipped.
 
-## Risks
-- Upstream host installer assumes supported distributions and systemd; **never run it on Unraid**.
-- Incus bridge and iptables/nftables rules may collide with Unraid networking.
-- NVIDIA GPU must not be concurrently passed through to a VM.
-- Steam/Proton/Once Human and anti-cheat remain unverified; no promises of compatibility.
-- Host boot persistence, UID mappings, input devices and kernel modules need dedicated tests.
+## What this branch can prove
 
-## Design constraints
-Keep all plugin-owned files under an explicit namespace, store persistent state on a user-selected pool, avoid host package mutation, do not download or execute remote installers, and fail closed on unsupported features. Provide dry-run, backup, rollback and uninstall that never deletes seats or game data by default.
+- Read-only, non-certifying host capability reports in `unraid/scripts/`.
+- Syntax/ShellCheck checks and a CI guard that rejects an installable `.plg`.
+- An **Ubuntu-only, source-pinned Incus userspace build proof**. Its binaries are
+  not a complete runtime bundle, and success says nothing about Unraid ABI,
+  kernel features, confinement, GPU mapping, boot, or rollback.
+- An explicit security/rollback design in
+  [unraid/docs/security-rollback-contract.md](unraid/docs/security-rollback-contract.md).
+
+## Acceptance gates (none waived by green CI)
+
+1. Read-only preflight on the **actual Unraid release** and hardware.
+2. Build an audited, versioned Incus runtime bundle, with signed provenance,
+   runtime dependencies, SBOM, and compatibility verification.
+3. Demonstrate isolated start/stop without systemd and without touching Docker,
+   libvirt, `br0`, or an existing Incus installation.
+4. Validate host GPU ownership and NVIDIA NVENC for one headless seat (no Steam).
+   A GPU exclusively passed through to a Windows VM cannot be assumed available
+   to host containers at the same time.
+5. Validate Sunshine/Moonlight, input isolation, two seats, resource limits.
+6. Test filesystem-specific shared-library semantics; ZFS is not automatically
+   equivalent to Btrfs/XFS reflinks.
+7. Verify an operator-approved staging, upgrade, rollback, and uninstall cycle
+   that retains seats, Steam libraries and GOW.
+
+See [the acceptance matrix](unraid/docs/acceptance.md). There is no automatic
+installation, GOW migration, host service startup, or merge to `main` in this
+proof-of-concept.

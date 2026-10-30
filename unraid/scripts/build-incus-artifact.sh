@@ -1,13 +1,120 @@
 #!/bin/sh
-# WIP DO NOT USE. Build only in disposable Linux CI, never on Unraid.
+# WIP / DO NOT USE. Builds a provenance-labelled userspace proof on disposable CI.
+# No Unraid install, service start, network changes, or host configuration changes.
 set -eu
-if [ "${CI:-}" != "true" ] || [ "${RUNNER_OS:-}" != "Linux" ]; then
-  echo 'Refusing: requires isolated Linux CI runner' >&2; exit 2
+
+die() {
+  printf 'BLOCKED: %s\n' "$1" >&2
+  exit 2
+}
+
+[ "${CI:-}" = true ] && [ "${RUNNER_OS:-}" = Linux ] ||
+  die 'isolated Linux GitHub Actions runner required'
+[ ! -e /etc/unraid-version ] ||
+  die 'never run this build script on Unraid'
+
+: "${GITHUB_WORKSPACE:?GitHub Actions workspace required}"
+: "${RUNNER_TEMP:?GitHub Actions temporary directory required}"
+: "${INCUS_COMMIT:?Incus SHA required}"
+: "${RAFT_COMMIT:?raft SHA required}"
+: "${COWSQL_COMMIT:?cowsql SHA required}"
+
+case "$GITHUB_WORKSPACE:$RUNNER_TEMP" in
+  /*:/*) ;;
+  *) die 'runner paths must be absolute' ;;
+esac
+
+for pinned in "$INCUS_COMMIT" "$RAFT_COMMIT" "$COWSQL_COMMIT"; do
+  case "$pinned" in
+    *[!0123456789abcdef]*) die 'a source revision is not a lowercase hex SHA' ;;
+  esac
+  [ "${#pinned}" -eq 40 ] || die 'source revisions must be full 40-character SHAs'
+done
+
+build_root=$(mktemp -d "$RUNNER_TEMP/polyseat-incus-proof.XXXXXXXX") ||
+  die 'could not create isolated build directory'
+prefix="$build_root/prefix"
+src="$build_root/incus"
+raft="$build_root/raft"
+cowsql="$build_root/cowsql"
+output="$GITHUB_WORKSPACE/incus-build-proof"
+export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+export CGO_CFLAGS="-I$prefix/include"
+export CGO_LDFLAGS="-L$prefix/lib"
+export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export CGO_LDFLAGS_ALLOW='(-Wl,-wrap,pthread_create)|(-Wl,-z,now)'
+export GOBIN="$build_root/go-bin"
+
+mkdir -p "$prefix" "$GOBIN" "$output/bin"
+
+# The three upstream Git repositories are fixed; callers cannot supply URLs.
+# Fetching a full SHA, then checking HEAD, prevents branch/tag drift.
+checkout_pinned() {
+  remote_url=$1
+  commit=$2
+  destination=$3
+  git init -q "$destination"
+  git -C "$destination" remote add origin "$remote_url"
+  git -C "$destination" fetch -q --depth 1 origin "$commit"
+  git -C "$destination" checkout -q --detach FETCH_HEAD
+  actual=$(git -C "$destination" rev-parse HEAD)
+  [ "$actual" = "$commit" ] || die 'downloaded source does not match pinned SHA'
+}
+
+checkout_pinned https://github.com/lxc/incus.git "$INCUS_COMMIT" "$src"
+checkout_pinned https://github.com/cowsql/raft.git "$RAFT_COMMIT" "$raft"
+checkout_pinned https://github.com/cowsql/cowsql.git "$COWSQL_COMMIT" "$cowsql"
+
+(
+  cd "$raft"
+  autoreconf -fi
+  ./configure --prefix="$prefix"
+  make -j2
+  make install
+)
+
+(
+  cd "$cowsql"
+  autoreconf -fi
+  ./configure --prefix="$prefix"
+  make -j2
+  make install
+)
+
+pkg-config --modversion raft cowsql
+make -C "$src" -j2
+
+for binary in incus incusd incus-agent incus-migrate; do
+  [ -x "$GOBIN/$binary" ] || die "missing expected built binary: $binary"
+  cp "$GOBIN/$binary" "$output/bin/$binary"
+done
+
+# A proof of compilation is not a relocatable runtime. Dynamic system and
+# cowsql/raft dependencies are deliberately reported, not hidden or installed.
+ldd "$GOBIN/incusd" > "$output/incusd-ldd.txt"
+if grep -q 'not found' "$output/incusd-ldd.txt"; then
+  die 'built incusd has unresolved dependencies even on the build runner'
 fi
-if [ -f /etc/unraid-version ]; then echo 'Refusing Unraid host' >&2; exit 2; fi
-: "${INCUS_VERSION:?Pin an explicit upstream release version}"
-case "$INCUS_VERSION" in *[!0-9A-Za-z._-]*|'') echo 'Invalid version' >&2; exit 2;; esac
-printf 'WIP artifact metadata only; build integration not validated: %s\n' "$INCUS_VERSION"
-mkdir -p dist
-printf 'incus_version=%s\nbuild_status=blocked_until_toolchain_and_source_pin_verified\n' "$INCUS_VERSION" > dist/incus-build-status.txt
-sha256sum dist/incus-build-status.txt > dist/SHA256SUMS
+
+{
+  printf 'INCUS_COMMIT=%s\n' "$INCUS_COMMIT"
+  printf 'RAFT_COMMIT=%s\n' "$RAFT_COMMIT"
+  printf 'COWSQL_COMMIT=%s\n' "$COWSQL_COMMIT"
+  printf 'GO_VERSION=%s\n' "$(go version)"
+  printf 'BUILD_HOST=%s\n' "$(uname -sm)"
+} > "$output/build-info.txt"
+
+printf '%s\n' \
+  'WIP — DO NOT USE ON UNRAID.' \
+  'This artifact proves only compilation on an Ubuntu GitHub Actions runner.' \
+  'It is not a complete dependency bundle, tested runtime, or installer.' \
+  'Do not execute it on Unraid, and do not modify Docker, libvirt, networking or GOW.' \
+  > "$output/NOTICE.txt"
+
+(
+  cd "$output"
+  sha256sum bin/* build-info.txt incusd-ldd.txt NOTICE.txt > SHA256SUMS
+  sha256sum --check SHA256SUMS
+)
+
+printf '%s\n' 'WIP build proof completed; NOT validated for Unraid.'

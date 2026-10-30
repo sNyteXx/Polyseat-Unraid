@@ -1,4 +1,5 @@
 name: Unraid WIP preflight checks
+
 on:
   push:
     paths:
@@ -8,19 +9,21 @@ on:
     paths:
       - 'unraid/**'
       - '.github/workflows/unraid-preflight-lint.yml'
+
+permissions:
+  contents: read
+
 jobs:
   shell-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Check shell syntax
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: POSIX shell syntax
         run: |
-          sh -n unraid/scripts/preflight.sh
-          sh -n unraid/scripts/check-host.sh
-          sh -n unraid/scripts/verify-runtime.sh
+          for script in unraid/scripts/*.sh unraid/tests/*.sh; do
+            sh -n "$script"
+          done
       - name: ShellCheck
-        run: shellcheck -s sh unraid/scripts/*.sh
-      - name: Ensure no executable installer is shipped
-        run: |
-          test ! -f unraid/plugin/polyseat-unraid.plg
-          test -f unraid/plugin/polyseat-unraid.plg.disabled
+        run: shellcheck -s sh unraid/scripts/*.sh unraid/tests/*.sh
+      - name: Disabled installer and CI-only build guardrails
+        run: sh unraid/tests/safety-contract.sh

@@ -1,22 +1,44 @@
-# 🚧 WIP — DO NOT USE — Incus build and verification plan
+# 🚧 WIP — DO NOT USE — Incus build and verification
 
-## Principle
-Build outside the Unraid host on a disposable Linux runner. Never install distribution packages or run upstream host preparation on Tower. A build is not proof of host compatibility.
+## Scope of the current workflow
 
-## Artifact pipeline
-1. Select and pin a specific upstream Incus source tag and immutable commit.
-2. Build with documented Go/C toolchain in an isolated CI environment.
-3. Produce a versioned archive, SHA-256 manifest, SBOM, and provenance metadata.
-4. Scan dependency vulnerabilities and validate artifact contents for symlinks/path traversal.
-5. Run isolated Incus unit tests and smoke tests on a disposable compatible Linux VM.
-6. Test exact bundle on a disposable Unraid-compatible environment before any host install.
-7. Require a manual operator approval for any runtime deployment; no auto-updates.
+`.github/workflows/incus-feasibility.yml` runs only on a disposable Ubuntu
+GitHub Actions runner. `unraid/scripts/build-incus-artifact.sh` actively
+refuses to run outside Linux CI or on an Unraid host.
 
-## Security boundary
-Incus is a privileged container manager. A compromised management socket can mean host compromise. Use Unix-socket-only administration with strict permissions; never expose the management API to the LAN by default. Do not use privileged host networking or mount the Docker socket.
+The build uses full, immutable source SHAs (chosen from the Incus 6.0.0 era):
 
-## Unraid-specific blockers
-Systemd is absent; service supervision must be explicit. Kernel config, idmap mounts, LSM profile availability, GPU device cgroup rules, bridge firewall integration, and persistent storage require functional validation. Existing br0, Docker and libvirt must remain untouched.
+| Source | Revision |
+|---|---|
+| `lxc/incus` (`v6.0.0`) | `714bcc5e42b189f54025b8567df1f3408a1cae2c` |
+| `cowsql/raft` | `e0928710bcc62806cc7074f010e462547decf4b7` |
+| `cowsql/cowsql` | `8c7d8cf13d37a1e8d2ec6fa2ee575b07575248df` |
 
-## Rollback gate
-Before enabling runtime, test clean shutdown, boot recovery, state preservation and removal without deleting any game library or seat. Abort on unknown state.
+The workflow builds the C libraries in a temporary prefix and then compiles
+Incus with the matching headers and libraries. It records the three exact
+source revisions, Go/toolchain information, dynamic dependency listing and
+SHA-256 checksums.
+
+**Limitations:** Ubuntu package dependencies and GitHub's runner image are
+not pinned, so this is source-pinned but not bit-for-bit reproducible. Incus
+6.0.0 is an old baseline and is **not approved for deployment**. The output
+does **not** include all required runtime libraries, a tested Unraid loader
+path, SBOM, signature, vulnerability review, or provenance attestation.
+Checksums establish integrity of the CI output, not its trustworthiness.
+
+## Remaining gates before any runtime use
+
+1. Choose a supported, security-reviewed Incus release and lock the complete
+   dependency/toolchain set.
+2. Produce a complete, relocatable runtime with SBOM, signed provenance,
+   dependency inventory and verified checksums.
+3. Scan and inspect all archive entries (symlinks, paths, ownership and modes)
+   before any extraction.
+4. Verify in a disposable compatible Linux VM, then on an isolated
+   Unraid-compatible test host; never on a production host first.
+5. Test non-systemd supervision, root socket permissions, idmaps, storage,
+   device cgroups, GPU/NVENC, network isolation, boot, and rollback.
+6. Require a separate explicit approval before deploying any runtime to Unraid.
+
+Incus runs with host-level privileges. Never expose its management socket to
+the LAN by default, mount the Docker socket, or run an unreviewed installer.

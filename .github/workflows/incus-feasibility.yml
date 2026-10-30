@@ -1,38 +1,58 @@
-name: WIP Incus real build (isolated, no deployment)
+name: WIP Incus pinned build proof (never deploy)
+
 on:
   workflow_dispatch:
   push:
+    branches: [wip/unraid-native-plugin]
     paths:
       - '.github/workflows/incus-feasibility.yml'
+      - 'unraid/scripts/build-incus-artifact.sh'
+
+permissions:
+  contents: read
+
 jobs:
   build:
+    if: github.ref == 'refs/heads/wip/unraid-native-plugin'
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
+    timeout-minutes: 45
+    env:
+      # Release tag v6.0.0, resolved to an immutable commit.
+      INCUS_COMMIT: 714bcc5e42b189f54025b8567df1f3408a1cae2c
+      # Compatible cowsql/raft source revisions from the Incus 6.0.0 period.
+      COWSQL_COMMIT: 8c7d8cf13d37a1e8d2ec6fa2ee575b07575248df
+      RAFT_COMMIT: e0928710bcc62806cc7074f010e462547decf4b7
     steps:
-      - name: Checkout pinned Incus release
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install build dependencies on disposable runner only
         run: |
-          git clone --depth 1 --branch v6.0.0 https://github.com/lxc/incus.git incus
-          cd incus
-          git rev-parse HEAD | tee ../incus-source-commit.txt
-      - name: Install build dependencies in ephemeral runner
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake autoconf-archive libtool libtool-bin \
+            build-essential git pkg-config libsqlite3-dev libacl1-dev \
+            libcap-dev libseccomp-dev libudev-dev libuv1-dev \
+            liblz4-dev libzstd-dev libbtrfs-dev libdevmapper-dev \
+            liblxc-dev libapparmor-dev protobuf-compiler
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.22.12'
+          cache: false
+
+      - name: Build pinned source and record binary dependencies
+        run: sh unraid/scripts/build-incus-artifact.sh
+
+      - name: Verify proof checksums and disabled installer
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config libsqlite3-dev libacl1-dev libcap-dev libseccomp-dev libudev-dev libuv1-dev liblz4-dev libzstd-dev libbtrfs-dev libdevmapper-dev liblxc-dev libapparmor-dev protobuf-compiler
-      - name: Build incus binaries
-        run: |
-          cd incus
-          make -j2
-      - name: Package artifacts with checksums
-        run: |
-          mkdir -p dist
-          find incus/bin -maxdepth 1 -type f -exec cp {} dist/ \;
-          test -n "$(find dist -type f -print -quit)"
-          (cd dist && sha256sum * > SHA256SUMS)
+          cd incus-build-proof
+          sha256sum --check SHA256SUMS
+          test ! -e ../unraid/plugin/polyseat-unraid.plg
+          test -f ../unraid/plugin/polyseat-unraid.plg.disabled
+
       - uses: actions/upload-artifact@v4
         with:
-          name: incus-build-WIP-NOT-UNRAID-VALIDATED
-          path: |
-            dist/
-            incus-source-commit.txt
+          name: incus-build-proof-NOT-FOR-UNRAID
+          path: incus-build-proof/
           retention-days: 7
+          if-no-files-found: error
