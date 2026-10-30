@@ -8,7 +8,7 @@ fail() {
   printf 'E2E BLOCKED/FAILED: %s\n' "$1" >&2
   exit 2
 }
-step() { printf '\n== %s\n' "$1"; }
+step() { printf '\n== %s\n' "$1"; if [ -n "${steps_file:-}" ]; then printf '%s\n' "$1" >> "$steps_file"; fi; }
 
 if [ "${CI:-}" != true ] || [ "${GITHUB_ACTIONS:-}" != true ] ||
    [ "${RUNNER_OS:-}" != Linux ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] ||
@@ -20,6 +20,8 @@ fi
 : "${INCUS_PROOF_STAGE:?}"
 proof="$GITHUB_WORKSPACE/incus-build-proof"
 ctl_src="$GITHUB_WORKSPACE/unraid/plugin/src/emhttp/scripts/polyseatctl"
+steps_file="$proof/e2e-steps.txt"
+rm -f "$steps_file" "$proof/e2e-result.txt"
 importer="$INCUS_PROOF_STAGE/incus/test/deps/import-busybox"
 if [ ! -f "$proof/bundle.env" ] || [ ! -x "$ctl_src" ] || [ ! -r "$importer" ]; then fail 'build outputs missing'; fi
 if pgrep -x incusd >/dev/null 2>&1; then fail 'an incusd already runs on this runner'; fi
@@ -246,4 +248,5 @@ cmp "$work/subid.before" "$work/subid.after" || fail '/etc/subuid or /etc/subgid
 if [ -e "$root/usr/local/polyseat-unraid" ]; then fail 'runtime directory still present'; fi
 if [ -e /var/lib/polyseat-lxc ]; then fail 'LXC state directory was not removed by uninstall'; fi
 
-printf '%s\n' 'PASS: controller end-to-end on real incusd (CPU-only, disposable runner; NOT Unraid evidence).'
+printf '%s\n' 'PASS: controller end-to-end on real incusd (CPU-only, disposable runner; NOT Unraid evidence).' |
+  tee "$proof/e2e-result.txt"

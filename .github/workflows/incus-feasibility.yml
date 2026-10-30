@@ -11,6 +11,8 @@ on:
       - 'unraid/scripts/ci-e2e-controller.sh'
       - 'unraid/scripts/check-bundle-abi.py'
       - 'unraid/scripts/make-runtime-bundle.py'
+      - 'unraid/scripts/make-test-report.sh'
+      - 'unraid/scripts/build-plugin-package.sh'
       - 'unraid/plugin/src/emhttp/scripts/polyseatctl'
       - 'unraid/lab/**'
       - 'unraid/abi/**'
@@ -85,6 +87,19 @@ jobs:
           python3 -m json.tool SBOM-build-source-only.cdx.json >/dev/null
           test ! -e ../unraid/plugin/polyseat-unraid.plg
           test -f ../unraid/plugin/polyseat-unraid.plg.disabled
+
+      - name: Assemble the CPU-only test artifact (reached only after a green controller end-to-end)
+        run: |
+          mkdir polyseat-test-package
+          sh unraid/scripts/build-plugin-package.sh "$(date -u +%Y.%m.%d).ci${GITHUB_RUN_NUMBER}" polyseat-test-package test-host
+          sh unraid/scripts/make-test-report.sh incus-build-proof polyseat-cpu-only-testbuild
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-cpu-only-testbuild-NOT-FOR-UNRAID
+          path: polyseat-cpu-only-testbuild/
+          retention-days: 14
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

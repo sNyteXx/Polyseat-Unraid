@@ -38,7 +38,7 @@ not an Unraid runtime or production installation.
 The controller, plugin template and design are described in
 [plugin lifecycle](docs/plugin-lifecycle.md); host facts and the Ubuntu-CI
 differences are in the [Unraid 7.3.3 inventory](docs/host-inventory-unraid-7.3.3.md);
-the CPU-only procedure for a **separate** test system is the
+the CPU-only test build and its safe plan are in [cpu-only-test-plan](docs/cpu-only-test-plan.md); the procedure for a **separate** test system is the
 [test-system runbook](docs/test-system-runbook.md). `polyseatctl` refuses all
 host mutation while its release gate is closed (the committed state).
 
