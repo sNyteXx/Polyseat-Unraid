@@ -127,6 +127,9 @@ cleanup() {
   polyseatctl stop >/dev/null 2>&1 || true
   mkdir -p "$proof/e2e-logs"
   cp "$root"/var/log/polyseat-unraid/* "$proof/e2e-logs/" 2>/dev/null || true
+  # The controller writes private (0600, root) logs; the CI user must be able to read and upload the copies.
+  chmod a+rX "$proof/e2e-logs" 2>/dev/null || true
+  chmod a+r "$proof"/e2e-logs/* "$proof"/e2e-steps.txt "$proof"/e2e-result.txt 2>/dev/null || true
 }
 trap cleanup EXIT
 
