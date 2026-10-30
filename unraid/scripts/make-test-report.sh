@@ -21,7 +21,11 @@ tick=$(printf '\140')
 mkdir -p "$out/bundle" "$out/logs"
 cp "$proof/bundle/$BUNDLE_SHA256.tar.gz" "$proof/bundle/$BUNDLE_SHA256.manifest.json" "$out/bundle/"
 cp "$proof/abi-report.json" "$proof/build-info.txt" "$proof/e2e-steps.txt" "$proof/e2e-result.txt" "$out/"
-cp "$proof/SBOM-build-source-only.cdx.json" "$out/"
+if [ -f "$proof/host-state-diff.txt" ]; then cp "$proof/host-state-diff.txt" "$out/"; fi
+cp "$proof/SBOM-build-source-only.cdx.json" "$proof/SBOM-runtime.cdx.json" "$out/"
+for optional in osv-report.json osv-report.txt SBOM-runtime-osv-triage.cdx.json govulncheck.txt; do
+  if [ -f "$proof/$optional" ]; then cp "$proof/$optional" "$out/"; fi
+done
 if [ -d "$proof/e2e-logs" ]; then cp "$proof"/e2e-logs/* "$out/logs/" 2>/dev/null || true; fi
 cp "$GITHUB_WORKSPACE"/polyseat-test-package/*.txz "$out/"
 package=$(basename "$(ls "$out"/*.txz)")
@@ -44,9 +48,17 @@ package=$(basename "$(ls "$out"/*.txz)")
   printf -- '- ABI check against the recorded Unraid 7.3.3 baseline: ok=%s, max glibc %s\n' \
     "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ok"])' "$out/abi-report.json")" \
     "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["glibc_max"])' "$out/abi-report.json")"
+  printf '\n## Supply-chain reports (report only)\n\n'
+  printf -- '- SBOM-runtime.cdx.json: exact bundle files with SHA-256, linked Go modules, pinned C sources, host-supplied libraries.\n'
+  if [ -f "$out/osv-report.txt" ]; then sed 's/^/    /' "$out/osv-report.txt" | head -n 12; fi
+  if [ -f "$out/govulncheck.txt" ]; then printf -- '- govulncheck (binary mode) output is in govulncheck.txt; reachability must be read by a human.\n'; fi
   printf '\n## Controller end-to-end on a real incusd (disposable Ubuntu runner)\n\n'
   sed 's/^/- PASSED: /' "$out/e2e-steps.txt"
   printf '\nResult line: %s%s%s\n' "$tick" "$(cat "$out/e2e-result.txt")" "$tick"
+  if [ -f "$out/host-state-diff.txt" ]; then
+    printf '\n## Host-state change measured during the run (runner, before vs after)\n\n'
+    head -n 30 "$out/host-state-diff.txt" | sed 's/^/    /'
+  fi
   cat <<'TEXT'
 
 ## What this does and does not prove

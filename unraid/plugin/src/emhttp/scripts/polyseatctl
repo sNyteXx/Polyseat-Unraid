@@ -42,6 +42,7 @@ init_paths() {
   BUNDLE_DIR="$FLASH_DIR/bundles"
   STATE_DIR="$FLASH_DIR/state"
   SIGNERS="$FLASH_DIR/allowed_signers"
+  REVOKED="$FLASH_DIR/revoked_keys"
   MARKER="$FLASH_DIR/DISPOSABLE_TEST_HOST"
   RAM_DIR="$ROOT/usr/local/$PLUGIN"
   SLOTS="$RAM_DIR/slots"
@@ -321,7 +322,14 @@ verify_signature() { # manifest sig
     return 0
   fi
   [[ -f $SIGNERS && ! -L $SIGNERS && -f $sig && ! -L $sig ]] || return 1
-  ssh-keygen -Y verify -f "$SIGNERS" -I "$SIGN_IDENTITY" -n "$SIGN_NAMESPACE" \
+  # An optional revocation list (public keys, one per line) is enforced; if it exists but is not a plain
+  # regular file the check fails closed instead of silently ignoring it.
+  local -a revoke=()
+  if [[ -e $REVOKED || -L $REVOKED ]]; then
+    [[ -f $REVOKED && ! -L $REVOKED ]] || return 1
+    revoke=(-r "$REVOKED")
+  fi
+  ssh-keygen -Y verify -f "$SIGNERS" -I "$SIGN_IDENTITY" -n "$SIGN_NAMESPACE" "${revoke[@]}" \
     -s "$sig" < "$manifest" >/dev/null 2>&1
 }
 

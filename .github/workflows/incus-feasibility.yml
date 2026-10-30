@@ -12,6 +12,10 @@ on:
       - 'unraid/scripts/check-bundle-abi.py'
       - 'unraid/scripts/make-runtime-bundle.py'
       - 'unraid/scripts/make-test-report.sh'
+      - 'unraid/scripts/make-runtime-sbom.py'
+      - 'unraid/scripts/osv-check.py'
+      - 'unraid/scripts/lib/build-core.sh'
+      - 'unraid/build-pins.env'
       - 'unraid/scripts/build-plugin-package.sh'
       - 'unraid/plugin/src/emhttp/scripts/polyseatctl'
       - 'unraid/lab/**'
@@ -87,6 +91,20 @@ jobs:
           python3 -m json.tool SBOM-build-source-only.cdx.json >/dev/null
           test ! -e ../unraid/plugin/polyseat-unraid.plg
           test -f ../unraid/plugin/polyseat-unraid.plg.disabled
+
+      - name: Vulnerability lookups (report only, never fails the build)
+        continue-on-error: true
+        run: |
+          python3 unraid/scripts/osv-check.py --modules incus-build-proof/go-modules.txt \
+            --buildinfo incus-build-proof/incusd-go-buildinfo.txt --pins unraid/build-pins.env \
+            --out-json incus-build-proof/osv-report.json --out-text incus-build-proof/osv-report.txt
+          python3 unraid/scripts/make-runtime-sbom.py --manifest incus-build-proof/bundle/*.manifest.json \
+            --abi-report incus-build-proof/abi-report.json --buildinfo incus-build-proof/incusd-go-buildinfo.txt \
+            --pins unraid/build-pins.env --osv-report incus-build-proof/osv-report.json --label ci \
+            --output incus-build-proof/SBOM-runtime-osv-triage.cdx.json
+          GOBIN="$RUNNER_TEMP/govulncheck-bin" go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          "$RUNNER_TEMP/govulncheck-bin/govulncheck" -mode=binary incus-build-proof/payload/bin/incusd \
+            > incus-build-proof/govulncheck.txt 2>&1 || true
 
       - name: Assemble the CPU-only test artifact (reached only after a green controller end-to-end)
         run: |

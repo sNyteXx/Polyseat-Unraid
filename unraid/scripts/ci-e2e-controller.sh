@@ -106,6 +106,24 @@ mod_failing() {
   chmod 0755 "$1/bin/incusd"
 }
 
+# Host-state evidence for the production-canary plan: what does a CPU-only Incus run change on the host?
+sysctl_keys='net.ipv4.ip_forward net.ipv6.conf.all.forwarding net.bridge.bridge-nf-call-iptables net.core.bpf_jit_enable
+  user.max_user_namespaces fs.inotify.max_user_instances fs.inotify.max_user_watches kernel.keys.maxkeys kernel.pid_max
+  vm.max_map_count vm.overcommit_memory'
+host_state() { # label
+  d="$work/hs.$1"
+  mkdir -p "$d"
+  lsmod | awk 'NR>1 {print $1}' | sort > "$d/modules"
+  { iptables-save 2>/dev/null || true; } | grep -v '^[#:]' | sort > "$d/iptables"
+  { ip6tables-save 2>/dev/null || true; } | grep -v '^[#:]' | sort > "$d/ip6tables"
+  { nft list ruleset 2>/dev/null || true; } > "$d/nft"
+  for k in $sysctl_keys; do printf '%s=%s\n' "$k" "$(sysctl -n "$k" 2>/dev/null || echo n/a)"; done > "$d/sysctl"
+  ip -br addr | awk '{print $1,$3}' | sort > "$d/addresses"
+  ss -ltnH 2>/dev/null | awk '{print $4}' | sort > "$d/listeners"
+  grep -vE ' (/tmp/polyseat-ctl-|/proc/|/sys/)' /proc/mounts | awk '{print $2,$3}' | sort > "$d/mounts"
+  find /sys/fs/cgroup -mindepth 1 -maxdepth 1 -printf '%f\n' | sort > "$d/cgroup-top"
+}
+host_state before
 ip -br link | awk '{print $1}' | sort > "$work/links.before"
 cat /etc/subuid /etc/subgid 2>/dev/null | sha256sum > "$work/subid.before"
 mkdir -p "$data/seats" "$data/games"
@@ -129,7 +147,7 @@ cleanup() {
   cp "$root"/var/log/polyseat-unraid/* "$proof/e2e-logs/" 2>/dev/null || true
   # The controller writes private (0600, root) logs; the CI user must be able to read and upload the copies.
   chmod a+rX "$proof/e2e-logs" 2>/dev/null || true
-  chmod a+r "$proof"/e2e-logs/* "$proof"/e2e-steps.txt "$proof"/e2e-result.txt 2>/dev/null || true
+  chmod a+r "$proof"/e2e-logs/* "$proof"/e2e-steps.txt "$proof"/e2e-result.txt "$proof"/host-state-diff.txt 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -241,6 +259,20 @@ polyseatctl uninstall --approve
 step '13. system and data state comparison'
 if pgrep -x incusd >/dev/null 2>&1; then fail 'incusd left running'; fi
 [ ! -e /sys/class/net/incusbr0 ] || fail 'an Incus bridge appeared'
+host_state after
+: > "$proof/host-state-diff.txt"
+for item in modules iptables ip6tables nft sysctl addresses listeners mounts cgroup-top; do
+  if ! diff -u "$work/hs.before/$item" "$work/hs.after/$item" > "$work/diff.$item"; then
+    printf '== CHANGED: %s\n' "$item" >> "$proof/host-state-diff.txt"
+    cat "$work/diff.$item" >> "$proof/host-state-diff.txt"
+  fi
+done
+[ -s "$proof/host-state-diff.txt" ] || printf 'no host-state change in modules, netfilter, sysctls, addresses, listeners, mounts or cgroup top level\n' > "$proof/host-state-diff.txt"
+# Netfilter rules and sysctls must be untouched by a disk-only container workload. Modules, addresses, listeners,
+# mounts and top-level cgroups are recorded as evidence (a shared runner has unrelated churn there).
+for item in iptables ip6tables nft sysctl; do
+  diff -q "$work/hs.before/$item" "$work/hs.after/$item" >/dev/null || fail "host state changed: $item (see host-state-diff.txt)"
+done
 ip -br link | awk '{print $1}' | sort > "$work/links.after"
 diff "$work/links.before" "$work/links.after" || fail 'network links changed'
 cat /etc/subuid /etc/subgid 2>/dev/null | sha256sum > "$work/subid.after"

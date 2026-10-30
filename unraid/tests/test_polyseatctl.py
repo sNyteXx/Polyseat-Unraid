@@ -495,6 +495,24 @@ class FailureTests(Base):
         self.assertEqual(result.code, 5, result.text)
         self.assertEqual(self.sb.bundle_files(), [])
 
+    def test_revoked_signing_keys_are_refused_and_a_bad_revocation_file_fails_closed(self):
+        b = self.sb.make_bundle("1.0.0")
+        self.assertOk(self.sb.stage(b))
+        revoked = self.sb.flash / "revoked_keys"
+        other = self.sb.make_key("someone-else")
+        revoked.write_text(other.with_suffix(".pub").read_text())
+        second = self.sb.make_bundle("1.0.1")
+        self.assertOk(self.sb.stage(second))                     # a list that does not name our key changes nothing
+        revoked.write_text(self.sb.key.with_suffix(".pub").read_text())
+        third = self.sb.make_bundle("1.0.2")
+        result = self.sb.stage(third)
+        self.assertEqual(result.code, 5, result.text)            # the signing key is now revoked
+        revoked.unlink()
+        revoked.symlink_to(self.sb.key.with_suffix(".pub"))
+        self.assertEqual(self.sb.stage(third).code, 5)           # symlinked revocation list: fail closed
+        revoked.unlink()
+        self.assertOk(self.sb.stage(third))
+
     def test_missing_signature_and_missing_allowed_signers_fail_closed(self):
         b = self.sb.make_bundle("1.0.0")
         empty = self.sb.work / "empty.sig"
