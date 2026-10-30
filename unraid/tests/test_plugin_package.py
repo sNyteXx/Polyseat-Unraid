@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import subprocess
 import tarfile
@@ -117,15 +118,17 @@ class TemplateTests(unittest.TestCase):
         for forbidden_target in ("/mnt", "DATA_DIR", ".cfg", "appdata"):
             self.assertNotIn(forbidden_target, remove.replace("/boot/config/plugins/polyseat-unraid/pkg", ""))
 
-    def test_defaults_never_overwrite_user_settings_and_start_disabled(self):
+    def test_plugin_never_writes_settings_and_defaults_start_disabled(self):
         result, out, _ = self.render()
         self.assertEqual(result.returncode, 0, result.stderr)
         root = ET.fromstring(out.read_text())
-        cfg = [f for f in root.findall("FILE") if (f.get("Name") or "").endswith("polyseat-unraid.cfg")][0]
-        self.assertIsNone(cfg.find("SHA256"))      # no checksum: an existing file is kept
-        self.assertIn('SERVICE="disabled"', cfg.find("INLINE").text)
-        self.assertIn('DATA_DIR=""', cfg.find("INLINE").text)
-        self.assertIn('ACCEPT_NO_LSM="no"', cfg.find("INLINE").text)
+        self.assertEqual(root.get("launch"), "Settings/PolyseatSettings")
+        names = [f.get("Name") or "" for f in root.findall("FILE")]
+        self.assertFalse([n for n in names if n.endswith(".cfg")])   # user settings are never touched
+        schema = json.loads((PLUGIN / "src/emhttp/schema.json").read_text())
+        self.assertEqual(schema["SERVICE"]["default"], "disabled")
+        self.assertEqual(schema["DATA_DIR"]["default"], "")
+        self.assertEqual(schema["ACCEPT_NO_LSM"]["default"], "no")
 
     def test_unsafe_render_inputs_are_rejected(self):
         for overrides in ({"version": "1.0"}, {"version": "2026.10.30;rm"}, {"base": "http://x.invalid/a"},
@@ -169,7 +172,9 @@ class PackageTests(unittest.TestCase):
             base = "usr/local/emhttp/plugins/polyseat-unraid"
             for name in ("scripts/polyseatctl", "event/disks_mounted", "event/stopping_svcs"):
                 self.assertEqual(members[f"{base}/{name}"].mode, 0o755, name)
-            self.assertEqual(members[f"{base}/PolyseatUnraid.page"].mode, 0o644)
+            for name in ("PolyseatTool.page", "PolyseatSettings.page", "PolyseatTile.page", "Polyseat.page", "schema.json",
+                         "include/lib.php", "include/api.php", "js/psu.js", "css/psu.css", "icons/polyseat-unraid.svg"):
+                self.assertEqual(members[f"{base}/{name}"].mode, 0o644, name)
             for member in members.values():
                 self.assertTrue(member.isreg() or member.isdir(), member.name)
                 self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 0))
@@ -207,7 +212,11 @@ class DenylistTests(unittest.TestCase):
         PLUGIN / "src/emhttp/scripts/polyseatctl",
         PLUGIN / "src/emhttp/event/disks_mounted",
         PLUGIN / "src/emhttp/event/stopping_svcs",
-        PLUGIN / "src/emhttp/PolyseatUnraid.page",
+        PLUGIN / "src/emhttp/PolyseatTool.page",
+        PLUGIN / "src/emhttp/PolyseatSettings.page",
+        PLUGIN / "src/emhttp/PolyseatTile.page",
+        PLUGIN / "src/emhttp/include/lib.php",
+        PLUGIN / "src/emhttp/include/api.php",
     ]
 
     def test_no_forbidden_host_mutations_in_shipped_code(self):
@@ -233,13 +242,6 @@ class DenylistTests(unittest.TestCase):
             self.assertEqual(check.returncode, 0, check.stderr)
         self.assertNotIn("--approve", (PLUGIN / "src/emhttp/event/disks_mounted").read_text())
 
-    def test_webui_page_is_read_only(self):
-        page = (PLUGIN / "src/emhttp/PolyseatUnraid.page").read_text()
-        self.assertIn("status --json", page)
-        self.assertNotIn("$_POST", page)
-        self.assertNotIn("$_GET", page)
-        self.assertNotIn("$_REQUEST", page)
-        self.assertNotIn("--approve", page)
 
 
 if __name__ == "__main__":

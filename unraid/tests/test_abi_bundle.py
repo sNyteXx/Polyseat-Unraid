@@ -164,6 +164,12 @@ class BundleTests(unittest.TestCase):
             with self.assertRaises(bundle.BundleError):
                 self.build(built_without=bad)
 
+    def test_rootfs_mount_is_fixed_and_recorded(self):
+        _, manifest_path = self.build()
+        self.assertEqual(json.loads(manifest_path.read_text())["lxc_rootfs_mount"], "/var/lib/polyseat-lxc/rootfs")
+        with self.assertRaises(bundle.BundleError):
+            self.build(lxc_rootfs_mount="/tmp/rootfs")
+
     def test_existing_output_is_not_overwritten(self):
         self.build()
         with self.assertRaises(bundle.BundleError):

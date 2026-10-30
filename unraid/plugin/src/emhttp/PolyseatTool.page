@@ -1,0 +1,109 @@
+Menu="Polyseat"
+Name="Polyseat"
+Icon="polyseat-unraid.svg"
+Type="xmenu"
+Tabs="false"
+Title="Polyseat"
+---
+<?PHP
+/* Detail page (WIP). State-changing buttons call include/api.php, which needs a same-origin POST,
+ * a CSRF token, a typed confirmation and an open release gate. See docs/plugin-lifecycle.md. */
+require_once '/usr/local/emhttp/plugins/polyseat-unraid/include/lib.php';
+$psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
+?>
+<link rel="stylesheet" href="<?=psu_e(psu_asset('css/psu.css'))?>">
+<div id="psu-tool" class="<?=psu_e(psu_root_classes($display ?? []))?>">
+ <div class="psu-page">
+  <div class="psu-banner" data-bind="gate-banner"><strong>Locked.</strong>
+   This WIP build cannot change the system: the release gate is closed. Status, logs and diagnostics are available.</div>
+  <div class="psu-banner" data-bind="notice" hidden role="status"></div>
+
+  <div class="psu-tabs" role="tablist" aria-label="Polyseat">
+   <button type="button" role="tab" class="psu-tab" data-tab="overview" aria-controls="psu-p-overview" aria-selected="true">Overview</button>
+   <button type="button" role="tab" class="psu-tab" data-tab="sessions" aria-controls="psu-p-sessions" aria-selected="false">Sessions &amp; seats</button>
+   <button type="button" role="tab" class="psu-tab" data-tab="runtime" aria-controls="psu-p-runtime" aria-selected="false">Runtime &amp; updates</button>
+   <button type="button" role="tab" class="psu-tab" data-tab="logs" aria-controls="psu-p-logs" aria-selected="false">Logs &amp; diagnostics</button>
+  </div>
+
+  <div role="tabpanel" id="psu-p-overview" class="psu-panel">
+   <div class="psu-grid">
+    <div class="psu-card"><h3>Service</h3>
+     <div class="psu-actions" style="margin-bottom:10px">
+      <span class="psu-pill muted" data-bind="state-pill">...</span>
+      <span class="psu-pill warn" data-bind="gate-pill">...</span>
+      <span class="psu-pill muted">CPU-only test mode</span>
+     </div>
+     <dl class="psu-kv">
+      <dt>Bundle</dt><dd data-bind="version">-</dd>
+      <dt>Daemon</dt><dd data-bind="daemon">-</dd>
+      <dt>Daemon memory</dt><dd data-bind="daemon-mem">-</dd>
+      <dt>Instances</dt><dd><span data-bind="instances">-</span> <span class="psu-muted">running / total</span></dd>
+     </dl>
+     <div class="psu-actions" style="margin-top:12px">
+      <button type="button" class="psu-btn primary" data-do="start" disabled>Start</button>
+      <button type="button" class="psu-btn" data-do="restart" disabled>Restart</button>
+      <button type="button" class="psu-btn danger" data-do="stop" disabled>Stop</button>
+     </div>
+    </div>
+    <div class="psu-card"><h3>Resources</h3>
+     <div class="psu-meter"><div class="psu-meter-head"><span>CPU load</span><span data-bind="cpu">-</span></div><div class="psu-bar"><i data-meter="cpu"></i></div></div>
+     <div class="psu-meter"><div class="psu-meter-head"><span>Memory</span><span data-bind="mem">-</span></div><div class="psu-bar"><i data-meter="mem"></i></div></div>
+     <div class="psu-meter"><div class="psu-meter-head"><span>Data directory</span><span data-bind="disk">-</span></div><div class="psu-bar"><i data-meter="disk"></i></div></div>
+    </div>
+    <div class="psu-card"><h3>Isolation</h3>
+     <dl class="psu-kv">
+      <dt>Network</dt><dd>No management listener, no bridge or firewall changes</dd>
+      <dt>GPU</dt><dd>Not used in this build (CPU-only)</dd>
+      <dt>Your data</dt><dd>Seats, games and Incus state stay in the data directory and are never removed by the plugin</dd>
+     </dl>
+    </div>
+   </div>
+  </div>
+
+  <div role="tabpanel" id="psu-p-sessions" class="psu-panel" hidden>
+   <div class="psu-card"><h3>Sessions &amp; seats</h3>
+    <p>Seats and streaming sessions become available only after the release gate is opened and the GPU and
+     streaming acceptance gates have passed. This build is CPU-only and does not create seats.</p>
+    <span class="psu-pill muted">Not available yet</span>
+   </div>
+  </div>
+
+  <div role="tabpanel" id="psu-p-runtime" class="psu-panel" hidden>
+   <div class="psu-card"><h3>Runtime bundles</h3>
+    <table class="psu-table">
+     <thead><tr><th>Version</th><th>Incus</th><th>Bundle</th><th>Role</th><th></th></tr></thead>
+     <tbody data-bind="bundles"></tbody>
+    </table>
+    <div class="psu-actions" style="margin-top:12px">
+     <button type="button" class="psu-btn danger" data-do="rollback" disabled>Roll back to previous</button>
+     <button type="button" class="psu-btn danger" data-do="recover" disabled>Recover interrupted update</button>
+    </div>
+    <p class="psu-muted">Every activation verifies checksum and signature, test-runs the new binaries, switches atomically,
+     health-checks and rolls back automatically on failure. New bundles are installed by the plugin update
+     (<code>plugin update polyseat-unraid.plg</code>) or on the console with <code>polyseatctl update</code>.</p>
+   </div>
+  </div>
+
+  <div role="tabpanel" id="psu-p-logs" class="psu-panel" hidden>
+   <div class="psu-card"><h3>Logs</h3>
+    <div class="psu-actions" style="margin-bottom:10px">
+     <select class="psu-input" style="width:auto" data-bind="log-which" aria-label="Log source">
+      <option value="controller">Controller</option><option value="incusd">Incus daemon</option></select>
+     <select class="psu-input" style="width:auto" data-bind="log-lines" aria-label="Lines">
+      <option value="100">100 lines</option><option value="200" selected>200 lines</option><option value="500">500 lines</option></select>
+     <button type="button" class="psu-btn" data-action="logs-refresh">Refresh</button>
+    </div>
+    <pre class="psu-log" data-bind="log" tabindex="0">(open this tab to load)</pre>
+   </div>
+   <div class="psu-card" style="margin-top:12px"><h3>Diagnostics</h3>
+    <p class="psu-muted">Read-only report for support. Token, password and key values are redacted.</p>
+    <div class="psu-actions" style="margin-bottom:10px">
+     <button type="button" class="psu-btn" data-action="diag-run">Run diagnostics</button>
+     <button type="button" class="psu-btn" data-action="diag-copy">Copy</button>
+    </div>
+    <pre class="psu-log" data-bind="diag" tabindex="0">(not run)</pre>
+   </div>
+  </div>
+ </div>
+</div>
+<?=psu_boot_script('psu-tool', 'initTool', $psu_cfg)?>

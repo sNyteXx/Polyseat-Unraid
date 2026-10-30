@@ -27,6 +27,7 @@ VER="@VERSION@"
 case "${1:-}" in
   --version) echo "$VER"; exit 0 ;;
   info) [ -e "$INCUS_DIR/FAIL_HEALTH" ] && exit 1; exit 0 ;;
+  list) echo '[{"name":"a","status":"Running"},{"name":"b","status":"Stopped"}]'; exit 0 ;;
   config) [ "${2:-}" = get ] && { cat "$INCUS_DIR/HTTPS_ADDR" 2>/dev/null; exit 0; } ;;
   admin)
     if [ "${2:-}" = shutdown ]; then
@@ -203,7 +204,7 @@ class Sandbox:
         manifest.write_text(json.dumps({
             "schema": 1, "name": "polyseat-incus", "version": version, "incus_version": version,
             "min_unraid": "7.2.0", "min_glibc": "2.31", "min_kernel": "5.4",
-            "needed_libs": ["libc.so.6"], "built_without": ["apparmor", "selinux"], "archive_sha256": sha, "source_date_epoch": 0,
+            "needed_libs": ["libc.so.6"], "built_without": ["apparmor", "selinux"], "lxc_rootfs_mount": "/var/lib/polyseat-lxc/rootfs", "archive_sha256": sha, "source_date_epoch": 0,
             "files": files}, sort_keys=True))
         return {"archive": archive, "manifest": manifest, "sig": self.sign(manifest), "sha": sha}
 

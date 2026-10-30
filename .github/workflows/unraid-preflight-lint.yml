@@ -32,12 +32,16 @@ jobs:
           for script in unraid/plugin/src/emhttp/scripts/* unraid/plugin/src/emhttp/event/*; do
             bash -n "$script"
           done
+      - name: JavaScript syntax
+        run: node --check unraid/plugin/src/emhttp/js/psu.js
       - name: Disabled installer and CI-only build guardrails
         run: sh unraid/tests/safety-contract.sh
       - name: Tool versions used by the controller tests
         run: |
           jq --version; tar --version | head -n1; ssh-keygen -V 2>&1 | head -n1 || true
           flock --version | head -n1; python3 --version
+          php --version | head -n1; node --version
+          command -v php >/dev/null || { echo "php is required for the WebUI tests"; exit 1; }
       - name: Offline simulations, ABI/bundle checks and controller sandbox tests
         run: |
           python3 -W error::ResourceWarning -m compileall -q unraid/lab

@@ -1,0 +1,64 @@
+Menu="Dashboard:0"
+Cond="version_compare(parse_ini_file('/etc/unraid-version')['version'],'6.11.9','>') && is_executable('/usr/local/emhttp/plugins/polyseat-unraid/scripts/polyseatctl')"
+---
+<?PHP
+/* Dashboard tile (WIP) using the documented $mytiles mechanism; the markup follows Unraid 7.3's
+ * own tiles (tbody > tile-header). Initial state is rendered server-side from one fast, read-only
+ * command; live values are polled through the read-only API. */
+require_once '/usr/local/emhttp/plugins/polyseat-unraid/include/lib.php';
+$psu_status = psu_json_from(psu_run_ctl(['status', '--json'], 8)) ?? [];
+$psu_state = (string)($psu_status['state'] ?? 'UNAVAILABLE');
+$psu_texts = ['RUNNING' => 'Running', 'ACTIVE' => 'Installed, stopped', 'ABSENT' => 'Not installed',
+              'JOURNAL_PENDING' => 'Recovery needed', 'CORRUPT' => 'State corrupt'];
+$psu_pill = ['RUNNING' => 'ok', 'ACTIVE' => 'muted', 'ABSENT' => 'muted'][$psu_state] ?? 'crit';
+$psu_gate = (string)($psu_status['release_gate'] ?? 'closed');
+$psu_text = $psu_texts[$psu_state] ?? 'Unavailable';
+$psu_classes = psu_e(psu_root_classes($display ?? [], 'psu-tile'));
+$psu_css = psu_e(psu_asset('css/psu.css'));
+$psu_boot = psu_boot_script('psu-tile', 'initTile', ['gate' => $psu_gate]);
+
+$mytiles['polyseat-unraid']['column2'] = <<<EOT
+<tbody title="_(Polyseat for Unraid)_">
+ <tr><td>
+  <span class='tile-header'>
+   <span class='tile-header-left'>
+    <i class='fa fa-cubes f32'></i>
+    <div class='section'>
+     <h3 class='tile-header-main'>Polyseat</h3>
+     <span data-bind='state-text'>{$psu_text}</span><br>
+    </div>
+   </span>
+   <span class='tile-header-right'>
+    <span class='tile-header-right-controls'>
+     <a href='#' data-action='refresh' title="_(Refresh)_"><i class='fa fa-fw fa-refresh control'></i></a>
+     <a href='/Tools/PolyseatTool' title="_(Details)_"><i class='fa fa-fw fa-th-list control'></i></a>
+     <a href='/Settings/PolyseatSettings' title="_(Settings)_"><i class='fa fa-fw fa-cog control'></i></a>
+    </span>
+   </span>
+  </span>
+ </td></tr>
+ <tr><td>
+  <link rel="stylesheet" href="{$psu_css}">
+  <div id="psu-tile" class="{$psu_classes}">
+   <div class="psu-tile-status">
+    <span class="psu-pill {$psu_pill}" data-bind="state-pill">{$psu_text}</span>
+    <span class="psu-pill warn" data-bind="gate-pill">...</span>
+    <span class="psu-pill muted">CPU-only</span>
+   </div>
+   <div class="psu-tile-stats">
+    <div class="psu-stat"><b>Daemon</b><span data-bind="daemon">-</span></div>
+    <div class="psu-stat"><b>Instances</b><span data-bind="instances">-</span></div>
+    <div class="psu-stat"><b>Memory</b><span data-bind="daemon-mem">-</span></div>
+    <div class="psu-stat"><b>Bundle</b><span data-bind="version">-</span></div>
+   </div>
+   <div class="psu-tile-meters">
+    <div class="psu-meter"><div class="psu-meter-head"><span>CPU</span><span data-bind="cpu">-</span></div><div class="psu-bar"><i data-meter="cpu"></i></div></div>
+    <div class="psu-meter"><div class="psu-meter-head"><span>RAM</span><span data-bind="mem">-</span></div><div class="psu-bar"><i data-meter="mem"></i></div></div>
+   </div>
+   <div class="psu-tile-note">WIP - experimental, read-only dashboard</div>
+  </div>
+  {$psu_boot}
+ </td></tr>
+</tbody>
+EOT;
+?>

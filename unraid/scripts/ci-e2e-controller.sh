@@ -48,8 +48,8 @@ printf 'polyseat-unraid-release namespaces="polyseat-unraid-bundle" %s\n' \
   "$(awk '{print $1, $2}' "$work/key.pub")" > "$flash/allowed_signers"
 
 ctl() {
-  env POLYSEAT_ROOT="$root" POLYSEAT_SUBID_DIR=/etc CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
-    RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" POLYSEAT_PROBE_REAL_SYS=1 "$@"
+  env POLYSEAT_ROOT="$root" POLYSEAT_CI_REAL_SYSTEM=1 CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+    RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" "$@"
 }
 polyseatctl() { ctl "$ctl_src" "$@"; }
 polyseatctl_crash() { crash_at=$1; shift; ctl env POLYSEAT_CRASH_AT="$crash_at" "$ctl_src" "$@"; }
@@ -102,6 +102,16 @@ head -c 4096 /dev/urandom > "$data/games/save.dat"
 (cd "$data" && sha256sum seats/seat1.cfg games/save.dat > "$work/user-data.sha256")
 
 cleanup() {
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    printf '\n== FAILURE DIAGNOSTICS (disposable runner)\n' >&2
+    incus info --show-log polyseat-ci-cpu >&2 2>/dev/null || true
+    for f in "$data"/incus/logs/polyseat-ci-cpu/lxc.log "$root"/var/log/polyseat-unraid/incusd.log \
+             "$root"/var/log/polyseat-unraid/incusd.out; do
+      [ -r "$f" ] && { printf -- '--- %s (tail)\n' "$f" >&2; tail -n 60 "$f" >&2; }
+    done
+    ls -ld /var/lib/polyseat-lxc /var/lib/polyseat-lxc/rootfs >&2 2>/dev/null || true
+  fi
   polyseatctl stop >/dev/null 2>&1 || true
   mkdir -p "$proof/e2e-logs"
   cp "$root"/var/log/polyseat-unraid/* "$proof/e2e-logs/" 2>/dev/null || true
@@ -220,5 +230,6 @@ cmp "$work/subid.before" "$work/subid.after" || fail '/etc/subuid or /etc/subgid
 [ -d "$data/incus" ] || fail 'Incus state directory was unexpectedly removed'
 [ -f "$flash/polyseat-unraid.cfg" ] || fail 'settings were removed'
 if [ -e "$root/usr/local/polyseat-unraid" ]; then fail 'runtime directory still present'; fi
+if [ -e /var/lib/polyseat-lxc ]; then fail 'LXC state directory was not removed by uninstall'; fi
 
 printf '%s\n' 'PASS: controller end-to-end on real incusd (CPU-only, disposable runner; NOT Unraid evidence).'

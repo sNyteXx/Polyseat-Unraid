@@ -256,19 +256,163 @@ class LsmTests(Base):
         self.assertIn("AppArmor is active", result.out)
 
 
-class SubidRedirectTests(Base):
-    def test_subid_directory_override_is_ignored_outside_github_runners(self):
+class SettingsAndViewsTests(Base):
+    def cfg(self):
+        return json.loads(self.sb.ctl("config-get").out)
+
+    def value(self, key):
+        return {e["key"]: e["value"] for e in self.cfg()}[key]
+
+    def test_config_get_reports_schema_defaults_and_user_values(self):
+        self.sb.write_cfg(SERVICE="enabled", HEALTH_TIMEOUT=None, DATA_DIR=None)
+        entries = {e["key"]: e for e in self.cfg()}
+        self.assertEqual(entries["SERVICE"]["value"], "enabled")
+        self.assertTrue(entries["SERVICE"]["user_set"])
+        self.assertEqual(entries["HEALTH_TIMEOUT"]["value"], "60")
+        self.assertFalse(entries["HEALTH_TIMEOUT"]["user_set"])
+        self.assertEqual(entries["DATA_DIR"]["value"], "")
+
+    def test_config_set_validates_writes_atomically_and_keeps_a_backup(self):
+        self.assertOk(self.sb.ctl("config-set", "SERVICE=enabled", "HEALTH_TIMEOUT=45"))
+        self.assertEqual(self.value("SERVICE"), "enabled")
+        self.assertEqual(self.value("HEALTH_TIMEOUT"), "45")
+        self.assertEqual(self.value("DATA_DIR"), DATA_LOGICAL_FOR_TESTS)
+        cfg = self.sb.flash / "polyseat-unraid.cfg"
+        self.assertEqual(oct(cfg.stat().st_mode & 0o777), "0o600")
+        self.assertTrue((self.sb.flash / "polyseat-unraid.cfg.bak").exists())
+        self.assertNotIn("ACCEPT_NO_LSM", cfg.read_text())     # untouched keys stay unset
+
+    def test_config_set_rejects_bad_input_without_changing_anything(self):
+        before = (self.sb.flash / "polyseat-unraid.cfg").read_text()
+        for pair in ("SERVICE=maybe", "HEALTH_TIMEOUT=5", "HEALTH_TIMEOUT=99999", "HEALTH_TIMEOUT=1e3",
+                     "UNKNOWN=1", "SUBID_COUNT=100", 'SERVICE=enabled"\nDATA_DIR="/mnt/x',
+                     "DATA_DIR=/etc", "DATA_DIR=/mnt/user/x", "DATA_DIR=/mnt/../etc", "ACCEPT_NO_LSM=YES",
+                     "lowercase=1", "SERVICE", "=x"):
+            result = self.sb.ctl("config-set", pair)
+            self.assertNotEqual(result.code, 0, pair)
+        self.assertEqual((self.sb.flash / "polyseat-unraid.cfg").read_text(), before)
+
+    def test_data_dir_must_exist_and_subid_range_must_fit(self):
+        self.assertNotEqual(self.sb.ctl("config-set", "DATA_DIR=/mnt/cache/nope").code, 0)
+        result = self.sb.ctl("config-set", "SUBID_START=4000000000", "SUBID_COUNT=1000000000")
+        self.assertEqual(result.code, 1, result.text)
+
+    def test_identity_settings_are_locked_while_the_service_runs(self):
         self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
-        elsewhere = self.sb.work / "other-etc"
-        elsewhere.mkdir()
-        (elsewhere / "subuid").write_text("")
-        (elsewhere / "subgid").write_text("")
-        env = {"POLYSEAT_SUBID_DIR": str(elsewhere), "CI": "true", "GITHUB_ACTIONS": "true",
-               "RUNNER_ENVIRONMENT": "self-hosted"}
+        self.assertOk(self.sb.ctl("start"))
+        for pair in ("SUBID_START=2000000", "DATA_DIR=/mnt/cache/appdata"):
+            result = self.sb.ctl("config-set", pair)
+            self.assertEqual(result.code, 2, pair)
+        self.assertOk(self.sb.ctl("config-set", "HEALTH_TIMEOUT=30"))   # harmless keys stay editable
+        self.assertEqual(self.sb.ctl("config-reset").code, 2)
+
+    def test_config_reset_restores_defaults_and_keeps_backup(self):
+        self.assertOk(self.sb.ctl("config-set", "SERVICE=enabled"))
+        self.assertOk(self.sb.ctl("config-reset"))
+        self.assertEqual(self.value("SERVICE"), "disabled")
+        self.assertEqual(self.value("DATA_DIR"), "")
+        self.assertIn("SERVICE", (self.sb.flash / "polyseat-unraid.cfg.bak").read_text())
+
+    def test_settings_changes_are_refused_on_a_real_host_with_closed_gate(self):
+        for command in (["config-set", "SERVICE=enabled"], ["config-reset"]):
+            result = self.sb.ctl(*command, root=False)
+            self.assertEqual(result.code, 2, command)
+            self.assertIn("gate is closed", result.text)
+
+    def test_list_shows_staged_bundles_and_pointer_roles(self):
+        v1, v2 = self.sb.make_bundle("1.0.0"), self.sb.make_bundle("1.1.0")
+        self.assertEqual(json.loads(self.sb.ctl("list").out), [])
+        self.assertOk(self.sb.install(v1))
+        self.assertOk(self.sb.install(v2))
+        listing = {e["sha"]: e for e in json.loads(self.sb.ctl("list").out)}
+        self.assertEqual(set(listing), {v1["sha"], v2["sha"]})
+        self.assertTrue(listing[v2["sha"]]["current"] and not listing[v2["sha"]]["previous"])
+        self.assertTrue(listing[v1["sha"]]["previous"])
+        self.assertEqual(listing[v2["sha"]]["version"], "1.1.0")
+        self.assertEqual(listing[v2["sha"]]["built_without"], ["apparmor", "selinux"])
+
+    def test_metrics_without_and_with_a_running_daemon(self):
+        idle = json.loads(self.sb.ctl("metrics").out)
+        self.assertFalse(idle["daemon"]["running"])
+        self.assertIsNone(idle["incus"])
+        self.assertGreater(idle["memory"]["total_kb"], 0)
+        self.assertEqual(len(idle["load"]), 3)
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        self.assertOk(self.sb.ctl("start"))
+        busy = json.loads(self.sb.ctl("metrics").out)
+        self.assertTrue(busy["daemon"]["running"])
+        self.assertGreater(busy["daemon"]["rss_kb"], 0)
+        self.assertEqual(busy["incus"], {"reachable": True, "total": 2, "running": 1})
+        self.assertEqual(busy["data_dir"]["path"], "/mnt/cache/appdata/polyseat")
+        self.assertGreater(busy["data_dir"]["free_kb"], 0)
+
+    def test_logs_are_bounded_redacted_and_read_only(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        with self.sb.log_file.open("a") as log:
+            log.write("2026 [info] token TOKEN=abc123 end\n")
+        out = self.sb.ctl("logs", "controller", "5").out
+        self.assertNotIn("abc123", out)
+        self.assertLessEqual(len(out.splitlines()), 5)
+        for bad in (["logs", "controller", "0"], ["logs", "controller", "501"], ["logs", "../etc/passwd"],
+                    ["logs", "controller", "5;id"]):
+            self.assertNotEqual(self.sb.ctl(*bad).code, 0, bad)
+
+
+DATA_LOGICAL_FOR_TESTS = "/mnt/cache/appdata/polyseat"
+
+
+class CiRealSystemTests(Base):
+    def test_real_system_addressing_is_ignored_outside_github_runners(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        env = {"POLYSEAT_CI_REAL_SYSTEM": "1", "CI": "true", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"}
         self.assertOk(self.sb.ctl("start", env=env))
-        self.assertEqual((elsewhere / "subuid").read_text(), "")
         self.assertIn("root:1000000", (self.sb.root / "etc/subuid").read_text())
-        self.assertEqual(self.sb.ctl("start", env={"POLYSEAT_SUBID_DIR": "/etc"}, root=False).code, 2)
+        self.assertTrue((self.sb.root / "var/lib/polyseat-lxc/rootfs").is_dir())
+        self.assertEqual(self.sb.ctl("start", env={"POLYSEAT_CI_REAL_SYSTEM": "1"}, root=False).code, 2)
+
+
+class LxcRootfsMountTests(Base):
+    def test_start_creates_only_the_plugin_owned_mount_point_and_uninstall_removes_it(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        parent = self.sb.root / "var/lib/polyseat-lxc"
+        self.assertFalse(parent.exists())
+        self.assertOk(self.sb.ctl("start"))
+        self.assertEqual(sorted(p.name for p in parent.iterdir()), ["rootfs"])
+        self.assertEqual(oct((parent / "rootfs").stat().st_mode & 0o777), "0o755")
+        self.assertOk(self.sb.ctl("uninstall", "--approve"))
+        self.assertFalse(parent.exists())
+
+    def test_uninstall_keeps_foreign_content_in_the_parent(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        self.assertOk(self.sb.ctl("start"))
+        keep = self.sb.root / "var/lib/polyseat-lxc/other"
+        keep.write_text("not ours")
+        self.assertOk(self.sb.ctl("uninstall", "--approve"))
+        self.assertTrue(keep.exists())
+        self.assertFalse((self.sb.root / "var/lib/polyseat-lxc/rootfs").exists())
+
+    def test_symlinked_state_directory_is_refused(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        (self.sb.root / "var/lib").mkdir(parents=True)
+        (self.sb.root / "var/lib/polyseat-lxc").symlink_to(self.sb.work)
+        result = self.sb.ctl("start")
+        self.assertNotEqual(result.code, 0)
+        self.assertIn("symlinked", result.text)
+        self.assertEqual(list(self.sb.work.glob("rootfs")), [])
+
+    def test_manifest_must_declare_exactly_the_fixed_mount_point(self):
+        d = b"data"
+        good = self.sb.craft_bundle([member("payload/bin/incus", d)], [file_entry("payload/bin/incus", d)])
+        manifest = json.loads(good["manifest"].read_text())
+        for value in ("MISSING", "/etc", "/var/lib/polyseat-lxc/../etc", "/var/lib/polyseat-lxc/rootfs/", "rootfs", ""):
+            broken = dict(manifest)
+            if value == "MISSING":
+                broken.pop("lxc_rootfs_mount")
+            else:
+                broken["lxc_rootfs_mount"] = value
+            good["manifest"].write_text(json.dumps(broken))
+            self.sb.sign(good["manifest"])
+            self.assertEqual(self.sb.stage(good).code, 5, value)
 
 
 class BootOrderingTests(Base):

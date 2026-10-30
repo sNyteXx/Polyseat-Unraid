@@ -49,18 +49,22 @@ init_paths() {
   RUN_DIR="$ROOT/var/run/$PLUGIN"
   LOG_DIR="$ROOT/var/log/$PLUGIN"
   SUBID_DIR="$ROOT/etc"
-  # Pointing the sub-ID files at the runner's real /etc is allowed only in a sandbox on a
-  # disposable GitHub-hosted runner (the daemon reads /etc/subuid, not the sandbox copy).
-  if [[ -n ${POLYSEAT_SUBID_DIR:-} && -n $ROOT && ${CI:-} == true && ${GITHUB_ACTIONS:-} == true &&
-        ${RUNNER_ENVIRONMENT:-} == github-hosted && ! -e /etc/unraid-version ]]; then
-    SUBID_DIR=$POLYSEAT_SUBID_DIR
-  fi
+  # A real daemon reads /etc/subuid, probes /sys and uses absolute compiled-in paths, none of which a
+  # sandbox root can redirect. Only a sandbox on a disposable GitHub-hosted runner may address the
+  # runner's real system, and only when the CI job asks for it explicitly.
+  if ci_real_system; then SUBID_DIR=/etc; fi
   UNRAID_VERSION_FILE="$ROOT/etc/unraid-version"
+  SCHEMA="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../schema.json"
   PIDFILE="$RUN_DIR/incusd.pid"
   LOCKFILE="$RUN_DIR/lock"
 }
 
 sandbox() { [[ -n "$ROOT" ]]; }
+
+ci_real_system() {
+  [[ -n $ROOT && ${POLYSEAT_CI_REAL_SYSTEM:-} == 1 && ${CI:-} == true && ${GITHUB_ACTIONS:-} == true &&
+     ${RUNNER_ENVIRONMENT:-} == github-hosted && ! -e /etc/unraid-version ]]
+}
 
 # ------------------------------------------------------------- logging ----
 log() {
@@ -141,12 +145,28 @@ write_json_atomic() { # path json-text
   sync_path "$dir"
 }
 
-cfg_get() { # KEY default
-  local key=$1 default=$2 value=""
+cfg_get() { # KEY fallback : user setting, else schema default, else fallback
+  local key=$1 fallback=$2 value="" have=0
   if [[ -f $CFG && ! -L $CFG ]]; then
-    value=$(awk -F= -v k="$key" '$1==k { v=$2; gsub(/^"|"$/, "", v); print v; exit }' "$CFG")
+    value=$(awk -F= -v k="$key" '$1==k { v=$2; gsub(/^"|"$/, "", v); print v; found=1; exit } END { exit !found }' "$CFG") && have=1
   fi
-  printf '%s\n' "${value:-$default}"
+  if [[ $have -eq 0 && -f $SCHEMA ]]; then
+    value=$(jq -r --arg k "$key" '.[$k].default // empty' "$SCHEMA" 2>/dev/null || true)
+    [[ -n $value ]] && have=1
+  fi
+  if [[ $have -eq 1 && -n $value ]]; then printf '%s\n' "$value"; else printf '%s\n' "$fallback"; fi
+}
+
+# Validate one KEY=VALUE against schema.json (the single source of truth shared with the WebUI).
+schema_validate() { # key value
+  [[ -f $SCHEMA ]] || return 1
+  jq -e --arg k "$1" --arg v "$2" '
+    .[$k] as $s
+    | $s != null and (
+        if $s.type=="enum" then ($s.values | index($v)) != null
+        elif $s.type=="int" then ($v|test("^[0-9]{1,10}$")) and (($v|tonumber) >= $s.min) and (($v|tonumber) <= $s.max)
+        elif $s.type=="path" then ($v=="" or ($v|test($s.pattern)))
+        else false end)' "$SCHEMA" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------- gate ----
@@ -278,6 +298,7 @@ validate_manifest_file() { # manifest sha
     and (.name|type=="string" and test("^[a-z][a-z0-9-]{1,40}$"))
     and (.version|ver) and (.incus_version|ver) and (.min_unraid|ver)
     and (.min_glibc|ver) and (.min_kernel|ver)
+    and (.lxc_rootfs_mount=="/var/lib/polyseat-lxc/rootfs")
     and (.built_without|type=="array" and length<=2 and (unique|length)==length
          and all(.[]; .=="apparmor" or .=="selinux"))
     and (.archive_sha256==$sha)
@@ -617,7 +638,7 @@ subid_file_remove() { # file
 # operator expects. That is refused unless ACCEPT_NO_LSM="yes" is set explicitly.
 sys_root() {
   # A sandbox probes its own fake tree unless a CI job asks for the runner's real /sys.
-  if sandbox && [[ ${POLYSEAT_PROBE_REAL_SYS:-} != 1 ]]; then printf '%s/sys\n' "$ROOT"; else printf '/sys\n'; fi
+  if sandbox && ! ci_real_system; then printf '%s/sys\n' "$ROOT"; else printf '/sys\n'; fi
 }
 
 lsm_active() { # apparmor|selinux
@@ -645,13 +666,35 @@ lsm_gate() { # manifest : returns 1 (and logs) if a deliberately unsupported LSM
   [[ $blocked -eq 0 ]]
 }
 
+# liblxc has its rootfs mount point compiled in as an absolute path (manifest: lxc_rootfs_mount).
+# It must exist or no container can start. Only that exact directory and its plugin-owned parent are created.
+LXC_STATE_PARENT="/var/lib/polyseat-lxc"
+
+lxc_mount_real() { # logical absolute path -> real path (sandbox-relative unless a CI job addresses the real system)
+  if sandbox && ! ci_real_system; then printf '%s%s\n' "$ROOT" "$1"; else printf '%s\n' "$1"; fi
+}
+
+ensure_lxc_rootfs_mount() { # manifest
+  local logical real parent
+  logical=$(jq -r '.lxc_rootfs_mount' "$1")
+  [[ $logical == "$LXC_STATE_PARENT/rootfs" ]] || { log error "unexpected lxc_rootfs_mount in manifest"; return 1; }
+  real=$(lxc_mount_real "$logical") parent=$(lxc_mount_real "$LXC_STATE_PARENT")
+  if [[ -L $parent || -L $real ]]; then log error "refusing a symlinked LXC state directory"; return 1; fi
+  (umask 022; mkdir -p -- "$parent" && mkdir -p -- "$real") || { log error "cannot create $logical"; return 1; }
+}
+
+remove_lxc_rootfs_mount() {
+  rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")" 2>/dev/null || true
+  rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT")" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------- data dir ----
 DATA_REAL=""
 INCUS_DIR=""
 
-validate_data_dir() {
+validate_data_dir() { # [candidate logical path]
   local d anc mode
-  d=$(cfg_get DATA_DIR "")
+  d=${1:-$(cfg_get DATA_DIR "")}
   [[ -n $d ]] || { log error "DATA_DIR is not configured (select a pool path first)"; return 1; }
   [[ $d =~ ^/mnt/[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || { log error "DATA_DIR must be an absolute path below /mnt"; return 1; }
   case "$d" in
@@ -712,6 +755,7 @@ svc_start() {
   slot_real=$(readlink -f -- "$CURRENT") || return 1
   active_sha=$(current_sha_from_link) || { log error "active bundle link is not a slot"; return 1; }
   lsm_gate "$(bundle_manifest "$active_sha")" || return 1
+  ensure_lxc_rootfs_mount "$(bundle_manifest "$active_sha")" || return 1
   validate_data_dir || return 1
   if svc_pid >/dev/null; then
     log info "service already running"
@@ -989,6 +1033,7 @@ cmd_uninstall() {
     fi
   done
   rm -f -- "$STATE_DIR/pointer.json" "$STATE_DIR/journal.json"
+  remove_lxc_rootfs_mount
   subid_file_remove "$SUBID_DIR/subuid" || true
   subid_file_remove "$SUBID_DIR/subgid" || true
   rm -f -- "$PIDFILE"
@@ -1021,6 +1066,142 @@ cmd_boot() {
   else
     log info "boot: service is disabled in settings; not starting"
   fi
+}
+
+# ----------------------------------------------------- settings/lists ----
+user_cfg_json() {
+  if [[ -f $CFG && ! -L $CFG ]]; then
+    awk -F= '/^[A-Z_]+="?[^"]*"?$/ { v=$2; gsub(/^"|"$/, "", v); print $1 "\t" v }' "$CFG" |
+      jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}'
+  else
+    echo '{}'
+  fi
+}
+
+cmd_config_get() {
+  jq -n --argjson user "$(user_cfg_json)" --slurpfile schema "$SCHEMA" '
+    $schema[0] | to_entries | map(. as $e | {
+      key: $e.key, type: $e.value.type, tab: $e.value.tab, label: $e.value.label,
+      values: ($e.value.values // null), min: ($e.value.min // null), max: ($e.value.max // null),
+      locked_while_running: ($e.value.locked_while_running // false),
+      default: $e.value.default, value: ($user[$e.key] // $e.value.default), user_set: ($user | has($e.key))})'
+}
+
+write_cfg_atomic() { # key=value lines on stdin
+  local tmp
+  mkdir -p -- "$FLASH_DIR"
+  tmp=$(mktemp "$FLASH_DIR/.cfg-XXXXXX") || return 1
+  cat > "$tmp"
+  chmod 0600 -- "$tmp"
+  sync_path "$tmp"
+  if [[ -f $CFG && ! -L $CFG ]]; then cp -p -- "$CFG" "$CFG.bak" || { rm -f -- "$tmp"; return 1; }; fi
+  mv -T -- "$tmp" "$CFG"
+}
+
+cmd_config_set() { # KEY=VALUE...
+  local pair key value running=0 start count current
+  declare -A change=()
+  [[ $# -gt 0 ]] || die $EX_USAGE "usage: config-set KEY=VALUE..."
+  for pair in "$@"; do
+    [[ $pair =~ ^([A-Z_]+)=(.*)$ ]] || die $EX_USAGE "bad setting: expected KEY=VALUE"
+    key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
+    schema_validate "$key" "$value" || die $EX_USAGE "invalid value for $key"
+    change[$key]=$value
+  done
+  svc_pid >/dev/null 2>&1 && running=1
+  for key in "${!change[@]}"; do
+    current=$(cfg_get "$key" "")
+    if [[ $running -eq 1 && ${change[$key]} != "$current" ]] &&
+       [[ $(jq -r --arg k "$key" '.[$k].locked_while_running // false' "$SCHEMA") == true ]]; then
+      die $EX_BLOCKED "$key cannot change while the service is running; stop it first"
+    fi
+  done
+  if [[ -n ${change[DATA_DIR]+x} && -n ${change[DATA_DIR]} ]]; then
+    validate_data_dir "${change[DATA_DIR]}" || die $EX_BLOCKED "DATA_DIR rejected (see log)"
+  fi
+  start=${change[SUBID_START]:-$(cfg_get SUBID_START 1000000)}
+  count=${change[SUBID_COUNT]:-$(cfg_get SUBID_COUNT 1000000000)}
+  (( start + count <= 4294967296 )) || die $EX_USAGE "SUBID range exceeds the 32-bit ID space"
+  {
+    echo "# Managed by polyseatctl config-set; unset keys use the plugin defaults."
+    for key in $(jq -r 'keys[]' "$SCHEMA"); do
+      if [[ -n ${change[$key]+x} ]]; then
+        printf '%s="%s"\n' "$key" "${change[$key]}"
+      elif [[ $(user_cfg_json | jq -r --arg k "$key" 'has($k)') == true ]]; then
+        printf '%s="%s"\n' "$key" "$(cfg_get "$key" "")"
+      fi
+    done
+  } | write_cfg_atomic || die $EX_CORRUPT "could not write settings"
+  log info "settings updated: $(printf '%s ' "${!change[@]}")(effective at next service start)"
+}
+
+cmd_config_reset() {
+  if svc_pid >/dev/null 2>&1; then die $EX_BLOCKED "stop the service before resetting settings"; fi
+  printf '%s\n' "# Managed by polyseatctl config-reset; all values use the plugin defaults." | write_cfg_atomic ||
+    die $EX_CORRUPT "could not write settings"
+  log info "settings reset to defaults (previous file kept as polyseat-unraid.cfg.bak)"
+}
+
+cmd_list() { # read-only: staged bundles on flash
+  local f sha out="[]" cur="" prev="" m
+  if (read_pointer) >/dev/null 2>&1; then read_pointer; cur=$PTR_CURRENT prev=$PTR_PREVIOUS; fi
+  for f in "$BUNDLE_DIR"/*.manifest.json; do
+    [[ -f $f && ! -L $f ]] || continue
+    sha=$(basename -- "$f" .manifest.json)
+    [[ $sha =~ $SHA_RE ]] || continue
+    m=$(jq -c --arg sha "$sha" --arg cur "$cur" --arg prev "$prev" \
+      --argjson arch "$([[ -f $BUNDLE_DIR/$sha.tar.gz ]] && echo true || echo false)" \
+      --argjson sig "$([[ -f $BUNDLE_DIR/$sha.manifest.json.sig ]] && echo true || echo false)" \
+      '{sha:$sha, version:(.version // ""), incus_version:(.incus_version // ""), built_without:(.built_without // []),
+        current:($sha==$cur), previous:($sha==$prev), has_archive:$arch, has_signature:$sig}' "$f" 2>/dev/null) || continue
+    out=$(jq -c --argjson m "$m" '. + [$m]' <<< "$out")
+  done
+  printf '%s\n' "$out"
+}
+
+cmd_metrics() { # read-only
+  local l1 l5 l15 cpus mt ma pid rss=null cpu=null data=null inc=null clk ticks fs
+  read -r l1 l5 l15 _ < /proc/loadavg
+  cpus=$(nproc)
+  mt=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+  ma=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+  if pid=$(svc_pid 2>/dev/null); then
+    rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$pid/status" 2>/dev/null || echo null)
+    clk=$(getconf CLK_TCK)
+    ticks=$(awk '{print $14 + $15}' "/proc/$pid/stat" 2>/dev/null || echo 0)
+    cpu=$(awk -v t="$ticks" -v c="$clk" 'BEGIN {printf "%.1f", t / c}')
+  else
+    pid=""
+  fi
+  if validate_data_dir >/dev/null 2>&1; then
+    fs=$(fs_type "$DATA_REAL")
+    data=$(df -Pk -- "$DATA_REAL" | awk -v p="$(cfg_get DATA_DIR "")" -v fs="$fs" 'NR==2 {printf "{\"path\":\"%s\",\"fstype\":\"%s\",\"total_kb\":%s,\"free_kb\":%s}", p, fs, $2, $4}')
+    if [[ -n $pid && -L $CURRENT ]]; then
+      inc=$(INCUS_CMD_TIMEOUT=6 run_incus list -f json 2>/dev/null |
+        jq -c '{reachable:true, total:length, running:([.[]|select(.status=="Running")]|length)}' 2>/dev/null) || inc=""
+      [[ -n $inc ]] || inc='{"reachable":false}'
+    fi
+  fi
+  jq -n --arg l1 "$l1" --arg l5 "$l5" --arg l15 "$l15" --argjson cpus "$cpus" \
+    --argjson mt "${mt:-0}" --argjson ma "${ma:-0}" --arg pid "$pid" --argjson rss "${rss:-null}" \
+    --argjson cpu "${cpu:-null}" --argjson data "${data:-null}" --argjson inc "${inc:-null}" '
+    {load:[($l1|tonumber),($l5|tonumber),($l15|tonumber)], cpus:$cpus,
+     memory:{total_kb:$mt, available_kb:$ma},
+     daemon:{running:($pid!=""), pid:(if $pid=="" then null else ($pid|tonumber) end), rss_kb:$rss, cpu_seconds:$cpu},
+     data_dir:$data, incus:$inc}'
+}
+
+cmd_logs() { # [controller|incusd] [lines]
+  local which=${1:-controller} nlines=${2:-100} file
+  [[ $nlines =~ ^[0-9]{1,3}$ && $nlines -ge 1 && $nlines -le 500 ]] || die $EX_USAGE "lines must be 1..500"
+  case "$which" in
+    controller) file="$LOG_DIR/$PLUGIN.log" ;;
+    incusd) file="$LOG_DIR/incusd.log" ;;
+    *) die $EX_USAGE "usage: logs [controller|incusd] [lines]" ;;
+  esac
+  [[ -f $file && ! -L $file ]] || return 0
+  tail -n "$nlines" -- "$file" |
+    sed -E 's/((TOKEN|PASS(WORD)?|SECRET|KEY)[A-Za-z_]*)[=:] *[^ ]+/\1=<redacted>/Ig'
 }
 
 # ------------------------------------------------------------ read-only ----
@@ -1131,6 +1312,8 @@ usage() {
   cat >&2 <<'EOF'
 usage: polyseatctl COMMAND [args]
  read-only:  status [--json] | verify [SHA] | health | preflight | diagnose | version
+             list | metrics | logs [controller|incusd] [N] | config-get
+ settings:   config-set KEY=VALUE... | config-reset
  service:    start | stop | restart | boot
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
@@ -1156,7 +1339,11 @@ main() {
     health) cmd_health; return ;;
     preflight) cmd_preflight; return ;;
     diagnose) cmd_diagnose; return ;;
-    stage | activate | update | rollback | recover | uninstall | start | stop | restart | boot) ;;
+    list) cmd_list; return ;;
+    metrics) cmd_metrics; return ;;
+    logs) cmd_logs "${args[@]}"; return ;;
+    config-get) cmd_config_get; return ;;
+    stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot) ;;
     *) usage ;;
   esac
   require_mutation_allowed
@@ -1170,6 +1357,8 @@ main() {
     recover) cmd_recover ;;
     uninstall) cmd_uninstall ;;
     boot) cmd_boot ;;
+    config-set) cmd_config_set "${args[@]}" ;;
+    config-reset) cmd_config_reset ;;
     start)
       require_no_journal
       read_pointer

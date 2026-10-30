@@ -26,7 +26,7 @@
 <!ENTITY manifestSHA256 "@MANIFEST_SHA256@">
 <!ENTITY sigSHA256  "@SIGNATURE_SHA256@">
 ]>
-<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="&min;" support="&supportURL;" launch="Settings/PolyseatUnraid">
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="&min;" support="&supportURL;" launch="Settings/PolyseatSettings">
 
 <CHANGES>
 ##&name;
@@ -68,20 +68,10 @@ exit 0
 <SHA256>&sigSHA256;</SHA256>
 </FILE>
 
-<!-- 4. Pinned release signer; defaults for settings. Existing files are never overwritten. -->
+<!-- 4. Pinned release signer. Settings are created by the WebUI/config-set; defaults live in schema.json. -->
 <FILE Name="&boot;/allowed_signers" Mode="0600">
 <INLINE>
 @SIGNER_LINE@
-</INLINE>
-</FILE>
-<FILE Name="&boot;/&name;.cfg" Mode="0600">
-<INLINE>
-SERVICE="disabled"
-DATA_DIR=""
-SUBID_START="1000000"
-SUBID_COUNT="1000000000"
-HEALTH_TIMEOUT="60"
-ACCEPT_NO_LSM="no"
 </INLINE>
 </FILE>
 

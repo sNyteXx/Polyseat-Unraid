@@ -1,0 +1,180 @@
+/* Polyseat for Unraid - WebUI styles (WIP). Original work; concepts only borrowed from the
+ * Unraid look. Colours come from Unraid's own theme variables (black/white/azure/gray and any
+ * future theme), with neutral fallbacks. Everything is scoped under .psu - no !important. */
+
+.psu {
+  --psu-fg: var(--text-color, #d8d8d8);
+  --psu-muted: var(--alt-text-color, #909090);
+  --psu-card: var(--mild-background-color, rgba(128, 128, 128, 0.12));
+  --psu-border: var(--border-color, rgba(128, 128, 128, 0.35));
+  --psu-link: var(--link-text-color, #486dba);
+  --psu-accent: var(--orange-500, #ff8c2f);
+  --psu-bar-bg: var(--usage-bar-background-color, rgba(128, 128, 128, 0.35));
+  --psu-ok: var(--green-500, #17bf0b);
+  --psu-warn: var(--orange-500, #ff8c2f);
+  --psu-crit: var(--red-500, #ff3300);
+  --psu-ok-text: var(--psu-ok);
+  --psu-warn-text: var(--psu-warn);
+  --psu-crit-text: #ff6a4d;
+  --psu-radius: 8px;
+  --psu-gap: 12px;
+  color: var(--psu-fg);
+  font-family: inherit;
+  font-size: 1.3rem;
+  line-height: 1.45;
+  box-sizing: border-box;
+}
+/* Light themes need darker status text for contrast. */
+.psu.psu-light {
+  --psu-ok-text: var(--green-800, #3a7d0a);
+  --psu-warn-text: #b04b00;
+  --psu-crit-text: var(--red-700, #c40e00);
+}
+.psu *, .psu *::before, .psu *::after { box-sizing: border-box; }
+.psu h2, .psu h3, .psu h4 { margin: 0; font-weight: 600; color: inherit; }
+.psu a { color: var(--psu-link); }
+.psu code { font-family: var(--font-bitstream, ui-monospace, monospace); font-size: 0.92em; word-break: break-all; }
+.psu .psu-muted { color: var(--psu-muted); }
+.psu .psu-hidden { display: none; }
+
+/* ---------- surfaces ---------- */
+.psu .psu-card {
+  background: var(--psu-card);
+  border: 1px solid var(--psu-border);
+  border-radius: var(--psu-radius);
+  padding: 14px 16px;
+  min-width: 0;
+}
+.psu .psu-card > h3 { font-size: 1.4rem; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.psu .psu-grid { display: grid; gap: var(--psu-gap); grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.psu .psu-grid.wide { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.psu .psu-page { max-width: 1280px; padding: 4px 0 24px; }
+.psu .psu-page > * + * { margin-top: var(--psu-gap); }
+
+/* ---------- key/value ---------- */
+.psu dl.psu-kv { margin: 0; display: grid; grid-template-columns: minmax(110px, max-content) 1fr; gap: 6px 14px; }
+.psu dl.psu-kv dt { color: var(--psu-muted); }
+.psu dl.psu-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+/* ---------- status ---------- */
+.psu .psu-pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 1px 10px; border-radius: 999px;
+  border: 1px solid currentColor; font-size: 1.15rem; line-height: 1.7; white-space: nowrap; font-weight: 600;
+}
+.psu .psu-pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.psu .psu-pill.ok { color: var(--psu-ok-text); }
+.psu .psu-pill.warn { color: var(--psu-warn-text); }
+.psu .psu-pill.crit { color: var(--psu-crit-text); }
+.psu .psu-pill.muted { color: var(--psu-muted); }
+.psu .psu-banner {
+  border: 1px solid var(--psu-border); border-left: 4px solid var(--psu-warn); border-radius: var(--psu-radius);
+  padding: 10px 14px; background: var(--psu-card);
+}
+.psu .psu-banner.crit { border-left-color: var(--psu-crit); }
+.psu .psu-banner.ok { border-left-color: var(--psu-ok); }
+.psu .psu-banner strong { margin-right: 6px; }
+
+/* ---------- bars ---------- */
+.psu .psu-meter { margin: 8px 0; }
+.psu .psu-meter-head { display: flex; justify-content: space-between; gap: 8px; font-size: 1.2rem; }
+.psu .psu-bar { height: 8px; border-radius: 4px; background: var(--psu-bar-bg); overflow: hidden; margin-top: 4px; }
+.psu .psu-bar > i { display: block; height: 100%; width: 0; background: var(--psu-ok); transition: width 0.4s ease; }
+.psu .psu-bar > i.warn { background: var(--psu-warn); }
+.psu .psu-bar > i.crit { background: var(--psu-crit); }
+
+/* ---------- controls (beat Unraid's global element styles by scoping, not !important) ---------- */
+.psu button.psu-btn {
+  appearance: none; font: inherit; cursor: pointer; margin: 0; width: auto; min-width: 0; max-width: none;
+  padding: 7px 16px; border-radius: 6px; border: 1px solid var(--psu-border);
+  background: var(--psu-card); color: var(--psu-fg); line-height: 1.3;
+}
+.psu button.psu-btn:hover:not(:disabled) { border-color: var(--psu-accent); }
+.psu button.psu-btn:focus-visible, .psu .psu-tab:focus-visible, .psu .psu-input:focus-visible { outline: 2px solid var(--psu-accent); outline-offset: 2px; }
+.psu button.psu-btn.primary { background: var(--psu-accent); border-color: var(--psu-accent); color: #1d1b1b; font-weight: 600; }
+.psu button.psu-btn.danger { border-color: var(--psu-crit); color: var(--psu-crit-text); }
+.psu button.psu-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.psu .psu-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.psu input.psu-input, .psu select.psu-input {
+  font: inherit; width: 100%; max-width: 100%; height: auto; margin: 0; padding: 7px 10px; border-radius: 6px;
+  border: 1px solid var(--psu-border); background: var(--background-color, transparent); color: var(--psu-fg);
+}
+.psu input.psu-input:disabled, .psu select.psu-input:disabled { opacity: 0.55; }
+.psu .psu-field { display: grid; grid-template-columns: minmax(180px, 34%) 1fr; gap: 6px 18px; padding: 12px 0; border-bottom: 1px solid var(--psu-border); }
+.psu .psu-field:last-child { border-bottom: 0; }
+.psu .psu-field label { font-weight: 600; }
+.psu .psu-field .psu-help { grid-column: 2; color: var(--psu-muted); font-size: 1.2rem; }
+.psu .psu-field .psu-err { grid-column: 2; color: var(--psu-crit-text); font-size: 1.2rem; }
+.psu .psu-dirty::after { content: " \2022"; color: var(--psu-accent); }
+
+/* ---------- tabs ---------- */
+.psu .psu-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--psu-border); overflow-x: auto; scrollbar-width: thin; }
+.psu .psu-tab {
+  appearance: none; font: inherit; background: none; color: var(--psu-muted); cursor: pointer; margin: 0;
+  border: 0; border-bottom: 3px solid transparent; padding: 9px 16px; white-space: nowrap; width: auto;
+}
+.psu .psu-tab[aria-selected="true"] { color: var(--psu-fg); border-bottom-color: var(--psu-accent); font-weight: 600; }
+.psu .psu-panel[hidden] { display: none; }
+
+/* ---------- tables that become cards on small screens ---------- */
+.psu table.psu-table { width: 100%; border-collapse: collapse; margin: 0; background: none; }
+.psu table.psu-table th, .psu table.psu-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--psu-border); background: none; }
+.psu table.psu-table th { color: var(--psu-muted); font-weight: 600; }
+
+/* ---------- logs ---------- */
+.psu pre.psu-log {
+  margin: 0; padding: 10px 12px; max-height: 420px; overflow: auto; border-radius: 6px; white-space: pre-wrap;
+  overflow-wrap: anywhere; background: var(--background-color, transparent); border: 1px solid var(--psu-border);
+  font-family: var(--font-bitstream, ui-monospace, monospace); font-size: 1.2rem; line-height: 1.5; color: var(--psu-fg);
+}
+.psu pre.psu-log .l-error { color: var(--psu-crit-text); }
+.psu pre.psu-log .l-warn { color: var(--psu-warn-text); }
+
+/* ---------- modal confirmation ---------- */
+.psu-modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: flex; align-items: center; justify-content: center; z-index: 10000; padding: 16px; }
+.psu-modal-backdrop[hidden] { display: none; }
+.psu-modal {
+  --psu-fg: var(--text-color, #ddd); max-width: 520px; width: 100%; border-radius: 10px; padding: 18px 20px;
+  background: var(--background-color, #1d1b1b); color: var(--text-color, #ddd); border: 1px solid var(--border-color, #555);
+}
+.psu-modal h3 { margin: 0 0 8px; }
+.psu-modal input { width: 100%; margin: 10px 0 14px; padding: 8px 10px; font: inherit; }
+.psu-modal .psu-actions { justify-content: flex-end; }
+
+/* ---------- dashboard tile (container queries, no viewport assumptions) ---------- */
+.psu-tile { container-type: inline-size; container-name: psutile; }
+.psu-tile .psu-tile-status { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+.psu-tile .psu-tile-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 8px 0; }
+.psu-tile .psu-stat { padding: 6px 8px; border: 1px solid var(--psu-border); border-radius: 6px; background: var(--psu-card); min-width: 0; }
+.psu-tile .psu-stat b { display: block; font-size: 1.15rem; color: var(--psu-muted); font-weight: 600; }
+.psu-tile .psu-stat span { font-size: 1.5rem; font-weight: 600; overflow-wrap: anywhere; }
+.psu-tile .psu-tile-meters { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+.psu-tile .psu-tile-note { font-size: 1.15rem; color: var(--psu-muted); margin-top: 6px; }
+@container psutile (max-width: 460px) {
+  .psu-tile .psu-tile-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .psu-tile .psu-tile-meters { grid-template-columns: 1fr; }
+}
+@container psutile (max-width: 260px) {
+  .psu-tile .psu-tile-stats { grid-template-columns: 1fr; }
+}
+
+/* ---------- responsive pages ---------- */
+@media (max-width: 900px) {
+  .psu .psu-field { grid-template-columns: 1fr; }
+  .psu .psu-field .psu-help, .psu .psu-field .psu-err { grid-column: 1; }
+}
+@media (max-width: 680px) {
+  .psu .psu-card { padding: 12px; }
+  .psu table.psu-table thead { position: absolute; left: -9999px; }
+  .psu table.psu-table, .psu table.psu-table tbody, .psu table.psu-table tr, .psu table.psu-table td { display: block; width: 100%; }
+  .psu table.psu-table tr { border: 1px solid var(--psu-border); border-radius: var(--psu-radius); margin-bottom: 10px; padding: 4px 0; }
+  .psu table.psu-table td { border: 0; padding: 4px 12px; }
+  .psu table.psu-table td[data-label]::before { content: attr(data-label) ": "; color: var(--psu-muted); }
+  .psu .psu-actions button.psu-btn { flex: 1 1 100%; }
+  .psu .psu-tab { padding: 9px 12px; }
+}
+@media (hover: none) and (pointer: coarse) {
+  .psu button.psu-btn, .psu .psu-tab { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .psu .psu-bar > i { transition: none; }
+}

@@ -105,7 +105,8 @@ build_lxc() {
     -Dexamples=false -Dman=false -Dapi-docs=false -Dtests=false \
     -Dpam-cgroup=false -Dio-uring-event-loop=false \
     -Dinstall-init-files=false -Dinstall-state-dirs=false -Dspecfile=false \
-    -Dcoverity-build=false -Dthread-safety=true
+    -Dcoverity-build=false -Dthread-safety=true \
+    -Drootfs-mount-path=/var/lib/polyseat-lxc/rootfs
   ninja -C "$lxc_build"
   meson install -C "$lxc_build" --strip
 
@@ -120,6 +121,13 @@ build_lxc() {
     die "liblxc RUNPATH is not $origin"
   if readelf -W -d "$lxc_real" | grep -qE '\((RPATH)\)'; then
     die 'liblxc has a legacy DT_RPATH'
+  fi
+  # The rootfs mount point is compiled in as an absolute path; it must be the stable plugin-owned
+  # directory the controller creates, never a build-directory path that only exists on CI.
+  grep -aFq '/var/lib/polyseat-lxc/rootfs' "$lxc_real" ||
+    die 'liblxc does not carry the fixed rootfs mount path'
+  if grep -aFq "$lxc_prefix/lib/lxc/rootfs" "$lxc_real"; then
+    die 'liblxc still references a build-prefix rootfs mount path'
   fi
   lxc_needed=$(readelf -W -d "$lxc_real" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
   for lib in $lxc_needed; do
