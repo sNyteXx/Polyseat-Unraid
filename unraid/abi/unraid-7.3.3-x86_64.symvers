@@ -265,3 +265,8 @@ libstdc++.so.6 CXXABI_1.3.17
 libstdc++.so.6 CXXABI_TM_1
 libstdc++.so.6 CXXABI_FLOAT128
 libuv.so.1 -
+ld-linux-x86-64.so.2 GLIBC_2.2.5
+ld-linux-x86-64.so.2 GLIBC_2.3
+ld-linux-x86-64.so.2 GLIBC_2.4
+ld-linux-x86-64.so.2 GLIBC_2.34
+ld-linux-x86-64.so.2 GLIBC_2.35
