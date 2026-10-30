@@ -9,8 +9,8 @@ or a container boot on a **separate disposable Linux environment**.
 
 | Level | Environment | What would count as success | Status |
 |---|---|---|---|
-| 0 — code | GitHub Actions Ubuntu 24.04 | Incus 7.5.1 and C sources compile; checksums, limited SBOM; `incus --version` and `incusd --version` without a daemon | Workflow implemented; verify the current run |
-| 0 — models | GitHub Actions Ubuntu 24.04 | 18 pure tests: active VM/vfio, network policy, start/stop/rollback and malicious archives | Implemented; not hardware evidence |
+| 0 — code | GitHub Actions Ubuntu 24.04 | Incus 7.5.1 and C sources compile; checksums, limited SBOM; `incus --version` and `incusd --version` without a daemon | **Passed** ([CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221184)) |
+| 0 — models | GitHub Actions Ubuntu 24.04 | 18 pure tests: active VM/vfio, network policy, start/stop/rollback and malicious archives | **Passed** ([CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221252)); not hardware evidence |
 | 1 — container | Disposable Linux test VM, **not** Unraid | Independent `incusd` process starts with dedicated socket and state directory, no host bridge; one CPU-only Linux container boots and stops | **NOT implemented/tested** |
 | 2 — Unraid parity | Dedicated disposable Unraid 7.2-compatible host/VM | Same test with non-systemd lifecycle, Unraid libraries, kernel, cgroup v2, uidmaps and selected pool; clean rollback | **NOT implemented/tested** |
 | 3 — streaming | Separate hardware window | Host-owned GPU and Sunshine/Moonlight/NVENC one-/two-seat tests | Blocked while GPU is exclusively used by gaming VM |

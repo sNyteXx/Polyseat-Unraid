@@ -28,10 +28,10 @@ against the binaries with their temporary runner library paths. This is a
 minimal no-GPU CLI smoke, **not** a running `incusd`, working containers, or
 evidence of Unraid kernel/runtime support.
 
-The previous [isolated 7.0.2 LTS build run](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407)
-passed compilation, runner dependency inspection, checksums and artifact
-upload. The 7.5.1 update and new CLI smoke require a new passing Actions run.
-**Neither runner run authorizes Unraid execution.**
+The [isolated 7.5.1 build + no-GPU binary smoke](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221184)
+passed compilation, version-only execution, limited source SBOM, dynamic
+dependency inspection, checksums and artifact upload. **This does not
+authorize Unraid execution.**
 
 **Limitations:** Ubuntu package dependencies and GitHub's runner image are
 not pinned, so this is source-pinned but not bit-for-bit reproducible. The output

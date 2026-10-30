@@ -15,9 +15,9 @@ driver, or game data. No installable `.plg` is shipped.
 
 - Read-only, non-certifying host capability reports in `unraid/scripts/`.
 - Syntax/ShellCheck checks and a CI guard that rejects an installable `.plg`.
-- An **Ubuntu-only, source-pinned Incus userspace build proof**. The
-  [7.0.2 LTS baseline compiled successfully](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407);
-  the requested **7.5.1** update is subject to its own CI evidence.
+- An **Ubuntu-only, source-pinned Incus userspace build proof**. The requested
+  **7.5.1** build and no-GPU binary smoke
+  [passed GitHub Actions](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221184).
   Its binaries are not a complete runtime bundle, and success says nothing
   about Unraid ABI, kernel features, confinement, GPU mapping, boot, or rollback.
 - **Offline-only Python safety rehearsals** for GPU ownership while a gaming VM
