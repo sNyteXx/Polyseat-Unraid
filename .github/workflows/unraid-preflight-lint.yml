@@ -27,3 +27,7 @@ jobs:
         run: shellcheck -s sh unraid/scripts/*.sh unraid/tests/*.sh
       - name: Disabled installer and CI-only build guardrails
         run: sh unraid/tests/safety-contract.sh
+      - name: Offline VM/GPU, lifecycle and hostile bundle simulations
+        run: |
+          python3 -m compileall -q unraid/lab
+          python3 -m unittest discover -s unraid/tests -p 'test_*.py' -v

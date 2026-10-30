@@ -19,6 +19,7 @@ jobs:
     env:
       # Signed Incus v7.0.2 LTS tag, resolved to its immutable commit.
       INCUS_COMMIT: 01f81e5e607bbb5818410318e4b3496ad1820824
+      INCUS_RELEASE: v7.0.2
       # Immutable v1.15.9 cowsql and v0.22.1 raft release commits.
       COWSQL_COMMIT: 783815b901470e27b7dfbcce3a67c888dad19e78
       RAFT_COMMIT: 9edb176a7924ce2b943cb56552366dc4b5a1a6b7
@@ -48,6 +49,7 @@ jobs:
         run: |
           cd incus-build-proof
           sha256sum --check SHA256SUMS
+          python3 -m json.tool SBOM-build-source-only.cdx.json >/dev/null
           test ! -e ../unraid/plugin/polyseat-unraid.plg
           test -f ../unraid/plugin/polyseat-unraid.plg.disabled
 

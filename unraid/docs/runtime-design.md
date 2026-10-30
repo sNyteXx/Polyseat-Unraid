@@ -26,7 +26,9 @@ kernel modules, cgroups, storage and device permissions still need testing.
 
 See [security-rollback-contract.md](security-rollback-contract.md) for a
 proposed fail-closed state machine, scoped ownership, approvals, backup and
-restore checks. **None of those mutating transitions are implemented yet.**
+restore checks. `unraid/lab/lifecycle.py` now tests **pure state transitions**
+without touching any files or services; real filesystem, process or host
+transitions remain unimplemented.
 The current disabled `.plg` is not an installer.
 
 ## Unverified
@@ -34,3 +36,6 @@ The current disabled `.plg` is not an installer.
 Host version/kernel compatibility, NVIDIA GPU availability and NVENC sessions,
 Unraid boot persistence, isolated network, Moonlight input, Steam/Proton,
 anti-cheat, memory/GPU load and safe two-seat teardown.
+
+See [gaming-VM protection](gaming-vm-protection.md) for the hard rule that
+exclusive passthrough GPUs stay owned by the VM while it is needed.

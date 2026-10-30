@@ -4,6 +4,12 @@
 is enabled in this branch.** This contract is the minimum review bar for any
 future installer, not evidence that one is safe.
 
+`unraid/lab/` now contains **pure Python models**, not host executors:
+`guards.py` rejects unsafe GPU/network proposals, `lifecycle.py` checks state
+transitions and approvals, and `archive.py` checks hostile tar entries **without
+extracting anything**. Tests run from CI fixtures only. Their passing status
+does not validate filesystem journaling, Unraid compatibility or live rollback.
+
 ## Assets and ownership
 
 - The plugin may own only explicitly recorded paths in its own namespace.
@@ -54,11 +60,15 @@ must not guess how to repair host networking, drivers or storage.
 An exclusive PCIe-passthrough GPU and host Incus NVENC cannot be presumed to
 coexist. If a test detects `vfio-pci` ownership or uncertain IOMMU grouping,
 it must stop with an explanation, not attempt to detach the Windows VM.
+The active gaming VM is a protected availability dependency, not an asset to
+be paused for testing. See [gaming-VM protection](gaming-vm-protection.md).
 
 ## CI guardrails
 
 `unraid/tests/safety-contract.sh` requires the installable `.plg` to stay
 absent and the disabled placeholder to contain no install/remove actions.
 The CI Incus build script rejects non-CI and non-Linux hosts, including an
-Unraid host. These guards protect the *current WIP*, but cannot replace
-functional runtime/rollback acceptance tests.
+Unraid host. Python simulation tests exercise active-VM exclusion, no `br0`
+or Docker/libvirt changes, malformed lifecycle states and malicious archives.
+These guards protect the *current WIP*, but cannot replace functional
+runtime/rollback acceptance tests.

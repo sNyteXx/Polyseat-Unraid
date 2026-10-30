@@ -24,5 +24,10 @@ fi
 if env CI=true RUNNER_OS=Windows sh unraid/scripts/build-incus-artifact.sh >/dev/null 2>&1; then
   fail 'Incus build unexpectedly accepted a non-Linux runner'
 fi
+writer_output=$(env CI=false RUNNER_OS=Linux \
+  python3 unraid/scripts/make_proof_sbom.py --modules /dev/null \
+  --output /tmp/not-a-proof-sbom 2>&1 || true)
+printf '%s\n' "$writer_output" | grep -q 'only an isolated Linux CI build' ||
+  fail 'proof inventory writer did not explicitly reject non-CI execution'
 
 printf '%s\n' 'WIP install and build guardrails passed.'

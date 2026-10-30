@@ -19,6 +19,7 @@ fi
 : "${INCUS_COMMIT:?Incus SHA required}"
 : "${RAFT_COMMIT:?raft SHA required}"
 : "${COWSQL_COMMIT:?cowsql SHA required}"
+: "${INCUS_RELEASE:?Release label required}"
 
 case "$GITHUB_WORKSPACE:$RUNNER_TEMP" in
   /*:/*) ;;
@@ -39,6 +40,8 @@ src="$build_root/incus"
 raft="$build_root/raft"
 cowsql="$build_root/cowsql"
 output="$GITHUB_WORKSPACE/incus-build-proof"
+[ ! -e "$output" ] && [ ! -L "$output" ] ||
+  die 'proof output directory already exists; refusing to overwrite'
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
 export CGO_CFLAGS="-I$prefix/include"
 export CGO_LDFLAGS="-L$prefix/lib"
@@ -97,8 +100,19 @@ if grep -q 'not found' "$output/incusd-ldd.txt"; then
   die 'built incusd has unresolved dependencies even on the build runner'
 fi
 
+# Source inventory ONLY: it is not a complete runtime SBOM or vulnerability audit.
+(
+  cd "$src"
+  go list -m all > "$output/go-modules.txt"
+)
+go version -m "$GOBIN/incusd" > "$output/incusd-go-buildinfo.txt"
+python3 "$GITHUB_WORKSPACE/unraid/scripts/make_proof_sbom.py" \
+  --modules "$output/go-modules.txt" \
+  --output "$output/SBOM-build-source-only.cdx.json"
+
 {
   printf 'INCUS_COMMIT=%s\n' "$INCUS_COMMIT"
+  printf 'INCUS_RELEASE=%s\n' "$INCUS_RELEASE"
   printf 'RAFT_COMMIT=%s\n' "$RAFT_COMMIT"
   printf 'COWSQL_COMMIT=%s\n' "$COWSQL_COMMIT"
   printf 'GO_VERSION=%s\n' "$(go version)"
@@ -108,13 +122,15 @@ fi
 printf '%s\n' \
   'WIP — DO NOT USE ON UNRAID.' \
   'This artifact proves only compilation on an Ubuntu GitHub Actions runner.' \
-  'It is not a complete dependency bundle, tested runtime, or installer.' \
+  'Its SBOM inventories build inputs, not all target runtime dependencies.' \
+  'It is not signed, vulnerability-cleared, a complete runtime, or an installer.' \
   'Do not execute it on Unraid, and do not modify Docker, libvirt, networking or GOW.' \
   > "$output/NOTICE.txt"
 
 (
   cd "$output"
-  sha256sum bin/* build-info.txt incusd-ldd.txt NOTICE.txt > SHA256SUMS
+  sha256sum bin/* build-info.txt incusd-ldd.txt incusd-go-buildinfo.txt \
+    go-modules.txt SBOM-build-source-only.cdx.json NOTICE.txt > SHA256SUMS
   sha256sum --check SHA256SUMS
 )
 

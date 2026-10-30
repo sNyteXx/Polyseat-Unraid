@@ -6,34 +6,39 @@
 GitHub Actions runner. `unraid/scripts/build-incus-artifact.sh` actively
 refuses to run outside Linux CI or on an Unraid host.
 
-The build uses full, immutable source SHAs (chosen from the Incus 6.0.0 era):
+The workflow now uses a signed Incus **v7.0.2 LTS** tag's immutable target
+commit (as checked against the upstream GitHub tag API) and release-tagged C
+dependencies. The runner uses Go 1.26.7:
 
 | Source | Revision |
 |---|---|
-| `lxc/incus` (`v6.0.0`) | `714bcc5e42b189f54025b8567df1f3408a1cae2c` |
-| `cowsql/raft` | `e0928710bcc62806cc7074f010e462547decf4b7` |
-| `cowsql/cowsql` | `8c7d8cf13d37a1e8d2ec6fa2ee575b07575248df` |
+| `lxc/incus` (`v7.0.2` LTS) | `01f81e5e607bbb5818410318e4b3496ad1820824` |
+| `cowsql/raft` (`v0.22.1`) | `9edb176a7924ce2b943cb56552366dc4b5a1a6b7` |
+| `cowsql/cowsql` (`v1.15.9`) | `783815b901470e27b7dfbcce3a67c888dad19e78` |
 
 The workflow builds the C libraries in a temporary prefix and then compiles
 Incus with the matching headers and libraries. It records the three exact
-source revisions, Go/toolchain information, dynamic dependency listing and
-SHA-256 checksums.
+source revisions, Go/toolchain information, Go module inventory, dynamic
+dependency listing, a limited CycloneDX **build-source** SBOM and SHA-256
+checksums. The runner checks that the inventory is parseable JSON.
 
-The first complete [isolated build run](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41084969302)
-passed its compilation, dependency, checksum and artifact-upload steps. That
-evidence does not authorize the binaries to run on Unraid.
+The [isolated LTS build run](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407)
+passed compilation, runner dependency inspection, checksums and artifact
+upload. That run predates the new build-source SBOM step, which requires its
+own successful Actions run. **Neither run authorizes Unraid execution.**
 
 **Limitations:** Ubuntu package dependencies and GitHub's runner image are
-not pinned, so this is source-pinned but not bit-for-bit reproducible. Incus
-6.0.0 is an old baseline and is **not approved for deployment**. The output
+not pinned, so this is source-pinned but not bit-for-bit reproducible. The output
 does **not** include all required runtime libraries, a tested Unraid loader
-path, SBOM, signature, vulnerability review, or provenance attestation.
+path, complete target-runtime SBOM, signature, vulnerability review, or
+provenance attestation. **Newer LTS sources do not by themselves make a
+redistributable package safe.**
 Checksums establish integrity of the CI output, not its trustworthiness.
 
 ## Remaining gates before any runtime use
 
-1. Choose a supported, security-reviewed Incus release and lock the complete
-   dependency/toolchain set.
+1. Keep the LTS release pinned; separately review vulnerability advisories,
+   support window, and lock system packages/toolchain and all runtime inputs.
 2. Produce a complete, relocatable runtime with SBOM, signed provenance,
    dependency inventory and verified checksums.
 3. Scan and inspect all archive entries (symlinks, paths, ownership and modes)

@@ -16,9 +16,15 @@ driver, or game data. No installable `.plg` is shipped.
 - Read-only, non-certifying host capability reports in `unraid/scripts/`.
 - Syntax/ShellCheck checks and a CI guard that rejects an installable `.plg`.
 - An **Ubuntu-only, source-pinned Incus userspace build proof**, successfully
-  [built in CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41084969302).
+  [built with Incus 7.0.2 LTS in CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407).
   Its binaries are not a complete runtime bundle, and success says nothing
   about Unraid ABI, kernel features, confinement, GPU mapping, boot, or rollback.
+- **Offline-only Python safety rehearsals** for GPU ownership while a gaming VM
+  runs, VM and Docker preservation, isolated network proposals, lifecycle
+  transitions, and hostile archive rejection. They have zero host execution
+  capability and do not constitute hardware acceptance.
+- Build-source inventory (CycloneDX) and dependency metadata are prepared for
+  CI; they are **not a complete target-runtime SBOM or a vulnerability clearance**.
 - An explicit security/rollback design in
   [unraid/docs/security-rollback-contract.md](unraid/docs/security-rollback-contract.md).
 
@@ -37,6 +43,12 @@ driver, or game data. No installable `.plg` is shipped.
    equivalent to Btrfs/XFS reflinks.
 7. Verify an operator-approved staging, upgrade, rollback, and uninstall cycle
    that retains seats, Steam libraries and GOW.
+
+**Active gaming VM safety:** All real host, VM, GPU and Unraid operations are
+deferred. An exclusive `vfio-pci` GPU cannot be shared with host NVENC by
+pretending it is available. We must either prove the presence of a separate
+host-owned GPU or agree another architecture in a separate review. See
+[gaming-VM protection](unraid/docs/gaming-vm-protection.md).
 
 See [the acceptance matrix](unraid/docs/acceptance.md). There is no automatic
 installation, GOW migration, host service startup, or merge to `main` in this

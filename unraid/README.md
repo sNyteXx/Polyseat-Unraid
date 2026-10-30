@@ -18,6 +18,17 @@ The separate `build-incus-artifact.sh` refuses to run on Unraid or outside an
 isolated Linux GitHub Actions runner. Its artifacts are build proofs only,
 **not** redistributable Unraid installation packages.
 
+## Offline simulation (CI and developer workstations)
+
+```sh
+python3 -m unittest discover -s unraid/tests -p 'test_*.py' -v
+```
+
+These tests execute **pure models only**: they do not detect host hardware,
+start Incus, manipulate GPUs, set up network interfaces, or change any VM.
+An active gaming VM with an exclusively passed-through GPU is explicitly
+blocked for that GPU. The archive verifier is read-only and never extracts.
+
 Read [the security and rollback contract](docs/security-rollback-contract.md)
 and [acceptance matrix](docs/acceptance.md) before implementing any mutating
 host operation. The current branch makes none.
