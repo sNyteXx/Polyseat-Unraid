@@ -23,7 +23,7 @@ case "$gate" in
   closed | test-host) ;;
   *) die 'GATE must be closed or test-host; "open" is reserved for a separately approved release job' ;;
 esac
-[ -d "$outdir" ] && [ ! -L "$outdir" ] || die 'OUTDIR must be an existing real directory'
+if [ ! -d "$outdir" ] || [ -L "$outdir" ]; then die 'OUTDIR must be an existing real directory'; fi
 
 here=$(cd "$(dirname "$0")" && pwd)
 src="$here/../plugin/src/emhttp"

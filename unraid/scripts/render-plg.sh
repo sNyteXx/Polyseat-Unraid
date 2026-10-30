@@ -25,7 +25,7 @@ esac
 case "$bundle" in *[!0-9a-f]*) die 'bundle digest must be lowercase hex' ;; esac
 [ "${#bundle}" -eq 64 ] || die 'bundle digest must be 64 hex characters'
 for f in "$package" "$bundle_dir/$bundle.manifest.json" "$bundle_dir/$bundle.manifest.json.sig" "$signer"; do
-  [ -f "$f" ] && [ ! -L "$f" ] || die "missing input file: $f"
+  if [ ! -f "$f" ] || [ -L "$f" ]; then die "missing input file: $f"; fi
 done
 
 # Never write an installable plugin into the working tree.

@@ -638,7 +638,8 @@ svc_pid() {
   local pid cmd
   [[ -f $PIDFILE && ! -L $PIDFILE ]] || return 1
   pid=$(cat -- "$PIDFILE")
-  [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
   cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || return 1
   [[ $cmd == *"$SLOTS/"*"/payload/bin/incusd"* ]] || return 1
   printf '%s\n' "$pid"
@@ -681,7 +682,8 @@ svc_start() {
     return 1
   fi
   mkdir -p -- "$RUN_DIR/client" || return 1
-  subid_file_ensure "$SUBID_DIR/subuid" && subid_file_ensure "$SUBID_DIR/subgid" || return 1
+  subid_file_ensure "$SUBID_DIR/subuid" || return 1
+  subid_file_ensure "$SUBID_DIR/subgid" || return 1
   rm -f -- "$PIDFILE"
   (
     umask 022
@@ -801,7 +803,7 @@ cmd_stage() { # archive manifest sig
   fi
   sync_path "$BUNDLE_DIR"
   BUNDLE_OVERRIDE_BASE=$base
-  verify_bundle_files "$sha" && check_host_compat "$base.manifest.json" || rc=1
+  if ! verify_bundle_files "$sha" || ! check_host_compat "$base.manifest.json"; then rc=1; fi
   BUNDLE_OVERRIDE_BASE=""
   if [[ $rc -ne 0 ]]; then
     rm -f -- "$base.tar.gz" "$base.manifest.json" "$base.manifest.json.sig"
@@ -1047,8 +1049,16 @@ cmd_preflight() {
   DESC="newuidmap/newgidmap present"; chk command -v newuidmap newgidmap
   DESC="jq, tar, ssh-keygen present"; chk command -v jq tar ssh-keygen
   if [[ -s /etc/subuid ]]; then echo "INFO: /etc/subuid has entries"; else echo "INFO: /etc/subuid empty (plugin would add a managed block at service start)"; fi
-  [[ -e /sys/kernel/security/lsm ]] && echo "INFO: LSM: $(cat /sys/kernel/security/lsm)" || echo "INFO: no LSM (no AppArmor/SELinux confinement)"
-  pgrep -x incusd >/dev/null && echo "WARN: an incusd is already running" || echo "INFO: no foreign incusd"
+  if [[ -e /sys/kernel/security/lsm ]]; then
+    echo "INFO: LSM: $(cat /sys/kernel/security/lsm)"
+  else
+    echo "INFO: no LSM (no AppArmor/SELinux confinement)"
+  fi
+  if pgrep -x incusd >/dev/null; then
+    echo "WARN: an incusd is already running"
+  else
+    echo "INFO: no foreign incusd"
+  fi
   echo "INFO: read-only checks only; nothing was changed"
   [[ $ok -eq 1 ]] || exit $EX_BLOCKED
 }
