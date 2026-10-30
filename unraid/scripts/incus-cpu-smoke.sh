@@ -47,6 +47,37 @@ if command -v pgrep >/dev/null 2>&1 && pgrep -x incusd >/dev/null 2>&1; then
   fail 'another Incus daemon is already running on the disposable runner'
 fi
 
+# GitHub-hosted Ubuntu runners need not allocate subordinate IDs to root.
+# Incus needs those ID ranges to create an unprivileged container. This may
+# modify /etc/subuid and /etc/subgid on the *throwaway CI VM only*, after the
+# strict GitHub-hosted/Unraid rejection guard above. Never run on a real host.
+ensure_root_subids() {
+  subid_file=$1
+  usermod_flag=$2
+  [ -f "$subid_file" ] || fail "missing CI subordinate-ID file: $subid_file"
+  command -v usermod >/dev/null 2>&1 || fail 'CI runner missing usermod'
+
+  if awk -F: '$1 == "root" && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 >= 65536 { found=1 } END { exit !found }' "$subid_file"; then
+    return
+  fi
+
+  # Reserve a fixed 655360-ID range only if it does not overlap any owner.
+  # Unexpected runner images fail closed rather than rewriting other mappings.
+  if awk -F: '$2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0 && $2 <= 1655359 && ($2 + $3 - 1) >= 1000000 { found=1 } END { exit !found }' "$subid_file"; then
+    fail "CI subordinate-ID range 1000000-1655359 already allocated in $subid_file"
+  fi
+  usermod "$usermod_flag" 1000000-1655359 root
+  if ! awk -F: '$1 == "root" && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 >= 65536 { found=1 } END { exit !found }' "$subid_file"; then
+    fail "root subordinate-ID mapping not established in $subid_file"
+  fi
+}
+
+command -v newuidmap >/dev/null 2>&1 || fail 'CI runner missing newuidmap'
+command -v newgidmap >/dev/null 2>&1 || fail 'CI runner missing newgidmap'
+ensure_root_subids /etc/subuid --add-subuids
+ensure_root_subids /etc/subgid --add-subgids
+printf '%s\n' 'CI-only root subordinate UID/GID ranges verified (no Unraid changes).'
+
 daemon_pid=
 cleanup() {
   # Only the unique lab instance and its daemon are within this script's scope.

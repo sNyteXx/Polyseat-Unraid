@@ -31,6 +31,13 @@ starts, executes in, stops, restarts, and deletes a single CPU-only instance.
 The script checks for an unexpected `incusbr0` and stops with an error if
 the daemon or container cannot work in a GitHub-hosted runner.
 
+The first real run started the daemon, initialized the private database, and
+imported the image, but container creation failed because the hosted runner
+had no subordinate UID/GID mapping for `root`. The smoke script now checks
+those mappings and, if required, assigns a non-overlapping range **inside the
+disposable runner only**. The GitHub-hosted-only guard executes before this
+step. A subsequent green Actions run is required for level-1 acceptance.
+
 ## Remaining before level 2 / production use
 
 1. Complete and verify an **isolated relocatable runtime dependency closure**
