@@ -184,7 +184,7 @@ case "$gpu_vendor" in
 esac
 
 if [[ $gpu_vendor == amd ]]; then
-    echo "    The AMD path has never been run on real hardware. See docs/amd.md."
+    echo "    AMD cards have been run by testers, not by the author. See docs/amd.md."
 fi
 
 step "Prerequisites"

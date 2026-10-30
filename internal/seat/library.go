@@ -773,8 +773,12 @@ func (m *Manager) UninstallEverywhere(appID string, closeHost bool) error {
 
 	members := m.members(true)
 
+	// Started again on a goroutine of its own. Starting Steam in a seat took
+	// well over a minute once, and the page waited for all of it with the
+	// title still in its list, so the uninstall looked as if it had not
+	// happened until somebody reloaded.
 	resume := m.quietSteams(appID, members, closeHost)
-	defer resume()
+	defer func() { go resume() }()
 
 	gone, err := m.pool.Uninstall(appID, members, func(f string, a ...any) {
 		m.log.Info("library: " + fmt.Sprintf(f, a...))

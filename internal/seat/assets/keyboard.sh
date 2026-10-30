@@ -14,63 +14,74 @@
 # three ways on purpose, because whoever needs it has the fewest input devices
 # of anybody: Super+K, the bar, and a gamepad button.
 #
-# squeekboard was written for phones and turns out to work on sway unchanged,
-# which is worth writing down because the documentation suggests otherwise.
+# Stevia was written for Phosh and needs the patch in packaging/stevia to run on
+# sway at all. It takes the layout from the desktop's input sources.
+#
+# It runs only while it is on screen, so hiding it is ending it. That is not
+# thrift. Kept running and hidden it would be a surface created at the start of
+# the session, under the application grid that opens after it, and one whose
+# frame clock stands still off the screen: measured in a seat, the first press
+# showed nothing for up to two seconds, or until something else redrew it.
+# Started by the press it comes up on the screen and on top of what is there,
+# every time, and with the language the seat has now.
 
 : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
 export XDG_RUNTIME_DIR
 
-BUS=sm.puri.OSK0
-OBJ=/sm/puri/OSK0
+# The kernel keeps fifteen characters of a process name.
+NAME=phosh-osk-stevi
 
-visible() {
-    busctl --user get-property "$BUS" "$OBJ" "$BUS" Visible 2>/dev/null |
-        awk '{print $2}'
+running() {
+    pgrep -x "$NAME" >/dev/null 2>&1
+}
+
+# Tell the keyboard the language of this seat.
+#
+# Read from the seat's own sway config, which is where the host's keyboard
+# already went, so there is one answer rather than two that can disagree. The
+# layout and not the variant: Stevia has one set of keys per language, and a
+# variant it does not know would leave nothing rather than the nearest thing.
+# Several layouts become several entries behind the keyboard's globe key. A seat
+# with no layout set is left alone and gets the keyboard's own default, US.
+language() {
+    layouts=$(awk '$1 == "xkb_layout" { print $2; exit }' \
+        "$HOME/.config/sway/config" 2>/dev/null)
+    [ -n "$layouts" ] || return 0
+
+    sources=
+    old_ifs=$IFS
+    IFS=,
+    for layout in $layouts; do
+        sources="$sources${sources:+, }('xkb', '$layout')"
+    done
+    IFS=$old_ifs
+
+    gsettings set org.gnome.desktop.input-sources sources "[$sources]"
 }
 
 show() {
-    busctl --user call "$BUS" "$OBJ" "$BUS" SetVisible b "$1" >/dev/null 2>&1
+    running && return 0
+
+    language
+
+    # GTK_THEME on this one program, because the alternative is the seat's
+    # colour scheme, and that would turn every application somebody starts dark
+    # as well.
+    #
+    # Detached, because this is called from the pointer helper and the bar, and
+    # neither should be waiting on a keyboard.
+    GTK_THEME=Adwaita:dark setsid phosh-osk-stevia >/dev/null 2>&1 </dev/null &
+}
+
+hide() {
+    pkill -x "$NAME" >/dev/null 2>&1
 }
 
 case "$1" in
-    show) show true ;;
-    hide) show false ;;
-    prime)
-        # Show the keyboard once at session start and put it away again.
-        #
-        # This looks pointless and is not. squeekboard registers a virtual
-        # keyboard with the compositor as soon as it starts, but only gives it a
-        # layout the first time it is actually shown. Until then sway hands
-        # every client that asks for the keymap a zero length one, and MangoHud
-        # maps it without checking the length and dereferences the failure:
-        # every Vulkan application in the seat dies with SIGSEGV before it draws
-        # a frame, and opening the keyboard during a game killed the game.
-        #
-        # Showing it once fixes it for the life of the session, so it is done
-        # here, before anybody has connected and while there is nobody to see
-        # it, rather than being discovered later by somebody whose game just
-        # vanished. The framerate cap depends on MangoHud, so this is not
-        # optional: see polyseat-fps.
-        i=0
-        while [ $i -lt 40 ]; do
-            [ -n "$(visible)" ] && break
-            i=$((i + 1))
-            sleep 0.25
-        done
-
-        show true
-        sleep 1
-        show false
-        ;;
+    show) show ;;
+    hide) hide ;;
     *)
-        # Toggle. An unreadable property means squeekboard is not up yet, and
-        # the useful thing to do about that is show the keyboard rather than
-        # report a bus error to somebody holding a gamepad.
-        if [ "$(visible)" = "true" ]; then
-            show false
-        else
-            show true
-        fi
+        if running; then hide; else show; fi
         ;;
 esac
 

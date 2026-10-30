@@ -550,7 +550,10 @@ func TestUninstallClosesHostSteamAroundTheDelete(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		var calls []string
+		var (
+			calls   []string
+			started = make(chan struct{}, 1)
+		)
 
 		defer func(probe func(string, int) bool, running func(int) bool,
 			closing func(context.Context, int) bool, starting func(int) error) {
@@ -576,6 +579,7 @@ func TestUninstallClosesHostSteamAroundTheDelete(t *testing.T) {
 			}
 
 			calls = append(calls, "start")
+			started <- struct{}{}
 
 			return nil
 		}
@@ -593,6 +597,15 @@ func TestUninstallClosesHostSteamAroundTheDelete(t *testing.T) {
 		want := []string{"close", "start"}
 		if !agreed {
 			want = nil
+		}
+
+		// Started again behind the answer, so the page is not kept waiting.
+		if agreed {
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Steam on the host was never started again")
+			}
 		}
 
 		if !slices.Equal(calls, want) {

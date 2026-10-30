@@ -649,6 +649,10 @@ func (m *Manager) UpdateSoftware(name string) error {
 			return fmt.Errorf("mangohud shim: %w", err)
 		}
 
+		if err := p.stepStevia(ctx); err != nil {
+			return fmt.Errorf("stevia: %w", err)
+		}
+
 		m.updateFlatpaks(ctx, name)
 
 		// The seat is now carrying a Sunshine, and possibly a compositor, that
