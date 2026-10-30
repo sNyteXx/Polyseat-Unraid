@@ -25,7 +25,9 @@ runtime/staging directory. The Incus state lives under a unique `/tmp` path
 with directory *traversal-only* access for subordinate guest UIDs, because
 those UIDs cannot enter the runner's `/home/runner` directory. Private
 client configuration and binaries stay in the build staging directory; no
-existing parent-directory permissions are changed. The explicit preseed
+existing parent-directory permissions are changed. The daemon uses a normal
+service `umask` of `022` to keep its generated container directories
+traversable; the calling script retains `077` for private files. The explicit preseed
 config defines a directory storage
 pool and a disk-only profile. **It does not call `incus admin init --minimal`,
 which would create a bridge.**

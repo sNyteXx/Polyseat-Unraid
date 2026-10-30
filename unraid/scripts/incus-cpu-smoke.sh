@@ -102,7 +102,10 @@ cleanup() {
 trap cleanup EXIT
 
 printf '%s\n' 'WIP CPU-only smoke: Incus starts on disposable runner only.'
-"$bin/incusd" --debug --logfile "$INCUS_PROOF_STAGE/incusd-smoke.log" &
+# Script-created files stay private (umask 077). The Incus daemon needs the
+# normal service umask (022), so subordinate-mapped guest UIDs can traverse
+# its generated container/storage directories. It manages socket/key modes.
+(umask 022; exec "$bin/incusd" --debug --logfile "$INCUS_PROOF_STAGE/incusd-smoke.log") &
 daemon_pid=$!
 
 ready=false
