@@ -40,8 +40,9 @@ src="$build_root/incus"
 raft="$build_root/raft"
 cowsql="$build_root/cowsql"
 output="$GITHUB_WORKSPACE/incus-build-proof"
-[ ! -e "$output" ] && [ ! -L "$output" ] ||
+if [ -e "$output" ] || [ -L "$output" ]; then
   die 'proof output directory already exists; refusing to overwrite'
+fi
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
 export CGO_CFLAGS="-I$prefix/include"
 export CGO_LDFLAGS="-L$prefix/lib"
