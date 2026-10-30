@@ -22,12 +22,12 @@ Not part of the canary, ever: GPU, PCI/USB devices, VMs, networks or bridges, Do
 | # | Condition | Status |
 |---|---|---|
 | P1 | Signed bundle: a maintainer-held release key signs the manifest of the exact CI artifact; key policy in [signing-key-policy.md](signing-key-policy.md); `allowed_signers` pinned; revocation list supported and tested | policy + revocation implemented; **no release key created, nothing signed** |
-| P2 | Provenance: bundle SHA-256 = CI artifact = local rebuild comparison documented; commit SHA, pins, run URL in `TEST-REPORT.md` | CI report exists; independent-rebuild comparison **open** (dev build differs by design) |
+| P2 | Provenance: bundle SHA-256 = CI artifact = local rebuild comparison documented; commit SHA, pins, run URL in `TEST-REPORT.md` | Local cold/warm dev bundles at `2e2c94f` have identical SHA-256 (`3e972d5b…`); independent CI/release-artifact comparison **open** (dev differs by design) |
 | P3 | Runtime SBOM + dependency review: `SBOM-runtime.cdx.json`, OSV lookup, `govulncheck` binary mode, human triage of every advisory | SBOM + OSV report implemented; **triage open**, see [security-analysis.md](security-analysis.md) |
 | P4 | Resource confinement: the daemon and all containers run inside a dedicated cgroup v2 subtree with `memory.max`, `cpu.max`, `pids.max`, `cpuset` on E-cores only, plus `cgroup.kill` as hard stop | **not implemented** (design only), must pass in CI |
 | P5 | Gate `canary`: a third release-gate value that needs a **signed, time-limited, bundle-bound approval file** on the flash; `test-host` (disposable marker) must not be reusable on production | **not implemented** |
 | P6 | Profile policy: the controller refuses any profile or instance device except `disk root` (no `gpu`, `pci`, `nic`, `usb`, `unix-*`), because Incus calls `modprobe` (e.g. `vfio-pci`) only for such devices, QEMU VMs and `linux.kernel_modules` | verified in the pinned source; **enforcement not implemented** |
-| P7 | Host-state diff proven in CI: modules, netfilter, sysctls, addresses, listeners, mounts, top-level cgroups before/after a full run | measured by the e2e from this commit on; netfilter and sysctls must stay identical (job fails otherwise) |
+| P7 | Host-state diff proven in CI: modules, netfilter, sysctls, addresses, listeners, mounts, top-level cgroups before/after a full run | **CI passed at `2e2c94f`**; nftables rules are compared without volatile packet counters, actual firewall-rule and sysctl changes still fail; Unraid-specific behaviour untested |
 | P8 | Controller package built with the canary gate and signed; PLG template rendered by a separately approved release job | **not done** |
 | P9 | A dry run of the whole procedure on a Linux VM/CI with identical commands | CI e2e covers the controller; the **Unraid-specific steps are untested** |
 

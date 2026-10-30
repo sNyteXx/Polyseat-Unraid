@@ -1,5 +1,10 @@
 # 🚧 WIP — DO NOT USE — Runtime security analysis (supply chain and exposure)
 
+**Toolchain update (2026-10-30):** The WIP build pin is now Go **1.26.10** (official
+Linux/amd64 archive SHA-256), with two matching local-dev bundles. The binary
+inventory below is from the earlier Go 1.26.7 CI proof; refreshed CI vulnerability
+reports and triage of all 11 linked-module advisories are still required.
+
 This is an analysis of the **pinned inputs**, not a vulnerability review and not an Unraid certification. It exists so the
 Go/No-Go report for any live-host test has real data to triage. Method: runtime SBOM (`SBOM-runtime.cdx.json`), OSV lookup
 (`osv-check.py`, report only), `govulncheck -mode=binary` (CI report only), review of the pinned Incus source.

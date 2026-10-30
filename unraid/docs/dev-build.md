@@ -59,6 +59,8 @@ the controller end-to-end and for every artifact that is shared.
 Termix SSH access to `ubuntudev` was verified on 2026-10-30. A `--dry-run` on the separate
 `polyseat-unraid-codex` checkout succeeded without modifying the host. Read-only resource inspection:
 32 GiB disk free (89% used), 20 GiB available memory, nearly 4 GiB swap used, low system load.
-Forgejo/BuildKit and other workloads share this server. A restricted build (`--jobs 2 --memory 8`)
-is possible only if preflight checks pass and resource usage stays safe; none has been started yet.
-`--memory` caps `docker run`, not the one-time builder image creation. Never build on production Unraid.
+Forgejo/BuildKit and other workloads share this server. Two successful builds ran with
+`--jobs 4 --memory 8`: the cold build took 128 s inside the builder (39 s C deps,
+78 s Incus, 11 s packaging); the cache-hit build took **19 s**. Both generated
+the identical bundle SHA-256 `3e972d5b59143d1500d1e162675173d5b4d9090cb27377f5fb97391af4e8c970`.
+`--memory` caps `docker run`, not one-time builder image creation; never build on production Unraid.
