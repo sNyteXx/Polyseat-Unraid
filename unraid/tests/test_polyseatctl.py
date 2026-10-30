@@ -562,6 +562,24 @@ class FailureTests(Base):
         self.assertIn("another incusd", result.text)
         self.assertEqual(self.sb.events(), [])
 
+    def test_container_helper_processes_of_our_own_binary_are_not_foreign(self):
+        b = self.sb.make_bundle("1.0.0")
+        self.assertOk(self.sb.install(b))
+        helper_dir = self.sb.ram / "slots" / ("c" * 64) / "payload" / "bin"
+        helper_dir.mkdir(parents=True)
+        helper = helper_dir / "incusd"
+        shutil.copy("/usr/bin/bash", helper)           # a process named incusd running a file in our slots
+        process = subprocess.Popen([str(helper), "-c", "sleep 30"], start_new_session=True)
+
+        def reap():
+            os.killpg(process.pid, 9)
+            process.wait()
+
+        self.addCleanup(reap)
+        time.sleep(0.3)
+        self.assertOk(self.sb.ctl("start"))               # our own helper must not block the daemon
+        self.assertEqual(self.sb.events(), ["start 1.0.0"])
+
     def test_subid_conflicts_and_modified_blocks_are_refused(self):
         self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
         (self.sb.root / "etc/subuid").write_text("bob:1500000:65536\n")

@@ -749,6 +749,19 @@ health_check() {
   log debug "health ok (pid $pid)"
 }
 
+# An incusd that is not ours. Helper processes of running containers (forklxc, forkexec, ...) carry the
+# same name but execute our own binary, so they are recognised by their executable path, not by name.
+foreign_incusd() {
+  local pid exe out=""
+  for pid in $(pgrep -x incusd || true); do
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || continue
+    exe=${exe% (deleted)}
+    [[ $exe == "$SLOTS"/*/payload/bin/incusd ]] && continue
+    out+="$pid "
+  done
+  printf '%s\n' "${out% }"
+}
+
 svc_start() {
   local timeout i foreign slot_real active_sha
   [[ -L $CURRENT ]] || { log error "no active bundle"; return 1; }
@@ -761,8 +774,8 @@ svc_start() {
     log info "service already running"
     return 0
   fi
-  foreign=$(pgrep -x incusd || true)
-  [[ -z $foreign ]] || { log error "another incusd process exists (pid ${foreign//$'\n'/,}); refusing to start"; return 1; }
+  foreign=$(foreign_incusd)
+  [[ -z $foreign ]] || { log error "another incusd process exists (pid ${foreign// /,}); refusing to start"; return 1; }
   if [[ ! -d $INCUS_DIR ]]; then
     (umask 022; mkdir -- "$INCUS_DIR") || return 1
     chmod 0711 -- "$INCUS_DIR" || return 1
@@ -1283,8 +1296,8 @@ cmd_preflight() {
   else
     echo "INFO: no LSM (no AppArmor/SELinux confinement)"
   fi
-  if pgrep -x incusd >/dev/null; then
-    echo "WARN: an incusd is already running"
+  if [[ -n $(foreign_incusd) ]]; then
+    echo "WARN: an incusd that is not part of this plugin is already running"
   else
     echo "INFO: no foreign incusd"
   fi
