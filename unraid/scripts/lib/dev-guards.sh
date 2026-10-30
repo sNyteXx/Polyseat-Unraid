@@ -49,7 +49,9 @@ dev_guard_home() {
 
 # Strict KEY=VALUE reader: the file is never sourced, so it cannot execute anything.
 dev_load_pins() { # file
-  [ -f "$1" ] && [ ! -L "$1" ] || dev_die "pin file missing: $1"
+  if [ ! -f "$1" ] || [ -L "$1" ]; then
+    dev_die "pin file missing: $1"
+  fi
   while IFS= read -r line; do
     case "$line" in '' | '#'*) continue ;; esac
     printf '%s\n' "$line" | grep -Eq '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:@/+-]+$' ||

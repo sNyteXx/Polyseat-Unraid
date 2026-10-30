@@ -39,8 +39,12 @@ while [ "$#" -gt 0 ]; do
 done
 case "$jobs" in '' | *[!0-9]*) dev_die '--jobs must be a number' ;; esac
 case "$mem_gb" in '' | *[!0-9]*) dev_die '--memory must be a number of GB' ;; esac
-[ "$jobs" -ge 1 ] && [ "$jobs" -le 8 ] || dev_die '--jobs must be between 1 and 8'
-[ "$mem_gb" -ge 4 ] && [ "$mem_gb" -le 16 ] || dev_die '--memory must be between 4 and 16 GB'
+if [ "$jobs" -lt 1 ] || [ "$jobs" -gt 8 ]; then
+  dev_die '--jobs must be between 1 and 8'
+fi
+if [ "$mem_gb" -lt 4 ] || [ "$mem_gb" -gt 16 ]; then
+  dev_die '--memory must be between 4 and 16 GB'
+fi
 
 # ---- guards (run again inside the container) ------------------------------------------------------------
 dev_guard_host /etc/unraid-version "$(id -u)" "$(uname -s)" "$(uname -m)"
@@ -53,8 +57,12 @@ if [ "$inner" -eq 1 ]; then
   : "${POLYSEAT_DEV_CACHE:?}" "${POLYSEAT_DEV_OUT:?}" "${POLYSEAT_DEV_RUNID:?}"
   cache=$POLYSEAT_DEV_CACHE
   out=$POLYSEAT_DEV_OUT
-  [ -d "$cache" ] && [ ! -L "$cache" ] || dev_die 'cache directory missing or a symlink'
-  [ -d "$out" ] && [ ! -L "$out" ] || dev_die 'output directory missing or a symlink'
+  if [ ! -d "$cache" ] || [ -L "$cache" ]; then
+    dev_die 'cache directory missing or a symlink'
+  fi
+  if [ ! -d "$out" ] || [ -L "$out" ]; then
+    dev_die 'output directory missing or a symlink'
+  fi
   [ -z "$(ls -A "$out")" ] || dev_die 'output directory is not empty; refusing to overwrite'
   mkdir -p "${HOME:?}"
 
