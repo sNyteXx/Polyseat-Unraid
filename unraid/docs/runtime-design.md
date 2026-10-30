@@ -26,9 +26,14 @@ kernel modules, cgroups, storage and device permissions still need testing.
 
 See [security-rollback-contract.md](security-rollback-contract.md) for a
 proposed fail-closed state machine, scoped ownership, approvals, backup and
-restore checks. `unraid/lab/lifecycle.py` now tests **pure state transitions**
-without touching any files or services; real filesystem, process or host
-transitions remain unimplemented.
+restore checks. `unraid/lab/lifecycle.py` tests **pure state transitions**.
+`unraid/lab/transaction.py` now exercises **real atomic filesystem pointer
+switches, fsynced journal recovery and rollback** strictly within a disposable,
+private `/tmp` lab root. It is explicitly blocked on Unraid, does not control
+processes, and does not touch existing host paths. The Ubuntu Actions smoke
+also starts and stops its own Incus 7.5.1 daemon without systemd, but it is
+not a persistent Unraid supervisor. A complete real-host runtime lifecycle
+remains unimplemented.
 The current disabled `.plg` is not an installer.
 
 ## Unverified

@@ -24,6 +24,10 @@ fi
 if env CI=true RUNNER_OS=Windows sh unraid/scripts/build-incus-artifact.sh >/dev/null 2>&1; then
   fail 'Incus build unexpectedly accepted a non-Linux runner'
 fi
+if env CI=true GITHUB_ACTIONS=true RUNNER_OS=Linux RUNNER_ENVIRONMENT=self-hosted \
+    sh unraid/scripts/build-incus-artifact.sh >/dev/null 2>&1; then
+  fail 'Incus build unexpectedly accepted a self-hosted runner'
+fi
 writer_output=$(env CI=false RUNNER_OS=Linux \
   python3 unraid/scripts/make_proof_sbom.py --modules /dev/null \
   --output /tmp/not-a-proof-sbom 2>&1 || true)

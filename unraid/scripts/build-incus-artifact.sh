@@ -8,8 +8,10 @@ die() {
   exit 2
 }
 
-if [ "${CI:-}" != true ] || [ "${RUNNER_OS:-}" != Linux ]; then
-  die 'isolated Linux GitHub Actions runner required'
+if [ "${CI:-}" != true ] || [ "${GITHUB_ACTIONS:-}" != true ] ||
+   [ "${RUNNER_OS:-}" != Linux ] ||
+   [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+  die 'disposable GitHub-hosted Linux Actions runner required'
 fi
 [ ! -e /etc/unraid-version ] ||
   die 'never run this build script on Unraid'
@@ -97,12 +99,22 @@ for binary in incus incusd incus-agent incus-migrate; do
   cp "$GOBIN/$binary" "$output/bin/$binary"
 done
 
-# A proof of compilation is not a relocatable runtime. Dynamic system and
-# cowsql/raft dependencies are deliberately reported, not hidden or installed.
-ldd "$GOBIN/incusd" > "$output/incusd-ldd.txt"
-if grep -q 'not found' "$output/incusd-ldd.txt"; then
-  die 'built incusd has unresolved dependencies even on the build runner'
-fi
+# A proof of compilation is not a relocatable runtime. Record each binary's
+# Ubuntu ELF ABI requirements and resolved libraries, not just incusd's.
+# Report the host linkage; do not bundle Ubuntu's libraries for Unraid.
+for binary in incus incusd incus-agent incus-migrate; do
+  readelf -W -d "$GOBIN/$binary" > "$output/$binary-elf-dynamic.txt"
+  readelf -W --version-info "$GOBIN/$binary" > "$output/$binary-elf-versions.txt"
+  if readelf -W -l "$GOBIN/$binary" | grep -q 'INTERP'; then
+    ldd "$GOBIN/$binary" > "$output/$binary-ldd.txt"
+    if grep -q 'not found' "$output/$binary-ldd.txt"; then
+      die "built $binary has unresolved dependencies on Ubuntu runner"
+    fi
+  else
+    printf '%s\n' 'No ELF interpreter: static or otherwise non-dynamic binary.' \
+      > "$output/$binary-ldd.txt"
+  fi
+done
 
 # No-GPU, no-daemon execution smoke on the disposable CI runner. Neither
 # command initializes Incus, creates a bridge, opens a service, or touches VMs.
@@ -143,7 +155,8 @@ printf '%s\n' \
 
 (
   cd "$output"
-  sha256sum bin/* build-info.txt incusd-ldd.txt incusd-go-buildinfo.txt \
+  sha256sum bin/* build-info.txt *-ldd.txt *-elf-dynamic.txt \
+    *-elf-versions.txt incusd-go-buildinfo.txt \
     incus-cli-version.txt incusd-cli-version.txt \
     go-modules.txt SBOM-build-source-only.cdx.json NOTICE.txt > SHA256SUMS
   sha256sum --check SHA256SUMS

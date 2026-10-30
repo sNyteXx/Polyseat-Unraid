@@ -28,6 +28,13 @@ driver, or game data. No installable `.plg` is shipped.
   runs, VM and Docker preservation, isolated network proposals, lifecycle
   transitions, and hostile archive rejection. They have zero host execution
   capability and do not constitute hardware acceptance.
+- A **real filesystem staging/rollback rehearsal** restricted to a unique,
+  private `/tmp/polyseat-transaction-*` path on a disposable Linux environment:
+  checked bundle content, atomic activation, fsynced journal, simulated crashes
+  and health-check rollback. **It refuses to run on Unraid**, never controls a
+  process or touches external data, and does not certify production rollback.
+- The Polyseat **0.44.0 upstream** updates are included on this WIP branch;
+  the normal fork `main` remains untouched.
 - Build-source inventory (CycloneDX) and dependency metadata are prepared for
   CI; they are **not a complete target-runtime SBOM or a vulnerability clearance**.
 - An explicit security/rollback design in

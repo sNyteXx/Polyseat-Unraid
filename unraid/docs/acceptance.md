@@ -8,12 +8,12 @@ only with recorded evidence from the relevant disposable test environment.
 | A | Read-only host diagnostics on actual Unraid release | Script present; real host not validated |
 | B1 | Immutable Incus/raft/cowsql source pins, Ubuntu build proof | Incus **7.5.1** compiled and passed the no-GPU CLI smoke ([proof](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221184)); **not** Unraid runtime evidence |
 | B2 | Complete runtime bundle, SBOM, signature/provenance and ABI test | Build-input SBOM generator added; complete runtime closure, signing, audit and Unraid ABI **TODO** |
-| C | Non-systemd service lifecycle, boot persistence, UID mapping | Pure start/stop/stage/activate/rollback/uninstall tests; real service/boot **TODO** |
+| C | Non-systemd service lifecycle, boot persistence, UID mapping | Incus daemon starts/stops without systemd on disposable Ubuntu Actions; persistent Unraid supervisor/boot **TODO** |
 | D | Network isolation without Docker, libvirt or bridge changes | Offline plan rejects `br0`, NAT, host and bridged modes; real reachable isolation **TODO** |
 | E | One seat with verified host GPU ownership, NVIDIA NVENC and input | Active VM/vfio conflicts blocked in fixtures; physical GPU/NVENC **TODO** |
 | F | Two seats and Moonlight soak test | TODO |
 | G | Shared library and per-seat storage on selected filesystem | TODO |
-| H | Backup, stage, upgrade, rollback and uninstall without data loss | Pure transition and hostile-archive tests; filesystem transactions, crash recovery and disposable-host trials **TODO** |
+| H | Backup, stage, upgrade, rollback and uninstall without data loss | Real atomic pointer/journal/rollback **only inside a private disposable `/tmp` filesystem lab**; host integration, backup/upgrade/uninstall and Unraid trials **TODO** |
 | I | Steam/Proton/Once Human and anti-cheat | Unverified; no compatibility guarantee |
 
 There is no installable `.plg` until B2–H have passed. Production deployment
@@ -22,5 +22,12 @@ or GOW migration requires a separate, explicit operator decision.
 **All status items that mention offline tests are simulator evidence, not
 completion of an acceptance gate.** No test has touched the running gaming VM.
 
-The 7.5.1 proof additionally **passed a no-GPU CLI-only smoke** (`incus` and
-`incusd --version`) on the disposable runner. It did not launch the daemon.
+The [7.5.1 proof](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41097086718)
+**passed a real no-GPU container lifecycle** on disposable Ubuntu 24.04:
+
+- Launched a dedicated Incus daemon without systemd and with a private socket.
+- Imported a local BusyBox image, started, executed, stopped, restarted and
+  deleted the isolated container.
+- Created no managed Incus bridge and touched no Unraid/GPU/VM hardware.
+
+This demonstrates Ubuntu runner behavior, **not** Unraid compatibility.

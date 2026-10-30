@@ -1,14 +1,20 @@
 # 🚧 WIP — DO NOT USE — Security and rollback contract
 
-**Design document only. No install, stop, migration, upgrade or rollback code
-is enabled in this branch.** This contract is the minimum review bar for any
+**No Unraid installation, service control, migration, upgrade or rollback is
+enabled in this branch.** The contract is the minimum review bar for any
 future installer, not evidence that one is safe.
 
-`unraid/lab/` now contains **pure Python models**, not host executors:
+`unraid/lab/` contains **pure Python policy models** and a strictly confined
+**disposable filesystem transaction rehearsal**, not host executors:
 `guards.py` rejects unsafe GPU/network proposals, `lifecycle.py` checks state
 transitions and approvals, and `archive.py` checks hostile tar entries **without
-extracting anything**. Tests run from CI fixtures only. Their passing status
-does not validate filesystem journaling, Unraid compatibility or live rollback.
+extracting anything**. `transaction.py` verifies an archive and writes only
+inside a pre-created private `/tmp/polyseat-transaction-*` lab directory,
+fsyncs a journal, atomically switches a content-addressed bundle pointer,
+and restores the prior pointer after failed health checks or simulated crashes.
+It rejects execution on Unraid and cannot start a service, touch VM/GPU/Docker
+assets, or uninstall anything. These tests **do not validate real Unraid
+filesystems, process rollback or host compatibility**.
 
 ## Assets and ownership
 
@@ -70,5 +76,8 @@ absent and the disabled placeholder to contain no install/remove actions.
 The CI Incus build script rejects non-CI and non-Linux hosts, including an
 Unraid host. Python simulation tests exercise active-VM exclusion, no `br0`
 or Docker/libvirt changes, malformed lifecycle states and malicious archives.
+The separate disposable filesystem tests exercise exact-path archive extraction,
+symlink/tamper rejection, journal recovery, health-check rollback and external
+data preservation. They never promote an artifact into a real host service.
 These guards protect the *current WIP*, but cannot replace functional
 runtime/rollback acceptance tests.

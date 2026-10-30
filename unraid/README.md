@@ -8,7 +8,6 @@ For a later, separately approved **read-only** Unraid assessment:
 
 ```sh
 sh unraid/scripts/preflight.sh
-sh unraid/scripts/check-host.sh
 ```
 
 These commands report observations only, and do **not** certify compatibility.
@@ -24,14 +23,17 @@ isolated Linux GitHub Actions runner. Its artifacts are build proofs only,
 python3 -m unittest discover -s unraid/tests -p 'test_*.py' -v
 ```
 
-These tests execute **pure models only**: they do not detect host hardware,
-start Incus, manipulate GPUs, set up network interfaces, or change any VM.
+These tests include pure GPU/VM/network models **and** a real filesystem
+transaction rehearsal strictly inside a new private `/tmp/polyseat-transaction-*`
+directory. No existing host paths, services, VMs, bridges or GPUs are touched.
 An active gaming VM with an exclusively passed-through GPU is explicitly
-blocked for that GPU. The archive verifier is read-only and never extracts.
+blocked for that GPU. The archive verifier itself is read-only; the separate
+transaction lab writes only checked files below its disposable root.
 
 For a real container boot **without any GPU** on disposable infrastructure,
-see [the no-GPU test plan](docs/no-gpu-test-plan.md). A green version-only
-CLI smoke is not the same as starting an `incusd` service.
+see [the no-GPU test plan](docs/no-gpu-test-plan.md). The Incus 7.5.1 Ubuntu
+runner test has now passed a real container start/exec/stop/restart; this is
+not an Unraid runtime or production installation.
 
 Read [the security and rollback contract](docs/security-rollback-contract.md)
 and [acceptance matrix](docs/acceptance.md) before implementing any mutating
