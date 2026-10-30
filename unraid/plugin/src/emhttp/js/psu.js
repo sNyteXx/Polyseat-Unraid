@@ -216,6 +216,7 @@
 
   PSU.initTile = function (scope, config) {
     Object.assign(cfg, config || {});
+    scope = scope.closest('tbody') || scope; /* the header and quick links live outside the body cell */
     poll(scope, 15000);
     var refresh = scope.querySelector('[data-action="refresh"]');
     if (refresh) { refresh.addEventListener('click', function (e) { e.preventDefault(); poll(scope, 15000); }); }

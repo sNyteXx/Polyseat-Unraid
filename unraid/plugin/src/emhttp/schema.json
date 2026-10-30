@@ -1,28 +1,63 @@
 {
   "SERVICE": {
-    "type": "enum", "values": ["enabled", "disabled"], "default": "disabled", "tab": "general",
+    "type": "enum",
+    "values": [
+      "enabled",
+      "disabled"
+    ],
+    "default": "disabled",
+    "tab": "general",
     "label": "Start the Polyseat/Incus service automatically when the array starts",
-    "restart_required": false
+    "restart_required": false,
+    "title": "Start at array start"
   },
   "DATA_DIR": {
-    "type": "path", "pattern": "^/mnt/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+)*$", "default": "", "tab": "storage",
+    "type": "path",
+    "pattern": "^/mnt/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+)*$",
+    "default": "",
+    "tab": "storage",
     "label": "Data directory on a pool or array disk (Incus state, seats, games). Never deleted by the plugin.",
-    "locked_while_running": true
+    "locked_while_running": true,
+    "title": "Data directory"
   },
   "ACCEPT_NO_LSM": {
-    "type": "enum", "values": ["yes", "no"], "default": "no", "tab": "storage",
-    "label": "Accept running containers without AppArmor/SELinux when the host has one the bundle cannot use"
+    "type": "enum",
+    "values": [
+      "yes",
+      "no"
+    ],
+    "default": "no",
+    "tab": "storage",
+    "label": "Accept running containers without AppArmor/SELinux when the host has one the bundle cannot use",
+    "title": "Accept missing LSM"
   },
   "HEALTH_TIMEOUT": {
-    "type": "int", "min": 10, "max": 300, "default": "60", "tab": "advanced",
-    "label": "Seconds to wait for the daemon to become healthy"
+    "type": "int",
+    "min": 10,
+    "max": 300,
+    "default": "60",
+    "tab": "advanced",
+    "label": "Seconds to wait for the daemon to become healthy",
+    "title": "Health timeout (s)"
   },
   "SUBID_START": {
-    "type": "int", "min": 100000, "max": 4000000000, "default": "1000000", "tab": "advanced",
-    "label": "First subordinate UID/GID reserved for containers", "locked_while_running": true
+    "type": "int",
+    "min": 100000,
+    "max": 4000000000,
+    "default": "1000000",
+    "tab": "advanced",
+    "label": "First subordinate UID/GID reserved for containers",
+    "locked_while_running": true,
+    "title": "Subordinate ID start"
   },
   "SUBID_COUNT": {
-    "type": "int", "min": 65536, "max": 2000000000, "default": "1000000000", "tab": "advanced",
-    "label": "Number of subordinate UIDs/GIDs reserved for containers", "locked_while_running": true
+    "type": "int",
+    "min": 65536,
+    "max": 2000000000,
+    "default": "1000000000",
+    "tab": "advanced",
+    "label": "Number of subordinate UIDs/GIDs reserved for containers",
+    "locked_while_running": true,
+    "title": "Subordinate ID count"
   }
 }

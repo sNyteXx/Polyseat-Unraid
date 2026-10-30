@@ -1081,7 +1081,7 @@ user_cfg_json() {
 cmd_config_get() {
   jq -n --argjson user "$(user_cfg_json)" --slurpfile schema "$SCHEMA" '
     $schema[0] | to_entries | map(. as $e | {
-      key: $e.key, type: $e.value.type, tab: $e.value.tab, label: $e.value.label,
+      key: $e.key, type: $e.value.type, tab: $e.value.tab, title: ($e.value.title // $e.key), label: $e.value.label,
       values: ($e.value.values // null), min: ($e.value.min // null), max: ($e.value.max // null),
       locked_while_running: ($e.value.locked_while_running // false),
       default: $e.value.default, value: ($user[$e.key] // $e.value.default), user_set: ($user | has($e.key))})'

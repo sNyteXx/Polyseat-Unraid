@@ -425,11 +425,11 @@ function psu_render_field(array $entry): string
         $control = '<input type="text" autocomplete="off" spellcheck="false"' . $attrs . ' value="' . psu_e($value) . '"'
             . ' placeholder="/mnt/pool/polyseat">';
     }
-    $help = 'Default: ' . ($entry['default'] === '' ? '(none)' : (string)$entry['default'])
-        . (!empty($entry['locked_while_running']) ? ' - locked while the service runs' : '');
-    return '<div class="psu-field"><label for="' . psu_e($id) . '">' . psu_e(ucfirst(strtolower(str_replace('_', ' ', $key)))) . '</label>'
-        . '<div>' . $control . '<div class="psu-help">' . $label . '</div></div>'
-        . '<div class="psu-help">' . psu_e($help) . '</div></div>';
+    $default = $entry['default'] === '' ? '(none)' : (string)$entry['default'];
+    $help = $label . '<br><span class="psu-muted">Default: ' . psu_e($default)
+        . (!empty($entry['locked_while_running']) ? ' &middot; locked while the service runs' : '') . '</span>';
+    return '<div class="psu-field"><label for="' . psu_e($id) . '">' . psu_e((string)($entry['title'] ?? $key)) . '</label>'
+        . '<div>' . $control . '<div class="psu-help">' . $help . '</div></div></div>';
 }
 
 /** @param array<int,array> $entries from config-get */

@@ -201,7 +201,7 @@ class PagesAndControllerIntegrationTests(unittest.TestCase):
             self.assertIn(key, metrics)
         config = json.loads(sb.ctl("config-get").out)
         for entry in config:
-            for key in ("key", "type", "tab", "label", "default", "value", "user_set", "locked_while_running"):
+            for key in ("key", "type", "tab", "title", "label", "default", "value", "user_set", "locked_while_running"):
                 self.assertIn(key, entry)
         self.assertEqual(json.loads(sb.ctl("list").out), [])
 

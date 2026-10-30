@@ -15,7 +15,7 @@
   --psu-crit: var(--red-500, #ff3300);
   --psu-ok-text: var(--psu-ok);
   --psu-warn-text: var(--psu-warn);
-  --psu-crit-text: #ff6a4d;
+  --psu-crit-text: #ff5148;
   --psu-radius: 8px;
   --psu-gap: 12px;
   color: var(--psu-fg);
@@ -102,7 +102,8 @@
 .psu .psu-field { display: grid; grid-template-columns: minmax(180px, 34%) 1fr; gap: 6px 18px; padding: 12px 0; border-bottom: 1px solid var(--psu-border); }
 .psu .psu-field:last-child { border-bottom: 0; }
 .psu .psu-field label { font-weight: 600; }
-.psu .psu-field .psu-help { grid-column: 2; color: var(--psu-muted); font-size: 1.2rem; }
+.psu .psu-field .psu-help { color: var(--psu-muted); font-size: 1.2rem; margin-top: 6px; }
+.psu .psu-field .psu-input { max-width: 520px; }
 .psu .psu-field .psu-err { grid-column: 2; color: var(--psu-crit-text); font-size: 1.2rem; }
 .psu .psu-dirty::after { content: " \2022"; color: var(--psu-accent); }
 
@@ -126,7 +127,7 @@
   overflow-wrap: anywhere; background: var(--background-color, transparent); border: 1px solid var(--psu-border);
   font-family: var(--font-bitstream, ui-monospace, monospace); font-size: 1.2rem; line-height: 1.5; color: var(--psu-fg);
 }
-.psu pre.psu-log .l-error { color: var(--psu-crit-text); }
+.psu pre.psu-log .l-error { color: var(--psu-crit-text); font-weight: 600; }
 .psu pre.psu-log .l-warn { color: var(--psu-warn-text); }
 
 /* ---------- modal confirmation ---------- */
@@ -160,7 +161,7 @@
 /* ---------- responsive pages ---------- */
 @media (max-width: 900px) {
   .psu .psu-field { grid-template-columns: 1fr; }
-  .psu .psu-field .psu-help, .psu .psu-field .psu-err { grid-column: 1; }
+  .psu .psu-field .psu-err { grid-column: 1; }
 }
 @media (max-width: 680px) {
   .psu .psu-card { padding: 12px; }
