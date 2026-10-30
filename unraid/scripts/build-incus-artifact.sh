@@ -155,7 +155,7 @@ printf '%s\n' \
 
 (
   cd "$output"
-  sha256sum bin/* build-info.txt *-ldd.txt *-elf-dynamic.txt \
+  sha256sum -- bin/* build-info.txt *-ldd.txt *-elf-dynamic.txt \
     *-elf-versions.txt incusd-go-buildinfo.txt \
     incus-cli-version.txt incusd-cli-version.txt \
     go-modules.txt SBOM-build-source-only.cdx.json NOTICE.txt > SHA256SUMS
