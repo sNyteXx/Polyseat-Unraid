@@ -108,6 +108,9 @@ let libraryWanted = true;
 let libraryFetched = 0;
 let libraryLater = null;
 
+// The app ids an Uninstall is running for, see uninstallButton.
+const uninstalling = new Set();
+
 // libraryShape is what, in the state, the library view depends on: which
 // seats exist and which of them take part.
 function libraryShape(s) {
@@ -1483,8 +1486,29 @@ function uninstallButton(title) {
       path += "?host_steam=close";
     }
 
-    run(() => api("DELETE", path));
+    // Closing Steam in each seat that has the title comes first and takes some
+    // seconds per seat, so the button says what is happening until the answer
+    // is in and the list is drawn again without the title.
+    //
+    // Remembered by app id rather than on the button, because the list is drawn
+    // again with every change the daemon pushes, and closing Steam in a seat
+    // pushes several.
+    uninstalling.add(title.appid);
+    renderLibrary();
+
+    run(async () => {
+      try {
+        await api("DELETE", path);
+      } finally {
+        uninstalling.delete(title.appid);
+      }
+    });
   };
+
+  if (uninstalling.has(title.appid)) {
+    remove.disabled = true;
+    remove.textContent = "Uninstalling\u2026";
+  }
 
   return remove;
 }

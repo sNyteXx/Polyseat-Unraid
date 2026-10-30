@@ -10,6 +10,15 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.42.2
+
+**An uninstalled title leaves the list as soon as it is gone.** Uninstall
+answered only after Steam had been started again in every seat it closed, and
+that took about two minutes on 2026-10-30, so the title stayed in the list
+until somebody reloaded the page. Steam is now started again behind the
+answer, and the button reads Uninstalling… while Steam is being closed and
+the copies deleted. No seat needs building again.
+
 ## 0.42.1
 
 **A failed update can be tried again.** When installing a release failed, a
