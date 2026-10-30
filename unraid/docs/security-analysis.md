@@ -32,8 +32,31 @@ Go/No-Go report for any live-host test has real data to triage. Method: runtime 
 | `github.com/go-chi/chi/v5 v5.3.2` | GHSA-j6qf-3m9c-vwj3 | open |
 | `github.com/osrg/gobgp/v4 v4.9.0` | GO-2026-4736 | open; BGP features, not used |
 
-`govulncheck` in binary mode (CI step, `govulncheck.txt`) narrows this to reachable symbols; **a human must read it** and
-record accepted/mitigated/blocking per advisory before a Go. Nothing here was accepted yet.
+**Scanner validity incident (2026-10-30):** The `b2b8ad2` CI artifact contained only
+`govulncheck: unrecognized binary format` in `govulncheck.txt`. The old workflow
+ignored this error with `|| true` and `continue-on-error`; consequently **no
+reachability check was completed**, despite green CI. The WIP pipeline now scans
+the original Go binary (before the `patchelf` RUNPATH rewrite) and rejects scanner
+errors or empty reports while still recording discovered vulnerabilities for
+human triage. This fix requires its own passing CI proof; no vulnerability has
+been accepted or cleared yet.
+
+**Reproduced on UbuntuDev (disposable builder container, Go 1.26.10,
+`govulncheck v1.9.0`):** Scanning the *unmodified* local-dev `bin/incusd`
+returned exit **3** with **22 symbol findings across 3 modules**:
+
+| Category | Result | Decision for the canary |
+|---|---|---|
+| `golang.org/x/net@v0.59.0` | 4 HTTP/2 findings: GO-2026-6617, 6612, 6611, 6603; fixed in `v0.60.0` | **Open / real linked symbols.** Root-only local Incus API reduces exposure but does not remove vulnerable code. Rebuild with reviewed patched dependency or prove no reachable HTTP/2 path. |
+| `github.com/lxc/incus/v7` | 17 findings reported against the stamped `v7.0.0-20260925…` pseudo-version | **Version classification to verify in CI.** `git ls-remote` peeled the annotated `v7.5.1` tag to the exact pinned commit `b20ec6c3cb17…`; all 17 reports show fixes at or before `v7.2.0`. The pseudo-version makes the scanner compare against an older prerelease, although the source is from 7.5.1. Preserve these findings and the tag evidence, rather than suppressing them. |
+| `github.com/osrg/gobgp/v4@v4.9.0` | GO-2026-4736 NEXT_HOP parsing DoS, no fixed release indicated | **Open / linked symbol.** Canary disables NIC/network and BGP, but the full code path and bypass risk still require source review. |
+
+The scanner also listed one imported-package and three module-level warnings without
+matched vulnerable symbols; the OSV report lists additional version-level advisories.
+The 22 symbol results must not be misinterpreted as 22 confirmed exploitable paths
+on the canary. Equally, a valid scanner result is **not** proof that running on
+the production Unraid host is safe. CI still needs to reproduce this output on its
+own artifact and the remaining advisories need individual acceptance or fixes.
 
 ## Exposure reduction already in place
 

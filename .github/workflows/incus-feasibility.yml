@@ -15,6 +15,7 @@ on:
       - 'unraid/scripts/make-test-report.sh'
       - 'unraid/scripts/make-runtime-sbom.py'
       - 'unraid/scripts/osv-check.py'
+      - 'unraid/scripts/ci-govulncheck.sh'
       - 'unraid/scripts/lib/build-core.sh'
       - 'unraid/build-pins.env'
       - 'unraid/scripts/build-plugin-package.sh'
@@ -106,8 +107,7 @@ jobs:
           test ! -e ../unraid/plugin/polyseat-unraid.plg
           test -f ../unraid/plugin/polyseat-unraid.plg.disabled
 
-      - name: Vulnerability lookups (report only, never fails the build)
-        continue-on-error: true
+      - name: Vulnerability lookups (report findings; fail on lookup errors)
         run: |
           python3 unraid/scripts/osv-check.py --modules incus-build-proof/go-modules.txt \
             --buildinfo incus-build-proof/incusd-go-buildinfo.txt --pins unraid/build-pins.env \
@@ -116,9 +116,29 @@ jobs:
             --abi-report incus-build-proof/abi-report.json --buildinfo incus-build-proof/incusd-go-buildinfo.txt \
             --pins unraid/build-pins.env --osv-report incus-build-proof/osv-report.json --label ci \
             --output incus-build-proof/SBOM-runtime-osv-triage.cdx.json
+
+      - name: Go binary vulnerability scan (fail on tool or format errors)
+        run: |
+          # Scan the original Go ELF, before patchelf adjusts RUNPATH for Unraid.
+          # Its module inventory must match the one recorded by the build.
+          diff -u <(go version -m incus-build-proof/bin/incusd | tail -n +2) \
+            <(tail -n +2 incus-build-proof/incusd-go-buildinfo.txt)
           GOBIN="$RUNNER_TEMP/govulncheck-bin" go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-          "$RUNNER_TEMP/govulncheck-bin/govulncheck" -mode=binary incus-build-proof/payload/bin/incusd \
-            > incus-build-proof/govulncheck.txt 2>&1 || true
+          sh unraid/scripts/ci-govulncheck.sh "$RUNNER_TEMP/govulncheck-bin/govulncheck" \
+            incus-build-proof/bin/incusd incus-build-proof/govulncheck.txt
+
+      - name: Preserve scan diagnostics even if a scanner failed
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-security-scan-diagnostics-NOT-FOR-UNRAID
+          path: |
+            incus-build-proof/govulncheck.txt
+            incus-build-proof/osv-report.json
+            incus-build-proof/osv-report.txt
+            incus-build-proof/incusd-go-buildinfo.txt
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Assemble the CPU-only test artifact (reached only after a green controller end-to-end)
         run: |
