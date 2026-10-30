@@ -1,0 +1,6 @@
+#!/bin/bash
+# Array is stopping: stop instances and the daemon gracefully before pools unmount.
+CTL=/usr/local/emhttp/plugins/polyseat-unraid/scripts/polyseatctl
+[[ -x $CTL ]] || exit 0
+"$CTL" stop > /dev/null 2>&1
+exit 0

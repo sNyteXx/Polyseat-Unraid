@@ -183,6 +183,27 @@ class InstallLifecycleTests(Base):
         self.assertEqual(again.code, 2, again.text)
 
 
+class BootOrderingTests(Base):
+    def test_plugin_reinstall_early_in_boot_never_needs_the_pool(self):
+        b = self.sb.make_bundle("1.0.0")
+        self.assertOk(self.sb.install(b))
+        shutil.rmtree(self.sb.ram)                      # fresh boot: RAM empty, pool not mounted
+        shutil.rmtree(self.sb.data)
+        self.sb.write_cfg(SERVICE="enabled")
+        self.assertOk(self.sb.ctl("recover", "--approve"))
+        self.assertOk(self.sb.ctl("activate", b["sha"], "--approve"))   # same bundle: no-op
+        self.assertEqual(self.sb.events(), [])
+
+    def test_update_of_a_stopped_but_enabled_service_does_not_start_it(self):
+        v1, v2 = self.sb.make_bundle("1.0.0"), self.sb.make_bundle("1.1.0")
+        self.assertOk(self.sb.install(v1))
+        self.sb.write_cfg(SERVICE="enabled")
+        shutil.rmtree(self.sb.data)                      # pool not available yet
+        self.assertOk(self.sb.install(v2))
+        self.assertEqual(self.sb.pointer()["current"], v2["sha"])
+        self.assertEqual(self.sb.events(), [])
+
+
 class FailureTests(Base):
     def test_failed_start_of_new_bundle_rolls_back_automatically(self):
         v1, bad = self.sb.make_bundle("1.0.0"), self.sb.make_bundle("2.0.0", fail_start=True)

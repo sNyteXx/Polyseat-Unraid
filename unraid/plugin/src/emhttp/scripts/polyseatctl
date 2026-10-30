@@ -734,8 +734,11 @@ svc_stop() { # full|daemon
 }
 
 # --------------------------------------------------------- transaction ----
+# Only a service that was running is restarted after a switch/restore. Starting an
+# enabled service is the boot path's job (it runs once the pool is mounted); a plugin
+# re-install early in boot must never fail because DATA_DIR is not available yet.
 want_running_after() { # was_running
-  [[ $1 -eq 1 || $(cfg_get SERVICE disabled) == enabled ]]
+  [[ $1 -eq 1 ]]
 }
 
 restore_previous() { # previous was_running : switch live state back to previous
@@ -954,7 +957,6 @@ cmd_boot() {
   if [[ -n $JR_PHASE ]]; then
     APPROVED=1
     cmd_recover
-    return
   fi
   sweep_stale_incoming
   read_pointer
