@@ -30,4 +30,9 @@ writer_output=$(env CI=false RUNNER_OS=Linux \
 printf '%s\n' "$writer_output" | grep -q 'only an isolated Linux CI build' ||
   fail 'proof inventory writer did not explicitly reject non-CI execution'
 
+if env CI=false GITHUB_ACTIONS=false RUNNER_OS=Linux \
+    sh unraid/scripts/incus-cpu-smoke.sh >/dev/null 2>&1; then
+  fail 'CPU smoke unexpectedly ran outside isolated GitHub Actions'
+fi
+
 printf '%s\n' 'WIP install and build guardrails passed.'

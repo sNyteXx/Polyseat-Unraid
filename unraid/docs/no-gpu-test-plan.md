@@ -11,25 +11,40 @@ or a container boot on a **separate disposable Linux environment**.
 |---|---|---|---|
 | 0 — code | GitHub Actions Ubuntu 24.04 | Incus 7.5.1 and C sources compile; checksums, limited SBOM; `incus --version` and `incusd --version` without a daemon | **Passed** ([CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221184)) |
 | 0 — models | GitHub Actions Ubuntu 24.04 | 18 pure tests: active VM/vfio, network policy, start/stop/rollback and malicious archives | **Passed** ([CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221252)); not hardware evidence |
-| 1 — container | Disposable Linux test VM, **not** Unraid | Independent `incusd` process starts with dedicated socket and state directory, no host bridge; one CPU-only Linux container boots and stops | **NOT implemented/tested** |
+| 1 — container | Disposable GitHub-hosted Ubuntu Linux VM, **not** Unraid | Independent `incusd` process starts with dedicated socket and state directory, no host bridge; locally generated BusyBox container boots, executes, stops, restarts and cleans up | CI workflow **implemented, pending first successful run** |
 | 2 — Unraid parity | Dedicated disposable Unraid 7.2-compatible host/VM | Same test with non-systemd lifecycle, Unraid libraries, kernel, cgroup v2, uidmaps and selected pool; clean rollback | **NOT implemented/tested** |
 | 3 — streaming | Separate hardware window | Host-owned GPU and Sunshine/Moonlight/NVENC one-/two-seat tests | Blocked while GPU is exclusively used by gaming VM |
 
-## Minimum implementation before level 1
+## Implemented first level-1 attempt
 
-1. Complete and verify an **isolated runtime dependency closure** (including
-   `incusd`, runtime libraries and helper binaries) for the disposable test OS.
-2. Use a separate socket, state directory, ID maps and storage path **inside
-   the disposable VM**. Never reuse an existing Incus daemon or DB.
-3. Supply a pinned, checksum-verified rootfs from an approved source; do not
-   require a LAN-facing management socket. Keep guest networking disabled for
-   the first boot and validate that no host bridge or firewall is changed.
-4. Introduce a non-systemd supervisor and a real implementation of
+The existing `.github/workflows/incus-feasibility.yml` now calls
+`unraid/scripts/incus-cpu-smoke.sh` in a **disposable GitHub-hosted Ubuntu
+runner**. The smoke script runs only in CI as root, with `INCUS_DIR`,
+`INCUS_CONF` and `INCUS_EXEC_PATH` redirected to a newly created temporary
+staging directory. Its explicit preseed config defines a directory storage
+pool and a disk-only profile. **It does not call `incus admin init --minimal`,
+which would create a bridge.**
+
+The test uses the upstream, source-pinned BusyBox image generator and a local
+`busybox-static` executable, without a third-party image registry. It then
+starts, executes in, stops, restarts, and deletes a single CPU-only instance.
+The script checks for an unexpected `incusbr0` and stops with an error if
+the daemon or container cannot work in a GitHub-hosted runner.
+
+## Remaining before level 2 / production use
+
+1. Complete and verify an **isolated relocatable runtime dependency closure**
+   for the different Unraid system libraries (Ubuntu test packages are not it).
+2. Verify UID/idmap, socket ownership, storage and kernel parity on a separate
+   disposable Unraid-compatible host; never reuse an existing Incus DB.
+3. Audit and attest the pinned BusyBox image inputs, and prove network isolation
+   beyond the absence of `incusbr0` before any client-reachable networking.
+4. Introduce a Unraid-specific non-systemd supervisor and a real implementation of
    stage/activate/start/stop/rollback with a strict owned-path manifest,
    crash injection and cleanup verification. Existing Python code is pure
    simulation only.
-5. Gate the job with an explicit separate test workflow and a disposable
-   runner. Never run it via a generic deployment hook or a self-hosted runner.
+5. Keep host-privileged CI jobs exclusively on disposable GitHub-hosted
+   runners. Never run them via a deployment hook or a self-hosted runner.
 
 ## Pass/fail evidence to capture
 

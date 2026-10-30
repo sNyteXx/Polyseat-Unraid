@@ -53,8 +53,8 @@ host-owned GPU or agree another architecture in a separate review. See
 
 The safe no-GPU progression is documented in
 [the first no-GPU test plan](unraid/docs/no-gpu-test-plan.md): version-only
-binary smoke in CI first; actual CPU-only container boot requires an isolated
-Incus runtime in a disposable VM and is **not yet implemented**.
+binary smoke already passed; a new Actions job now attempts a CPU-only
+BusyBox container boot in a disposable runner, **pending green CI evidence**.
 
 See [the acceptance matrix](unraid/docs/acceptance.md). There is no automatic
 installation, GOW migration, host service startup, or merge to `main` in this

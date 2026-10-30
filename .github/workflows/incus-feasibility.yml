@@ -35,7 +35,9 @@ jobs:
             libcap-dev libseccomp-dev libudev-dev libuv1-dev \
             liblz4-dev libzstd-dev libbtrfs-dev libdevmapper-dev \
             liblxc-dev libapparmor-dev protobuf-compiler \
-            libdbus-1-dev libselinux1-dev
+            libdbus-1-dev libselinux1-dev \
+            rsync attr squashfs-tools xz-utils iproute2 uidmap \
+            busybox-static lxc-utils
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -44,6 +46,17 @@ jobs:
 
       - name: Build pinned source and record binary dependencies
         run: sh unraid/scripts/build-incus-artifact.sh
+
+      - name: Launch and stop a CPU-only BusyBox container on disposable runner
+        timeout-minutes: 10
+        run: |
+          test -n "${INCUS_PROOF_STAGE:-}"
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            INCUS_PROOF_STAGE="$INCUS_PROOF_STAGE" \
+            sh unraid/scripts/incus-cpu-smoke.sh
 
       - name: Verify proof checksums and disabled installer
         run: |

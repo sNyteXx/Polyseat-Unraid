@@ -35,6 +35,9 @@ done
 
 build_root=$(mktemp -d "$RUNNER_TEMP/polyseat-incus-proof.XXXXXXXX") ||
   die 'could not create isolated build directory'
+if [ -n "${GITHUB_ENV:-}" ]; then
+  printf 'INCUS_PROOF_STAGE=%s\n' "$build_root" >> "$GITHUB_ENV"
+fi
 prefix="$build_root/prefix"
 src="$build_root/incus"
 raft="$build_root/raft"

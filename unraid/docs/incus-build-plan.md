@@ -23,15 +23,19 @@ source revisions, Go/toolchain information, Go module inventory, dynamic
 dependency listing, a limited CycloneDX **build-source** SBOM and SHA-256
 checksums. The runner checks that the inventory is parseable JSON.
 
-After building, CI executes **only** `incus --version` and `incusd --version`
-against the binaries with their temporary runner library paths. This is a
-minimal no-GPU CLI smoke, **not** a running `incusd`, working containers, or
-evidence of Unraid kernel/runtime support.
+After building, CI executes `incus --version` and `incusd --version` against
+the temporary binaries. The newly added **disposable Ubuntu-only CPU smoke**
+also attempts to start a real `incusd` with an isolated Unix socket and a
+disk-only profile, import a locally generated BusyBox rootfs, start/execute/
+stop/restart/delete one container, and clean up its own daemon. That step
+requires a separate green Actions run. **Neither a successful Ubuntu daemon
+nor a container boot certifies Unraid kernel/runtime support.**
 
 The [isolated 7.5.1 build + no-GPU binary smoke](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221184)
 passed compilation, version-only execution, limited source SBOM, dynamic
-dependency inspection, checksums and artifact upload. **This does not
-authorize Unraid execution.**
+dependency inspection, checksums and artifact upload. The new real container
+smoke must earn its own independent evidence. **Nothing authorizes Unraid
+execution.**
 
 **Limitations:** Ubuntu package dependencies and GitHub's runner image are
 not pinned, so this is source-pinned but not bit-for-bit reproducible. The output
