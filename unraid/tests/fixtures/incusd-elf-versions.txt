@@ -1,0 +1,119 @@
+
+Version symbols section '.gnu.version' contains 365 entries:
+ Addr: 0x0000000000403f18  Offset: 0x00003f18  Link: 7 (.dynsym)
+  000:   0 (*local*)       1 (*global*)      2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  004:   1 (*global*)      2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  008:   3 (LIBUDEV_183)   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   1 (*global*)   
+  00c:   2 (GLIBC_2.2.5)   1 (*global*)      2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  010:   1 (*global*)      4 (GCC_3.3.1)     2 (GLIBC_2.2.5)   1 (*global*)   
+  014:   1 (*global*)      2 (GLIBC_2.2.5)   5 (ACL_1.0)       2 (GLIBC_2.2.5)
+  018:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   6 (GLIBC_2.32)    2 (GLIBC_2.2.5)
+  01c:   2 (GLIBC_2.2.5)   1 (*global*)      3 (LIBUDEV_183)   1 (*global*)   
+  020:   3 (LIBUDEV_183)   7 (GLIBC_2.34)    2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  024:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   7 (GLIBC_2.34)    1 (*global*)   
+  028:   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   1 (*global*)      3 (LIBUDEV_183)
+  02c:   1 (*global*)      2 (GLIBC_2.2.5)   1 (*global*)      1 (*global*)   
+  030:   1 (*global*)      2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   1 (*global*)   
+  034:   1 (*global*)      3 (LIBUDEV_183)   1 (*global*)      8 (GLIBC_2.33) 
+  038:   1 (*global*)      2 (GLIBC_2.2.5)   1 (*global*)      2 (GLIBC_2.2.5)
+  03c:   1 (*global*)      3 (LIBUDEV_183)   2 (GLIBC_2.2.5)   1 (*global*)   
+  040:   2 (GLIBC_2.2.5)   9 (GLIBC_2.4)     3 (LIBUDEV_183)   2 (GLIBC_2.2.5)
+  044:   1 (*global*)      9 (GLIBC_2.4)     3 (LIBUDEV_183)   1 (*global*)   
+  048:   1 (*global*)      3 (LIBUDEV_183)   1 (*global*)      3 (LIBUDEV_183)
+  04c:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  050:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  054:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  058:   6 (GLIBC_2.32)    2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   1 (*global*)   
+  05c:   1 (*global*)      1 (*global*)      1 (*global*)      2 (GLIBC_2.2.5)
+  060:   2 (GLIBC_2.2.5)   1 (*global*)      1 (*global*)      3 (LIBUDEV_183)
+  064:   1 (*global*)      1 (*global*)      3 (LIBUDEV_183)   1 (*global*)   
+  068:   8 (GLIBC_2.33)    2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   1 (*global*)   
+  06c:   1 (*global*)      2 (GLIBC_2.2.5)   1 (*global*)      2 (GLIBC_2.2.5)
+  070:   3 (LIBUDEV_183)   1 (*global*)      1 (*global*)      3 (LIBUDEV_183)
+  074:   1 (*global*)      2 (GLIBC_2.2.5)   1 (*global*)      2 (GLIBC_2.2.5)
+  078:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)
+  07c:   9 (GLIBC_2.4)     1 (*global*)      1 (*global*)      3 (LIBUDEV_183)
+  080:   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   7 (GLIBC_2.34)    5 (ACL_1.0)    
+  084:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)
+  088:   3 (LIBUDEV_183)   3 (LIBUDEV_183)   1 (*global*)      1 (*global*)   
+  08c:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   1 (*global*)   
+  090:   a (GLIBC_2.3)     1 (*global*)      2 (GLIBC_2.2.5)   1 (*global*)   
+  094:   1 (*global*)      1 (*global*)      3 (LIBUDEV_183)   2 (GLIBC_2.2.5)
+  098:   1 (*global*)      9 (GLIBC_2.4)     1 (*global*)      2 (GLIBC_2.2.5)
+  09c:   b (LIBUDEV_199)   2 (GLIBC_2.2.5)   1 (*global*)      1 (*global*)   
+  0a0:   1 (*global*)      1 (*global*)      3 (LIBUDEV_183)   a (GLIBC_2.3)  
+  0a4:   1 (*global*)      7 (GLIBC_2.34)    1 (*global*)      2 (GLIBC_2.2.5)
+  0a8:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   1 (*global*)      2 (GLIBC_2.2.5)
+  0ac:   2 (GLIBC_2.2.5)   1 (*global*)      2 (GLIBC_2.2.5)   c (GLIBC_2.9)  
+  0b0:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   1 (*global*)      2 (GLIBC_2.2.5)
+  0b4:   3 (LIBUDEV_183)   3 (LIBUDEV_183)   1 (*global*)      2 (GLIBC_2.2.5)
+  0b8:   2 (GLIBC_2.2.5)   d (GLIBC_2.3.2)   1 (*global*)      1 (*global*)   
+  0bc:   3 (LIBUDEV_183)   2 (GLIBC_2.2.5)   8 (GLIBC_2.33)    3 (LIBUDEV_183)
+  0c0:   5 (ACL_1.0)       2 (GLIBC_2.2.5)   1 (*global*)      3 (LIBUDEV_183)
+  0c4:   2 (GLIBC_2.2.5)   7 (GLIBC_2.34)    1 (*global*)      3 (LIBUDEV_183)
+  0c8:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   e (GLIBC_2.38) 
+  0cc:   2 (GLIBC_2.2.5)   1 (*global*)      1 (*global*)      1 (*global*)   
+  0d0:   3 (LIBUDEV_183)   1 (*global*)      7 (GLIBC_2.34)    2 (GLIBC_2.2.5)
+  0d4:   3 (LIBUDEV_183)   1 (*global*)      3 (LIBUDEV_183)   3 (LIBUDEV_183)
+  0d8:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   2 (GLIBC_2.2.5)
+  0dc:   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   1 (*global*)      2 (GLIBC_2.2.5)
+  0e0:   1 (*global*)      2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   2 (GLIBC_2.2.5)
+  0e4:   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)
+  0e8:   3 (LIBUDEV_183)   2 (GLIBC_2.2.5)   5 (ACL_1.0)       3 (LIBUDEV_183)
+  0ec:   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   1 (*global*)      9 (GLIBC_2.4)  
+  0f0:   2 (GLIBC_2.2.5)   1 (*global*)      7 (GLIBC_2.34)    1 (*global*)   
+  0f4:   2 (GLIBC_2.2.5)   1 (*global*)      1 (*global*)      3 (LIBUDEV_183)
+  0f8:   3 (LIBUDEV_183)   1 (*global*)      a (GLIBC_2.3)     2 (GLIBC_2.2.5)
+  0fc:   2 (GLIBC_2.2.5)   e (GLIBC_2.38)    2 (GLIBC_2.2.5)   1 (*global*)   
+  100:   d (GLIBC_2.3.2)   3 (LIBUDEV_183)   5 (ACL_1.0)       2 (GLIBC_2.2.5)
+  104:   1 (*global*)      1 (*global*)      1 (*global*)      d (GLIBC_2.3.2)
+  108:   1 (*global*)      3 (LIBUDEV_183)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  10c:   2 (GLIBC_2.2.5)   1 (*global*)      1 (*global*)      5 (ACL_1.0)    
+  110:   1 (*global*)      2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)
+  114:   2 (GLIBC_2.2.5)   1 (*global*)      3 (LIBUDEV_183)   3 (LIBUDEV_183)
+  118:   f (LIBUDEV_189)   2 (GLIBC_2.2.5)   1 (*global*)      3 (LIBUDEV_183)
+  11c:   1 (*global*)     10 (GLIBC_2.3.3)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  120:   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  124:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  128:  11 (GLIBC_2.14)    1 (*global*)      1 (*global*)      2 (GLIBC_2.2.5)
+  12c:   3 (LIBUDEV_183)   2 (GLIBC_2.2.5)   5 (ACL_1.0)       1 (*global*)   
+  130:   2 (GLIBC_2.2.5)   1 (*global*)      2 (GLIBC_2.2.5)   1 (*global*)   
+  134:   2 (GLIBC_2.2.5)   1 (*global*)      1 (*global*)      2 (GLIBC_2.2.5)
+  138:   2 (GLIBC_2.2.5)   1 (*global*)      2 (GLIBC_2.2.5)   1 (*global*)   
+  13c:   2 (GLIBC_2.2.5)   e (GLIBC_2.38)    2 (GLIBC_2.2.5)   7 (GLIBC_2.34) 
+  140:   2 (GLIBC_2.2.5)   1 (*global*)      1 (*global*)     12 (GCC_3.0)    
+  144:   d (GLIBC_2.3.2)   1 (*global*)      1 (*global*)      8 (GLIBC_2.33) 
+  148:   1 (*global*)      3 (LIBUDEV_183)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  14c:  11 (GLIBC_2.14)    2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   c (GLIBC_2.9)  
+  150:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   3 (LIBUDEV_183)   2 (GLIBC_2.2.5)
+  154:   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)   2 (GLIBC_2.2.5)
+  158:   3 (LIBUDEV_183)   1 (*global*)      2 (GLIBC_2.2.5)   1 (*global*)   
+  15c:   1 (*global*)      1 (*global*)      1 (*global*)      2 (GLIBC_2.2.5)
+  160:   1 (*global*)      1 (*global*)      1 (*global*)      1 (*global*)   
+  164:   1 (*global*)      1 (*global*)      1 (*global*)      1 (*global*)   
+  168:   1 (*global*)      1 (*global*)      1 (*global*)      1 (*global*)   
+  16c:   1 (*global*)   
+
+Version needs section '.gnu.version_r' contains 4 entries:
+ Addr: 0x00000000004041f8  Offset: 0x000041f8  Link: 8 (.dynstr)
+  000000: Version: 1  File: libacl.so.1  Cnt: 1
+  0x0010:   Name: ACL_1.0  Flags: none  Version: 5
+  0x0020: Version: 1  File: libgcc_s.so.1  Cnt: 2
+  0x0030:   Name: GCC_3.0  Flags: none  Version: 18
+  0x0040:   Name: GCC_3.3.1  Flags: none  Version: 4
+  0x0050: Version: 1  File: libudev.so.1  Cnt: 3
+  0x0060:   Name: LIBUDEV_189  Flags: none  Version: 15
+  0x0070:   Name: LIBUDEV_199  Flags: none  Version: 11
+  0x0080:   Name: LIBUDEV_183  Flags: none  Version: 3
+  0x0090: Version: 1  File: libc.so.6  Cnt: 11
+  0x00a0:   Name: GLIBC_2.14  Flags: none  Version: 17
+  0x00b0:   Name: GLIBC_2.3.3  Flags: none  Version: 16
+  0x00c0:   Name: GLIBC_2.38  Flags: none  Version: 14
+  0x00d0:   Name: GLIBC_2.3.2  Flags: none  Version: 13
+  0x00e0:   Name: GLIBC_2.9  Flags: none  Version: 12
+  0x00f0:   Name: GLIBC_2.3  Flags: none  Version: 10
+  0x0100:   Name: GLIBC_2.4  Flags: none  Version: 9
+  0x0110:   Name: GLIBC_2.33  Flags: none  Version: 8
+  0x0120:   Name: GLIBC_2.34  Flags: none  Version: 7
+  0x0130:   Name: GLIBC_2.32  Flags: none  Version: 6
+  0x0140:   Name: GLIBC_2.2.5  Flags: none  Version: 2
