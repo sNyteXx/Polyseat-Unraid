@@ -120,6 +120,34 @@ class LifecycleTests(unittest.TestCase):
                               "rollback", approved=True)
         self.assertEqual(reverted.active, DIGEST_A)
 
+    def test_offline_start_stop_are_approval_gated_and_idempotent(self):
+        plan = propose(fixture(), {"gpu_pci": GPU_B, "seats": 1,
+                                   "network_mode": "isolated-no-uplink"})
+        active = transition(transition(State(), "stage", bundle=DIGEST_A),
+                            "activate", approved=True)
+        with self.assertRaises(TransitionDenied):
+            transition(active, "start", approved=True)
+        running = transition(active, "start", approved=True, offline_plan=plan)
+        self.assertEqual(running.phase, "RUNNING")
+        self.assertEqual(transition(running, "start", approved=True, offline_plan=plan),
+                         running)
+        with self.assertRaises(TransitionDenied):
+            transition(running, "stage", bundle=DIGEST_B)
+        with self.assertRaises(TransitionDenied):
+            transition(running, "uninstall", approved=True)
+        stopped = transition(running, "stop", approved=True)
+        self.assertEqual(stopped, active)
+        self.assertEqual(transition(stopped, "stop", approved=True), stopped)
+
+    def test_forged_plan_does_not_authorize_even_simulated_start(self):
+        active = transition(transition(State(), "stage", bundle=DIGEST_A),
+                            "activate", approved=True)
+        for invalid in ({"classification": "LIVE", "host_commands": []},
+                        {"classification": "OFFLINE-PROPOSAL-ONLY", "installable": False,
+                         "host_commands": ["virsh shutdown gaming-vm"]}):
+            with self.subTest(invalid=invalid), self.assertRaises(TransitionDenied):
+                transition(active, "start", approved=True, offline_plan=invalid)
+
     def test_uninstall_never_deletes_external_data(self):
         s = transition(transition(State(external_fingerprint="steam-and-vm"),
                                   "stage", bundle=DIGEST_A), "activate", approved=True)
@@ -196,7 +224,7 @@ class SourceInventoryTests(unittest.TestCase):
         s = make_source_inventory(
             "github.com/lxc/incus/v7\nexample.org/one v1.2.3\n"
             "example.org/two v0.0.1 => example.org/replaced v2.0.0\n",
-            "v7.0.2", {"incus": DIGEST_A[:40], "raft": DIGEST_B[:40],
+            "v7.5.1", {"incus": DIGEST_A[:40], "raft": DIGEST_B[:40],
                          "cowsql": "c" * 40})
         self.assertEqual(s["bomFormat"], "CycloneDX")
         self.assertIn("source-inventory-only-not-runtime",
@@ -208,7 +236,7 @@ class SourceInventoryTests(unittest.TestCase):
     def test_unpinned_go_replacement_rejected(self):
         with self.assertRaises(ValueError):
             make_source_inventory("example.org/one v1.0.0 => ../local\n",
-                                  "v7.0.2", {"incus": "a", "raft": "b", "cowsql": "c"})
+                                  "v7.5.1", {"incus": "a", "raft": "b", "cowsql": "c"})
 
 
 if __name__ == "__main__":

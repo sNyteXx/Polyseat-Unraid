@@ -29,6 +29,10 @@ start Incus, manipulate GPUs, set up network interfaces, or change any VM.
 An active gaming VM with an exclusively passed-through GPU is explicitly
 blocked for that GPU. The archive verifier is read-only and never extracts.
 
+For a real container boot **without any GPU** on disposable infrastructure,
+see [the no-GPU test plan](docs/no-gpu-test-plan.md). A green version-only
+CLI smoke is not the same as starting an `incusd` service.
+
 Read [the security and rollback contract](docs/security-rollback-contract.md)
 and [acceptance matrix](docs/acceptance.md) before implementing any mutating
 host operation. The current branch makes none.

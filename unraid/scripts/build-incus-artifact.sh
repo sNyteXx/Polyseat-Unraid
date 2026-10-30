@@ -101,6 +101,16 @@ if grep -q 'not found' "$output/incusd-ldd.txt"; then
   die 'built incusd has unresolved dependencies even on the build runner'
 fi
 
+# No-GPU, no-daemon execution smoke on the disposable CI runner. Neither
+# command initializes Incus, creates a bridge, opens a service, or touches VMs.
+"$GOBIN/incus" --version > "$output/incus-cli-version.txt"
+"$GOBIN/incusd" --version > "$output/incusd-cli-version.txt"
+version_without_v=${INCUS_RELEASE#v}
+grep -Fq "$version_without_v" "$output/incus-cli-version.txt" ||
+  die 'Incus CLI did not report the selected source version'
+grep -Fq "$version_without_v" "$output/incusd-cli-version.txt" ||
+  die 'Incus daemon binary did not report the selected source version'
+
 # Source inventory ONLY: it is not a complete runtime SBOM or vulnerability audit.
 (
   cd "$src"
@@ -131,6 +141,7 @@ printf '%s\n' \
 (
   cd "$output"
   sha256sum bin/* build-info.txt incusd-ldd.txt incusd-go-buildinfo.txt \
+    incus-cli-version.txt incusd-cli-version.txt \
     go-modules.txt SBOM-build-source-only.cdx.json NOTICE.txt > SHA256SUMS
   sha256sum --check SHA256SUMS
 )

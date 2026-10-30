@@ -15,8 +15,9 @@ driver, or game data. No installable `.plg` is shipped.
 
 - Read-only, non-certifying host capability reports in `unraid/scripts/`.
 - Syntax/ShellCheck checks and a CI guard that rejects an installable `.plg`.
-- An **Ubuntu-only, source-pinned Incus userspace build proof**, successfully
-  [built with Incus 7.0.2 LTS in CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407).
+- An **Ubuntu-only, source-pinned Incus userspace build proof**. The
+  [7.0.2 LTS baseline compiled successfully](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407);
+  the requested **7.5.1** update is subject to its own CI evidence.
   Its binaries are not a complete runtime bundle, and success says nothing
   about Unraid ABI, kernel features, confinement, GPU mapping, boot, or rollback.
 - **Offline-only Python safety rehearsals** for GPU ownership while a gaming VM
@@ -49,6 +50,11 @@ deferred. An exclusive `vfio-pci` GPU cannot be shared with host NVENC by
 pretending it is available. We must either prove the presence of a separate
 host-owned GPU or agree another architecture in a separate review. See
 [gaming-VM protection](unraid/docs/gaming-vm-protection.md).
+
+The safe no-GPU progression is documented in
+[the first no-GPU test plan](unraid/docs/no-gpu-test-plan.md): version-only
+binary smoke in CI first; actual CPU-only container boot requires an isolated
+Incus runtime in a disposable VM and is **not yet implemented**.
 
 See [the acceptance matrix](unraid/docs/acceptance.md). There is no automatic
 installation, GOW migration, host service startup, or merge to `main` in this

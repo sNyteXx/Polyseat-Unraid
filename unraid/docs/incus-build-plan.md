@@ -6,13 +6,14 @@
 GitHub Actions runner. `unraid/scripts/build-incus-artifact.sh` actively
 refuses to run outside Linux CI or on an Unraid host.
 
-The workflow now uses a signed Incus **v7.0.2 LTS** tag's immutable target
-commit (as checked against the upstream GitHub tag API) and release-tagged C
-dependencies. The runner uses Go 1.26.7:
+The workflow now uses the signed Incus **v7.5.1** tag's immutable target commit
+(checked against the upstream GitHub tag API) and release-tagged C dependencies.
+This is the latest **7.5.x** patch, **not** the latest 7.x release or an LTS
+branch. The runner uses the version required by upstream, Go 1.26.7:
 
 | Source | Revision |
 |---|---|
-| `lxc/incus` (`v7.0.2` LTS) | `01f81e5e607bbb5818410318e4b3496ad1820824` |
+| `lxc/incus` (`v7.5.1`) | `b20ec6c3cb17eaff28fc1145238b8769e44ce39d` |
 | `cowsql/raft` (`v0.22.1`) | `9edb176a7924ce2b943cb56552366dc4b5a1a6b7` |
 | `cowsql/cowsql` (`v1.15.9`) | `783815b901470e27b7dfbcce3a67c888dad19e78` |
 
@@ -22,10 +23,15 @@ source revisions, Go/toolchain information, Go module inventory, dynamic
 dependency listing, a limited CycloneDX **build-source** SBOM and SHA-256
 checksums. The runner checks that the inventory is parseable JSON.
 
-The [isolated LTS build run](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407)
+After building, CI executes **only** `incus --version` and `incusd --version`
+against the binaries with their temporary runner library paths. This is a
+minimal no-GPU CLI smoke, **not** a running `incusd`, working containers, or
+evidence of Unraid kernel/runtime support.
+
+The previous [isolated 7.0.2 LTS build run](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407)
 passed compilation, runner dependency inspection, checksums and artifact
-upload. That run predates the new build-source SBOM step, which requires its
-own successful Actions run. **Neither run authorizes Unraid execution.**
+upload. The 7.5.1 update and new CLI smoke require a new passing Actions run.
+**Neither runner run authorizes Unraid execution.**
 
 **Limitations:** Ubuntu package dependencies and GitHub's runner image are
 not pinned, so this is source-pinned but not bit-for-bit reproducible. The output

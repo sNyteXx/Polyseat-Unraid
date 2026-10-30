@@ -34,16 +34,17 @@ def transition(
     *,
     bundle: str | None = None,
     approved: bool = False,
+    offline_plan: dict | None = None,
 ) -> State:
     if not isinstance(state, State) or state.phase not in {
-        "ABSENT", "STAGED", "ACTIVE", "ROLLBACK_PENDING"
+        "ABSENT", "STAGED", "ACTIVE", "RUNNING", "ROLLBACK_PENDING"
     }:
         raise TransitionDenied("unknown or corrupted lifecycle state")
     if state.phase == "ABSENT" and any((state.active, state.previous, state.staged)):
         raise TransitionDenied("inconsistent absent state")
     if state.phase == "STAGED" and not _digest(state.staged):
         raise TransitionDenied("inconsistent staged state")
-    if state.phase == "ACTIVE" and not _digest(state.active):
+    if state.phase in ("ACTIVE", "RUNNING") and not _digest(state.active):
         raise TransitionDenied("inconsistent active state")
     if state.phase == "ROLLBACK_PENDING" and not _digest(state.active):
         raise TransitionDenied("inconsistent rollback state")
@@ -63,9 +64,24 @@ def transition(
         return replace(state, phase="ACTIVE", active=state.staged,
                        previous=state.active, staged=None)
 
+    if action == "start":
+        if not approved or state.phase not in ("ACTIVE", "RUNNING"):
+            raise TransitionDenied("simulation start requires approval and active bundle")
+        if (not isinstance(offline_plan, dict)
+                or offline_plan.get("classification") != "OFFLINE-PROPOSAL-ONLY"
+                or offline_plan.get("installable") is not False
+                or offline_plan.get("host_commands") != []):
+            raise TransitionDenied("safe offline-only planning evidence required")
+        return replace(state, phase="RUNNING")  # Never launches a process.
+
+    if action == "stop":
+        if not approved or state.phase not in ("ACTIVE", "RUNNING"):
+            raise TransitionDenied("simulation stop requires approval")
+        return replace(state, phase="ACTIVE")  # Never signals a process.
+
     if action == "mark_failed":
-        if state.phase != "ACTIVE":
-            raise TransitionDenied("only active state can fail activation")
+        if state.phase not in ("ACTIVE", "RUNNING"):
+            raise TransitionDenied("only active/running state can fail activation")
         return replace(state, phase="ROLLBACK_PENDING")
 
     if action == "rollback":

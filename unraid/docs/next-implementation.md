@@ -1,13 +1,15 @@
 # 🚧 WIP — DO NOT USE — Next implementation milestones
 
-The branch contains an isolated **Incus 7.0.2 LTS build proof** that
-[passed GitHub Actions](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407).
+The branch had an isolated **Incus 7.0.2 LTS build proof** that
+[passed GitHub Actions](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41088560407),
+and now requests **Incus 7.5.1** (latest 7.5 patch) in the new proof.
 It also has pure offline simulations for VM/GPU/network safety, lifecycle
 transitions and archive validation, plus a build-source SBOM generator.
 The output is **not** an installable Unraid bundle, and the disabled `.plg`
 must remain disabled.
 
-1. Keep the pinned C dependency and Incus build passing in GitHub Actions.
+1. Keep the pinned C dependency and selected Incus 7.5.1 build passing in
+   GitHub Actions, including no-GPU version-only binary smoke.
 2. Close and audit ALL dynamic dependencies for a verified Unraid ABI; complete
    the runtime SBOM, software signing/attestations, vulnerability assessment
    and a no-extraction archive verifier.
