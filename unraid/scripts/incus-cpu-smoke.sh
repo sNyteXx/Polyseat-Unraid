@@ -35,13 +35,23 @@ if [ ! -x "$bin/incusd" ] || [ ! -x "$bin/incus" ] || [ ! -r "$importer" ]; then
 fi
 
 export LD_LIBRARY_PATH="$library"
-export INCUS_DIR="$INCUS_PROOF_STAGE/smoke-state"
+# Root in the unprivileged guest maps to a subordinate host UID. That UID
+# cannot traverse /home/runner (the parent of RUNNER_TEMP). Only the Incus
+# runtime/state is placed under /tmp on the disposable runner; no permissions
+# on /home/runner or any existing host directory are relaxed.
+runtime_root=$(mktemp -d /tmp/polyseat-incus-cpu.XXXXXXXX)
+case "$runtime_root" in
+  /tmp/polyseat-incus-cpu.*) ;;
+  *) fail 'unsafe CI-only runtime state directory' ;;
+esac
+chmod 0711 "$runtime_root"
+export INCUS_DIR="$runtime_root"
 export INCUS_CONF="$INCUS_PROOF_STAGE/smoke-client"
 export INCUS_EXEC_PATH="$bin/incusd"
 export INCUS_SKIP_INSTANCE_TYPES=true
 export PATH="$bin:$PATH"
 umask 077
-mkdir -p "$INCUS_DIR" "$INCUS_CONF"
+mkdir -p "$INCUS_CONF"
 
 if command -v pgrep >/dev/null 2>&1 && pgrep -x incusd >/dev/null 2>&1; then
   fail 'another Incus daemon is already running on the disposable runner'

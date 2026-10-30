@@ -21,7 +21,12 @@ The existing `.github/workflows/incus-feasibility.yml` now calls
 `unraid/scripts/incus-cpu-smoke.sh` in a **disposable GitHub-hosted Ubuntu
 runner**. The smoke script runs only in CI as root, with `INCUS_DIR`,
 `INCUS_CONF` and `INCUS_EXEC_PATH` redirected to a newly created temporary
-staging directory. Its explicit preseed config defines a directory storage
+runtime/staging directory. The Incus state lives under a unique `/tmp` path
+with directory *traversal-only* access for subordinate guest UIDs, because
+those UIDs cannot enter the runner's `/home/runner` directory. Private
+client configuration and binaries stay in the build staging directory; no
+existing parent-directory permissions are changed. The explicit preseed
+config defines a directory storage
 pool and a disk-only profile. **It does not call `incus admin init --minimal`,
 which would create a bridge.**
 
