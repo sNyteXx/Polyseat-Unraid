@@ -37,8 +37,9 @@ drifts.
 
   The installer refuses rather than warns if the driver does not answer, because
   a seat without it comes up, streams in software and looks perfectly healthy.
-  The AMD path has **never been run on real hardware**:
-  [docs/amd.md](docs/amd.md) says what was verified and what was not.
+  AMD cards have been run by testers and nothing has come back broken, but not
+  by the author: [docs/amd.md](docs/amd.md) says what was verified and what was
+  not.
 - **An ethernet port for the seats.** Each seat is a host of its own on the LAN,
   and Wi-Fi cannot do that: 802.11 carries one MAC address per station. The
   machine itself is free to stay on wifi — what the seats want from the card is
@@ -386,9 +387,9 @@ with an RTX 4080, most recently on 2026-09-22. The logs of the milestones live
 in [`spike/`](spike/), and what was measured after them is written down in
 [`CHANGELOG.md`](CHANGELOG.md), release by release, with the numbers it was
 measured with. Whether any of it holds on a machine that is not that one is
-the open question this project would most like answered, and there are now three
-places it is open: an AMD card ([docs/amd.md](docs/amd.md)), a Debian host and a
-Fedora host. The last two are new in 0.9.0 and, like the first, are reasoned
+the open question this project would most like answered. An AMD card has since
+been run by testers ([docs/amd.md](docs/amd.md)), which leaves two places it is
+open: a Debian host and a Fedora host. Both are new in 0.9.0 and are reasoned
 about and tested as far as they can be tested without the hardware — which is
 not the same as working.
 

@@ -10,18 +10,18 @@ body:
         machine that is not that one tells this project something it cannot find
         out for itself.
 
-        **Three paths especially**, none of which has ever been run:
+        **Two paths especially**, neither of which has ever been run:
 
-        - **An AMD card.** That whole path was written and reasoned about
-          without a card to run it on.
         - **A Debian host** and **a Fedora host**, both new in 0.9.0. The host
           scripts are tested against stubbed package managers, which proves the
           right commands go out and not that they work.
 
-        They are independent, so a machine that is two of them at once is doubly
-        worth hearing about. In every case the first person to try it is doing
-        something nobody has done, and the report is useful in either
-        direction.
+        The first person to try one is doing something nobody has done, and the
+        report is useful in either direction.
+
+        **An AMD card** has been run by testers, and a report is still worth
+        having: the line that says whether it encodes in hardware has not been
+        reported yet.
 
   - type: dropdown
     id: host

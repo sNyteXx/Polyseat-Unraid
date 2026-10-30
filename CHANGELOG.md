@@ -10,6 +10,15 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.43.1
+
+**AMD cards are no longer described as never having run.** Testers have run
+Polyseat on AMD hardware and no problem specific to the card has come back, so
+the installer, the warning in the web interface, the README and the hardware
+report template stop saying otherwise. `docs/amd.md` says how far that goes:
+whether a card encodes in hardware has still not been reported. No seat needs
+building again.
+
 ## 0.43.0
 
 **A controller's mouse can be seen in a game.** A Steam Input mouse binding

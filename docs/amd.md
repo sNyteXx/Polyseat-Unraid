@@ -1,10 +1,10 @@
 # AMD
 
-**One AMD machine has now run this, and one is not many.** This was written on
-a machine with a single NVIDIA card in it and cannot be finished there. What
-follows is what was built, what was actually verified, and what is still open,
-and then what the one machine reported. Read both of the last two sections
-before trusting any of it.
+**Testers have run this on AMD cards, and so far it has held up.** This was
+written on a machine with a single NVIDIA card in it, so nothing here was seen
+first hand. What follows is what was built, what was actually verified, and what
+is still open, and then what has come back from AMD machines. Read both of the
+last two sections before trusting any of it.
 
 Since 0.9.0 there is a second untested axis, and the two are independent: the
 host may be Debian or Fedora rather than Arch, and neither of those has been run
@@ -125,9 +125,10 @@ On the NVIDIA machine this was written on:
   `h264_vaapi` and so on, and the parser already takes the part after the
   underscore, so an AMD seat reports `vaapi` in the interface without a change.
 
-## What is not verified, and cannot be here
+## What was not verified without a card
 
-Everything that needs the card to exist:
+Everything that needs the card to exist. Item 2 has been answered since, and the
+last section says how far the others have:
 
 1. **That it encodes in hardware at all.** The one that matters. `vainfo` is
    checked during provisioning and warns rather than refuses, and the encoder
@@ -178,7 +179,14 @@ sudo incus exec <seat> -- sudo -u player env XDG_RUNTIME_DIR=/run/user/1000 egli
 Then a stream, and whether a game runs. Please report what happens either way,
 including that it simply worked: this document exists because nobody knows.
 
-## What one AMD machine has reported
+## What AMD machines have reported
+
+**Testers have run it on AMD hardware since, and no problem specific to the card
+has come back**, which is why the issue asking for it was closed on 2026-10-30.
+That is the state of things and not a measurement: none of those runs left an
+encoder line, so item 1 has still not been answered in writing. The one report
+with detail is below. If you have an AMD machine, `sudo polyseatd -report` prints
+that line for a running seat, and it is still the most useful thing to send.
 
 [Issue #3](https://github.com/superuser404notfound/Polyseat/issues/3), against
 0.18.0 on a CachyOS host with two AMD cards in it: an RX 9070 XT at
