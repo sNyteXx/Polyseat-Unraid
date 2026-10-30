@@ -21,11 +21,17 @@ jobs:
       - name: POSIX shell syntax
         run: |
           for script in unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh; do
+            case "$script" in unraid/scripts/ci-canary-cgroup.sh) continue ;; esac
             sh -n "$script"
           done
+          bash -n unraid/scripts/ci-canary-cgroup.sh
       - name: ShellCheck
         run: |
-          shellcheck -x -s sh unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh
+          for script in unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh; do
+            case "$script" in unraid/scripts/ci-canary-cgroup.sh) continue ;; esac
+            shellcheck -x -s sh "$script"
+          done
+          shellcheck -s bash unraid/scripts/ci-canary-cgroup.sh
           shellcheck -s bash unraid/plugin/src/emhttp/scripts/polyseatctl unraid/plugin/src/emhttp/event/*
       - name: Bash syntax of plugin scripts
         run: |

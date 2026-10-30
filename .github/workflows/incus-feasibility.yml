@@ -9,6 +9,7 @@ on:
       - 'unraid/scripts/build-incus-artifact.sh'
       - 'unraid/scripts/incus-cpu-smoke.sh'
       - 'unraid/scripts/ci-e2e-controller.sh'
+      - 'unraid/scripts/ci-canary-cgroup.sh'
       - 'unraid/scripts/check-bundle-abi.py'
       - 'unraid/scripts/make-runtime-bundle.py'
       - 'unraid/scripts/make-test-report.sh'
@@ -25,6 +26,19 @@ permissions:
   contents: read
 
 jobs:
+  canary-cgroup:
+    if: github.ref == 'refs/heads/wip/unraid-native-plugin'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test canary limits and cgroup.kill on disposable CI host only
+        run: |
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_OS="$RUNNER_OS" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            bash unraid/scripts/ci-canary-cgroup.sh
+
   build:
     if: github.ref == 'refs/heads/wip/unraid-native-plugin'
     runs-on: ubuntu-24.04

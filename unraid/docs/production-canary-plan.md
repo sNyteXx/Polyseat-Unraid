@@ -24,9 +24,9 @@ Not part of the canary, ever: GPU, PCI/USB devices, VMs, networks or bridges, Do
 | P1 | Signed bundle: a maintainer-held release key signs the manifest of the exact CI artifact; key policy in [signing-key-policy.md](signing-key-policy.md); `allowed_signers` pinned; revocation list supported and tested | policy + revocation implemented; **no release key created, nothing signed** |
 | P2 | Provenance: bundle SHA-256 = CI artifact = local rebuild comparison documented; commit SHA, pins, run URL in `TEST-REPORT.md` | Local cold/warm dev bundles at `2e2c94f` have identical SHA-256 (`3e972d5b…`); independent CI/release-artifact comparison **open** (dev differs by design) |
 | P3 | Runtime SBOM + dependency review: `SBOM-runtime.cdx.json`, OSV lookup, `govulncheck` binary mode, human triage of every advisory | SBOM + OSV report implemented; **triage open**, see [security-analysis.md](security-analysis.md) |
-| P4 | Resource confinement: the daemon and all containers run inside a dedicated cgroup v2 subtree with `memory.max`, `cpu.max`, `pids.max`, `cpuset` on E-cores only, plus `cgroup.kill` as hard stop | **not implemented** (design only), must pass in CI |
-| P5 | Gate `canary`: a third release-gate value that needs a **signed, time-limited, bundle-bound approval file** on the flash; `test-host` (disposable marker) must not be reusable on production | **not implemented** |
-| P6 | Profile policy: the controller refuses any profile or instance device except `disk root` (no `gpu`, `pci`, `nic`, `usb`, `unix-*`), because Incus calls `modprobe` (e.g. `vfio-pci`) only for such devices, QEMU VMs and `linux.kernel_modules` | verified in the pinned source; **enforcement not implemented** |
+| P4 | Resource confinement: the daemon and all containers run inside a dedicated cgroup v2 subtree with `memory.max`, `cpu.max`, `pids.max`, `cpuset` on E-cores only, plus `cgroup.kill` as hard stop | **WIP controller implementation:** fixed 512 MiB, 0 swap, 0.1 CPU, E-cores 24–27, 256 PIDs and `nice 19`; checks inherited controllers without modifying the shared root; fail-closed watchdog. Disposable CI cgroup exercise added; **green CI and Unraid proof still required**. |
+| P5 | Gate `canary`: a third release-gate value that needs a **signed, time-limited, bundle-bound approval file** on the flash; `test-host` (disposable marker) must not be reusable on production | **WIP validator implemented, offline tests pass.** Separate Ed25519 approval identity and namespace, host SHA, exact archive SHA, 30-minute TTL, action allowlist, revocation check. Emergency stop/uninstall/recover remains possible after expiry. **No release approval key or canary package exists.** |
+| P6 | Profile policy: the controller refuses any profile or instance device except `disk root` (no `gpu`, `pci`, `nic`, `usb`, `unix-*`), because Incus calls `modprobe` (e.g. `vfio-pci`) only for such devices, QEMU VMs and `linux.kernel_modules` | **WIP runtime audit implemented**: exact `default` disk-only profile, at most one `polyseat-canary-cpu` container, `dir` pool, no privileged/raw/kernel settings or other devices. Offline attack-case tests pass. **A pre-start policy and unbypassable instance command path are not yet proven**; privileged root clients can mutate Incus between audits. |
 | P7 | Host-state diff proven in CI: modules, netfilter, sysctls, addresses, listeners, mounts, top-level cgroups before/after a full run | **CI passed at `2e2c94f`**; nftables rules are compared without volatile packet counters, actual firewall-rule and sysctl changes still fail; Unraid-specific behaviour untested |
 | P8 | Controller package built with the canary gate and signed; PLG template rendered by a separately approved release job | **not done** |
 | P9 | A dry run of the whole procedure on a Linux VM/CI with identical commands | CI e2e covers the controller; the **Unraid-specific steps are untested** |
@@ -137,6 +137,26 @@ idmapped mounts on ZFS, `installpkg` of the package, boot ordering, vfat flash b
 4. Discard the test or choose a safer alternative (CI-only evidence, or a separate machine) whenever a risk to the
    GamingVM/RTX 5070 Ti, Docker, libvirt, network, data or array cannot be excluded.
 
+### Implemented canary approval format (design; not issued)
+
+When a separately approved release package eventually sets `POLYSEAT_RELEASE_GATE="canary"`, the controller requires
+`/boot/config/plugins/polyseat-unraid/canary-approval.json`, its detached `.sig`, and a dedicated
+`canary_allowed_signers` file for the identity `polyseat-unraid-canary-approver` in SSH signing namespace
+`polyseat-unraid-canary-approval-v1`. The `allowed_signers` for *runtime bundles* is intentionally independent.
+
+The signed JSON must contain **exactly** `schema: 1`, `host_sha256` (SHA-256 of normalized DMI `product_uuid`),
+`archive_sha256` (the exact approved bundle), integer `issued_at`/`expires_at` (UTC epoch seconds; max 1800 seconds),
+and an explicit unique `actions` list. Allowed actions are `stage`, `activate`, `start`, `restart`, `boot`,
+`config-set`, `config-reset`; only those listed in the *signed* document are accepted. `update` and `rollback`
+are not authorized in the one-bundle canary; tear-down actions remain available for safety. The test data
+directory must be exactly `/mnt/cache/appdata/polyseat-canary`, and automatic service enabling is refused.
+
+`canary-approval.json`/`.sig` must be regular owner-private files on filesystems with Unix permissions; the approval
+key must be held **outside GitHub/CI**. A temporary signing key generated by tests is not a release key. The
+controller source **remains committed as `closed`**; ordinary build jobs can render only `closed`/`test-host`,
+and the `.plg.disabled` stays inert. No signed approval, signer allowlist, canary build or host installation
+has been created.
+
 ### Go/No-Go report template (to be issued before the very first write action)
 
 | Section | Content |
@@ -151,6 +171,8 @@ idmapped mounts on ZFS, `installpkg` of the package, boot ordering, vfat flash b
 
 ## 11. Current assessment
 
-**No-Go today.** P1 (no signed bundle), P4, P5, P6 (not implemented), P8 and the independent-access confirmation are
-open; the gaps in §7 (GamingVM NVMe, array, restore tests) are the owner's to accept or close. The next engineering steps
-are P4–P6 with CI tests, then the signing ceremony, then the dry run.
+**No-Go today.** P1 (no signed release bundle), P2/P3 supply-chain evidence, the CI/Unraid-specific validations
+for P4–P6, P8 and independent-access confirmation remain open. In particular a *post-start* profile check is
+not a security boundary against root-level Incus API clients. The §7 gaps (GamingVM NVMe, array, restore tests)
+require an explicit risk decision by the owner. Next: green full CI and cgroup proof; harden the pre-start
+instance policy and restrict canary commands; then signing ceremony, dry-run and a fresh Go/No-Go report.
