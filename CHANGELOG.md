@@ -10,6 +10,29 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.44.0
+
+**The on-screen keyboard is smaller, dark, and in the language of the seat.**
+squeekboard filled half the screen in white with a height no setting changes,
+showed US keys in a German seat, and sat underneath the application grid, so
+pressing L3 there opened it where nobody could see it. It is replaced by Stevia,
+which takes its layout from the seat's keyboard language at run time, about a
+quarter of the screen tall and on top of the grid. It runs only while it is open.
+A language Stevia has no layout for gets the US keys. Built as a package of its
+own because it needs a patch to run on sway, see `packaging/stevia`. A seat built
+before this keeps squeekboard installed and unused.
+
+**An emulator stays in the grid beside shortcuts to its games.** Eden writes a
+desktop entry per game, each naming Eden's own path, and one of them was enough
+to take Eden itself out of the grid while it stayed in Moonlight. The same
+comparison let a shortcut to Lutris game 23 hide game 2.
+
+Seats need building again, generation 69. Tried in one seat with simulated
+presses, typing into the grid's search field in German. A real controller over
+Moonlight, the keyboard over a running game, and 4K in this exact build have not
+been tried. If the grid is opened while the keyboard is already open, the grid
+covers it: press L3 twice.
+
 ## 0.43.1
 
 **AMD cards are no longer described as never having run.** Testers have run
