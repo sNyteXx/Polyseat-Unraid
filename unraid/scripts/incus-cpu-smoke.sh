@@ -92,6 +92,11 @@ ensure_root_subids /etc/subuid --add-subuids
 ensure_root_subids /etc/subgid --add-subgids
 printf '%s\n' 'CI-only root subordinate UID/GID ranges verified (no Unraid changes).'
 
+# liblxc has its rootfs mount point compiled in (/var/lib/polyseat-lxc/rootfs). The controller creates it;
+# this control run bypasses the controller on purpose, so it creates exactly that directory itself and
+# removes it again afterwards (disposable runner only).
+mkdir -p /var/lib/polyseat-lxc/rootfs
+
 daemon_pid=
 cleanup() {
   # Only the unique lab instance and its daemon are within this script's scope.
@@ -102,6 +107,7 @@ cleanup() {
     kill -TERM "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
   fi
+  rmdir /var/lib/polyseat-lxc/rootfs /var/lib/polyseat-lxc 2>/dev/null || true
 }
 trap cleanup EXIT
 
