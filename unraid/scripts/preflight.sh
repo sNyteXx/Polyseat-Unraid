@@ -14,5 +14,5 @@ done
 if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null || true; fi
 printf '\nMounts (read-only listing):\n'; mount | grep -E ' on /mnt/(cache|user|disk|pool)' | head -25 || true
 printf '\nNetwork links (read-only listing):\n'; if command -v ip >/dev/null 2>&1; then ip -brief link show 2>/dev/null || true; fi
-printf '\nExisting runtime processes:\n'; ps -eo comm 2>/dev/null | grep -E '^(incusd|dockerd|libvirtd|polyseatd)$' || true
+printf '\nExisting runtime processes:\n'; if command -v pgrep >/dev/null 2>&1; then pgrep -a -x incusd || true; pgrep -a -x dockerd || true; pgrep -a -x libvirtd || true; pgrep -a -x polyseatd || true; fi
 printf '\nRESULT: DIAGNOSTICS ONLY; installation intentionally blocked.\n'
