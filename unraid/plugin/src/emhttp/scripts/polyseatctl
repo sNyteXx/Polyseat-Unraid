@@ -1291,7 +1291,9 @@ health_check() {
 }
 
 canary_launch() { # resolved slot; called in the disposable launch subshell
-  local slot_real=$1
+  local slot_real=$1 parent_mnt_ns
+  parent_mnt_ns=$(readlink /proc/self/ns/mnt) || return 1
+  [[ $parent_mnt_ns =~ ^mnt:\[[0-9]+\]$ ]] || return 1
   [[ ! -e $RUN_DIR/canary-emergency-stop ]] && canary_watchdog_check || return 1
   renice -n 19 -p "$BASHPID" >/dev/null || return 1
   printf '%s\n' "$BASHPID" > "$CANARY_CGROUP/daemon/cgroup.procs" || return 1
@@ -1314,12 +1316,42 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
       read -r host_pid unused < /proc/self/stat || exit 1
       [[ $host_pid =~ ^[0-9]+$ && $$ == 1 ]] || exit 1
       printf "%s\n" "$host_pid" > "$1" || exit 1
-      mount -t proc -o nosuid,nodev,noexec proc /proc || exit 1
-      mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup || exit 1
-      [[ $(< /proc/1/cgroup) == "0::/" && -z $(< /sys/fs/cgroup/cgroup.controllers) ]] || exit 1
-      shift
+      # BEGIN_PRIVATE_CGROUP_REBASE: inherited cgroup2 mounts retain their old
+      # root and cannot be overmounted with the same superblock (EBUSY).
+      private_mount_failure() {
+        printf "canary private mount failure: %s\n" "$1" >&2
+        for ns in mnt cgroup pid; do
+          printf "%s " "$ns" >&2
+          readlink "/proc/self/ns/$ns" >&2 || true
+        done
+        awk '\''$5 == "/proc" || $5 == "/sys/fs/cgroup" { print }'\'' /proc/self/mountinfo >&2
+        exit 1
+      }
+      private_cgroup_mount() {
+        # Check ALL inherited mounts: a shared /sys parent could propagate a
+        # fresh mount even if the previous cgroup target itself was private.
+        awk -v expected_root="${1:-}" '\''
+          { for (i=7; i<=NF && $i != "-"; i++)
+              if ($i ~ /^(shared|master|propagate_from):/) bad=1 }
+          $5 == "/sys/fs/cgroup" {
+            count++
+            if ($0 !~ / - cgroup2 / || (expected_root != "" && $4 != expected_root)) bad=1
+          }
+          END { exit (count != 1 || bad) }
+        '\'' /proc/self/mountinfo
+      }
+      child_mnt_ns=$(readlink /proc/self/ns/mnt) || private_mount_failure namespace
+      [[ $child_mnt_ns =~ ^mnt:\[[0-9]+\]$ && $child_mnt_ns != "$2" ]] || private_mount_failure namespace
+      private_cgroup_mount || private_mount_failure propagation
+      mount -n -t proc -o nosuid,nodev,noexec proc /proc || private_mount_failure proc
+      umount -n /sys/fs/cgroup || private_mount_failure unmount-cgroup
+      mount -n -t cgroup2 -o nosuid,nodev,noexec none /sys/fs/cgroup || private_mount_failure cgroup
+      private_cgroup_mount / || private_mount_failure cgroup-root
+      # END_PRIVATE_CGROUP_REBASE
+      [[ $(< /proc/1/cgroup) == "0::/" && -z $(< /sys/fs/cgroup/cgroup.controllers) ]] || private_mount_failure cgroup-view
+      shift 2
       exec "$@"
-    ' polyseat-canary-launch "$PIDFILE" "$slot_real/payload/bin/incusd" \
+    ' polyseat-canary-launch "$PIDFILE" "$parent_mnt_ns" "$slot_real/payload/bin/incusd" \
       --group "" --logfile "$LOG_DIR/incusd.log" 9>&-
 }
 
@@ -1360,7 +1392,7 @@ svc_start() {
   foreign=$(foreign_incusd)
   [[ -z $foreign ]] || { log error "another incusd process exists (pid ${foreign// /,}); refusing to start"; return 1; }
   if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
-    command -v unshare setpriv mount setsid >/dev/null || return 1
+    command -v unshare setpriv mount umount setsid >/dev/null || return 1
     canary_fresh_state_prepare "$active_sha" || return 1
     canary_deny_tools_prepare || return 1
     [[ -d $LOG_DIR && ! -L $LOG_DIR && $(stat -c %u -- "$LOG_DIR") == 0 ]] || return 1

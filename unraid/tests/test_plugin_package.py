@@ -33,8 +33,16 @@ def code_lines(path: Path) -> list[str]:
 
 CANARY_NAMESPACE_LINES = (
     "unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private \\",
-    "mount -t proc -o nosuid,nodev,noexec proc /proc || exit 1",
-    "mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup || exit 1",
+    "mount -n -t proc -o nosuid,nodev,noexec proc /proc || private_mount_failure proc",
+    "umount -n /sys/fs/cgroup || private_mount_failure unmount-cgroup",
+    "mount -n -t cgroup2 -o nosuid,nodev,noexec none /sys/fs/cgroup || private_mount_failure cgroup",
+)
+CANARY_NAMESPACE_GUARDS = (
+    'parent_mnt_ns=$(readlink /proc/self/ns/mnt) || return 1',
+    'child_mnt_ns=$(readlink /proc/self/ns/mnt) || private_mount_failure namespace',
+    r'[[ $child_mnt_ns =~ ^mnt:\[[0-9]+\]$ && $child_mnt_ns != "$2" ]] || private_mount_failure namespace',
+    'private_cgroup_mount || private_mount_failure propagation',
+    'private_cgroup_mount / || private_mount_failure cgroup-root',
 )
 
 
@@ -47,11 +55,15 @@ def reviewed_canary_namespace_line(function: str, line: str, body: str) -> bool:
     if function != "canary_launch" or line.strip() not in CANARY_NAMESPACE_LINES:
         return False
     wrapper = (
+        CANARY_NAMESPACE_GUARDS[0],
         "setpriv --bounding-set=-sys_module,-sys_rawio \\",
         CANARY_NAMESPACE_LINES[0],
         "bash -u -o pipefail -c '",
+        *CANARY_NAMESPACE_GUARDS[1:4],
         CANARY_NAMESPACE_LINES[1],
         CANARY_NAMESPACE_LINES[2],
+        CANARY_NAMESPACE_LINES[3],
+        CANARY_NAMESPACE_GUARDS[4],
     )
     active = [item.strip() for item in body.splitlines() if item.strip() and not item.lstrip().startswith("#")]
     if any(active.count(item) != 1 for item in wrapper):
@@ -295,11 +307,11 @@ class DenylistTests(unittest.TestCase):
                     function = definition.group(1)
                 for pattern in FORBIDDEN:
                     if re.search(pattern, line):
-                        if path.name == "polyseatctl" and pattern == r"\bmount\s":
+                        if path.name == "polyseatctl" and pattern in (r"\bmount\s", r"\bumount\b"):
                             if reviewed_canary_namespace_line(function, line, launch_body):
                                 continue
                             # `command -v` inspects availability; it does not run mount.
-                            if function == "svc_start" and line.strip() == "command -v unshare setpriv mount setsid >/dev/null || return 1":
+                            if function == "svc_start" and line.strip() == "command -v unshare setpriv mount umount setsid >/dev/null || return 1":
                                 continue
                         # The controller may *read* or log about these; it may not run them.
                         self.assertRegex(line, r"(log |echo |printf |die |#|\".*\"|'.*')",
@@ -308,17 +320,22 @@ class DenylistTests(unittest.TestCase):
                     function = ""
 
     def test_namespace_exception_is_narrow_and_requires_private_wrapper(self):
-        body = "\n".join(("setpriv --bounding-set=-sys_module,-sys_rawio \\", CANARY_NAMESPACE_LINES[0],
-                          "bash -u -o pipefail -c '", CANARY_NAMESPACE_LINES[1], CANARY_NAMESPACE_LINES[2]))
+        body = "\n".join((CANARY_NAMESPACE_GUARDS[0], "setpriv --bounding-set=-sys_module,-sys_rawio \\",
+                          CANARY_NAMESPACE_LINES[0], "bash -u -o pipefail -c '",
+                          *CANARY_NAMESPACE_GUARDS[1:4], *CANARY_NAMESPACE_LINES[1:], CANARY_NAMESPACE_GUARDS[4]))
         for line in CANARY_NAMESPACE_LINES:
             self.assertTrue(reviewed_canary_namespace_line("canary_launch", line, body))
             self.assertFalse(reviewed_canary_namespace_line("svc_start", line, body))
             self.assertFalse(reviewed_canary_namespace_line("canary_launch", line, body.replace("--propagation private", "--propagation shared")))
             self.assertFalse(reviewed_canary_namespace_line("canary_launch", line, body.replace("--pid", "")))
             self.assertFalse(reviewed_canary_namespace_line("canary_launch", line, body.replace("--mount", "")))
+            for guard in CANARY_NAMESPACE_GUARDS:
+                self.assertFalse(reviewed_canary_namespace_line("canary_launch", line, body.replace(guard, "")))
         self.assertFalse(reviewed_canary_namespace_line("canary_launch", "mount /dev/sda /mnt/cache", body))
         self.assertFalse(reviewed_canary_namespace_line("canary_launch", CANARY_NAMESPACE_LINES[1].replace("/proc", "/host/proc"), body))
-        self.assertFalse(reviewed_canary_namespace_line("canary_launch", CANARY_NAMESPACE_LINES[2].replace("nosuid,nodev,noexec", "defaults"), body))
+        self.assertFalse(reviewed_canary_namespace_line("canary_launch", CANARY_NAMESPACE_LINES[3].replace("nosuid,nodev,noexec", "defaults"), body))
+        self.assertFalse(reviewed_canary_namespace_line("canary_launch", CANARY_NAMESPACE_LINES[2].replace("umount -n", "umount -n -l"), body))
+        self.assertFalse(reviewed_canary_namespace_line("canary_launch", CANARY_NAMESPACE_LINES[2].replace("/sys/fs/cgroup", "/mnt/cache"), body))
         reordered = "\n".join((CANARY_NAMESPACE_LINES[1], body))
         self.assertFalse(reviewed_canary_namespace_line("canary_launch", CANARY_NAMESPACE_LINES[1], reordered))
 

@@ -188,6 +188,31 @@ class CanaryArtifactTests(unittest.TestCase):
             path.write_bytes(original)
             self.assertFalse(self.kit.exists())
 
+    def test_jsonl_regression_evidence_is_copied_and_bound_to_the_kit(self):
+        evidence = b'{"Action":"run","Test":"SyntheticRegression"}\n{"Action":"pass","Test":"SyntheticRegression"}\n'
+        (self.evidence / "gobgp-regression.jsonl").write_bytes(evidence)
+        self.prepare()
+        copied = self.kit / "evidence/gobgp-regression.jsonl"
+        self.assertEqual(copied.read_bytes(), evidence)
+        self.assertIn({"path": "evidence/gobgp-regression.jsonl",
+                       "sha256": hashlib.sha256(evidence).hexdigest(), "size": len(evidence)},
+                      ART.read_kit(self.kit)["files"])
+        self.seal()
+        self.verify()
+        copied.write_bytes(evidence + b'{"Action":"fail"}\n')
+        with self.assertRaises(ValueError):
+            self.verify()
+
+    def test_prepare_requires_the_supervisor_loss_rehearsal(self):
+        path = self.evidence / "canary-rehearsal.json"
+        evidence = json.loads(path.read_text())
+        self.assertIn("supervisor-loss", evidence["steps"])
+        evidence["steps"].remove("supervisor-loss")
+        path.write_bytes(ART.canonical(evidence))
+        with self.assertRaisesRegex(ValueError, "all required steps"):
+            self.prepare()
+        self.assertFalse(self.kit.exists())
+
     def test_source_verification_is_not_optional_in_real_prepare(self):
         with self.assertRaises(subprocess.CalledProcessError):
             ART.prepare(self.prep_args)  # a fake commit cannot be packaged as source proof

@@ -54,7 +54,7 @@ METADATA = {MANIFEST, MANIFEST + ".sig", "SHA256SUMS"}
 SCOPES = {"host_approval": False, "gpu": False, "network": False, "host_services": False,
           "persistent_data_test": False, "data_dir": "/var/lib/polyseat-unraid-canary"}
 REHEARSAL_STEPS = {"signature-stage", "activate", "prestart-policy", "canary-smoke",
-                   "expiry-refusal", "cleanup", "host-state-unchanged"}
+                   "expiry-refusal", "supervisor-loss", "cleanup", "host-state-unchanged"}
 
 
 def sha(data):
@@ -267,7 +267,7 @@ def prepare(args):
     evidence = {}
     required = {"abi-report.json", "build-info.txt", "SBOM-runtime.cdx.json", "e2e-result.txt", "canary-rehearsal.json"}
     for path in sorted(args.evidence_dir.iterdir()):
-        if path.suffix in (".json", ".txt", ".md") and path.name not in ("SHA256SUMS", "bundle.env"):
+        if path.suffix in (".json", ".jsonl", ".txt", ".md") and path.name not in ("SHA256SUMS", "bundle.env"):
             if not safe_relative(path.name) or "approval" in path.name.lower():
                 raise ValueError("invalid evidence filename")
             evidence[path.name] = regular(path, 8 * 1024 * 1024)

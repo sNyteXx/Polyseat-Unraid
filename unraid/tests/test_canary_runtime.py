@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 import time
@@ -258,8 +259,9 @@ class CanaryRuntimeTests(unittest.TestCase):
             "setpriv --bounding-set=-sys_module,-sys_rawio",
             "unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private",
             "read -r host_pid unused < /proc/self/stat",
-            "mount -t proc -o nosuid,nodev,noexec proc /proc",
-            "mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup",
+            "mount -n -t proc -o nosuid,nodev,noexec proc /proc",
+            "umount -n /sys/fs/cgroup",
+            "mount -n -t cgroup2 -o nosuid,nodev,noexec none /sys/fs/cgroup",
             '-z $(< /sys/fs/cgroup/cgroup.controllers)',
         ):
             self.assertIn(phrase, launch)
@@ -267,6 +269,86 @@ class CanaryRuntimeTests(unittest.TestCase):
         self.assertIn('CANARY_WATCHDOG_MEMORY_MAX=33554432', text)
         self.assertIn('CANARY_HOST_MIN_AVAILABLE_KB=4194304', text)
         self.assertIn('CANARY_HOST_MAX_LOAD=14', text)
+
+    def private_mount_rebase(self, *, propagation="", namespace="mnt:[11]",
+                             readlink_fail=False, unmount_fail=False,
+                             mount_fail=False, fresh_root="/"):
+        # Execute the actual literal child section with inert mount stubs. This
+        # regression never unshares, mounts or unmounts anything on the runner.
+        launch = CTL.read_text().split("canary_launch() {", 1)[1].split("foreign_incusd()", 1)[0]
+        child = shlex.split(launch.split("bash -u -o pipefail -c ", 1)[1])[0]
+        section = child.split("# BEGIN_PRIVATE_CGROUP_REBASE", 1)[1].split("# END_PRIVATE_CGROUP_REBASE", 1)[0]
+        section = section.split("\n", 1)[1]
+        mountinfo = self.dir / "mountinfo"
+        mountinfo.write_text(
+            f"1 0 0:1 / /sys rw {propagation} - sysfs sysfs rw\n"
+            "2 1 0:2 /.. /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n"
+        )
+        fresh = self.dir / "fresh"
+        fresh.write_text(f"2 1 0:2 {fresh_root} /sys/fs/cgroup rw - cgroup2 none rw\n")
+        trace = self.dir / "trace"
+        trace.write_text("")
+        section = section.replace("/proc/self/mountinfo", shlex.quote(str(mountinfo)))
+        stubs = r'''
+          readlink() {
+            [[ $TEST_READLINK_FAIL != 1 ]] || return 1
+            printf '%s\n' "$TEST_NAMESPACE"
+          }
+          umount() {
+            printf 'umount %s\n' "$*" >> "$TEST_TRACE"
+            [[ $TEST_UNMOUNT_FAIL != 1 ]]
+          }
+          mount() {
+            printf 'mount %s\n' "$*" >> "$TEST_TRACE"
+            if [[ $3 == cgroup2 ]]; then
+              [[ $TEST_MOUNT_FAIL != 1 ]] || return 1
+              cp -- "$TEST_FRESH" "$TEST_MOUNTINFO"
+            fi
+          }
+        '''
+        result = subprocess.run(
+            ["bash", "-u", "-o", "pipefail", "-c", stubs + section,
+             "mount-regression", "unused-pidfile", "mnt:[10]"],
+            env={"PATH": "/usr/bin:/bin", "TEST_NAMESPACE": namespace,
+                 "TEST_READLINK_FAIL": str(int(readlink_fail)),
+                 "TEST_UNMOUNT_FAIL": str(int(unmount_fail)),
+                 "TEST_MOUNT_FAIL": str(int(mount_fail)), "TEST_TRACE": str(trace),
+                 "TEST_FRESH": str(fresh), "TEST_MOUNTINFO": str(mountinfo)},
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        return result, trace.read_text().splitlines()
+
+    def test_private_cgroup_rebase_unmounts_before_fresh_mount(self):
+        result, commands = self.private_mount_rebase()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(commands, [
+            "mount -n -t proc -o nosuid,nodev,noexec proc /proc",
+            "umount -n /sys/fs/cgroup",
+            "mount -n -t cgroup2 -o nosuid,nodev,noexec none /sys/fs/cgroup",
+        ])
+
+    def test_private_cgroup_rebase_rejects_shared_parent_or_same_namespace(self):
+        for options in ({"propagation": "shared:8"}, {"propagation": "master:7"},
+                        {"propagation": "propagate_from:9"}, {"namespace": "mnt:[10]"},
+                        {"namespace": "invalid"}, {"readlink_fail": True}):
+            with self.subTest(options=options):
+                result, commands = self.private_mount_rebase(**options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(commands, [])
+                self.assertIn("canary private mount failure", result.stderr)
+
+    def test_private_cgroup_rebase_has_no_forced_fallback(self):
+        result, commands = self.private_mount_rebase(unmount_fail=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(commands[-1], "umount -n /sys/fs/cgroup")
+        self.assertEqual(len(commands), 2)
+        self.assertIn("unmount-cgroup", result.stderr)
+        for options, reason in (({"mount_fail": True}, "failure: cgroup"),
+                                ({"fresh_root": "/.."}, "failure: cgroup-root")):
+            result, commands = self.private_mount_rebase(**options)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(len(commands), 3)
+            self.assertIn(reason, result.stderr)
 
 
 class CanaryWatchdogTests(unittest.TestCase):
