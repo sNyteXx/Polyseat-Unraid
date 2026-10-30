@@ -33,7 +33,7 @@ var assets embed.FS
 // This is the mechanism that fixes the sort of drift found at the end of M4,
 // where seat1 carried security.nesting and seat2 did not simply because seat1
 // was built earlier.
-const Generation = 68
+const Generation = 69
 
 // Player is the unprivileged user inside every seat that owns the session.
 const Player = "player"
@@ -134,6 +134,7 @@ func Steps() []Step {
 		{"packages", (*Provisioner).stepPackages},
 		{"sunshine", (*Provisioner).stepSunshine},
 		{"mangohud shim", (*Provisioner).stepMangoHudShim},
+		{"stevia", (*Provisioner).stepStevia},
 		{"steam", (*Provisioner).stepSteam},
 		{"user", (*Provisioner).stepUser},
 		{"proton", (*Provisioner).stepProton},
@@ -630,11 +631,13 @@ func (p *Provisioner) stepPackages(ctx context.Context) error {
 		"waybar", "nwg-drawer", "thunar", "gvfs", "wl-clipboard",
 		// So a seat can be used from a client that has neither keyboard nor
 		// mouse, which is most of them: an Apple TV, a phone, a television.
-		// squeekboard draws the letters and polyseat-pad-pointer turns the
-		// gamepad into a pointer to press them with. Both have to live in the
-		// seat and travel in the video stream, because the client cannot
-		// supply either: Moonlight on tvOS sends modifiers rather than text.
-		"squeekboard", "python-evdev",
+		// Stevia draws the letters, from stepStevia rather than from here, and
+		// polyseat-pad-pointer turns the gamepad into a pointer to press them
+		// with. Both have to live in the seat and travel in the video stream,
+		// because the client cannot supply either: Moonlight on tvOS sends
+		// modifiers rather than text. A seat built before keeps squeekboard
+		// installed and unused; nothing starts it.
+		"python-evdev",
 		// Flatpak is how a seat gets software. The player has no sudo by
 		// design, and `flatpak --user` needs none, so this is the one route
 		// that does not either widen what the seat may do or route every
@@ -1003,6 +1006,60 @@ func mangoHudShimIsCurrent(out string) bool {
 
 	return len(fields) == 2 && fields[0] == "polyseat-mangohud-shim" &&
 		fields[1] == MangoHudShimVersion+"-"+MangoHudShimBuild
+}
+
+// stepStevia installs the on-screen keyboard as a package of its own.
+//
+// squeekboard was the keyboard until it filled half of a television in white
+// with a layout nobody could change: its height has no setting, the two that
+// look like one change the width of the keys. Stevia is what Phosh replaced it
+// with. It reads its layout from the same input sources at run time, sixty of
+// them, and follows the dark style, but it is written for one compositor and
+// does not start on any other. The patch in packaging/stevia lets it run on
+// sway, sizes it as a share of the screen and puts it above the launcher, and
+// polyseat-keyboard starts it only when somebody asks for it.
+//
+// The version is Stevia's release, and the build is the package's pkgrel.
+const (
+	SteviaVersion = "0.58.0"
+	SteviaBuild   = "1"
+)
+
+// steviaPackageSHA256 is the package named by SteviaVersion and SteviaBuild, as
+// packaging/stevia/build.sh printed it.
+const steviaPackageSHA256 = "bcd376b811420374e19ec8b418f635084199dbf4a1858ae7781b6c5e26f07e7b"
+
+func steviaPackageURL() string {
+	version := SteviaVersion + "-" + SteviaBuild
+
+	return "https://github.com/superuser404notfound/Polyseat/releases/download/stevia-" +
+		version + "/polyseat-stevia-" + version + "-x86_64.pkg.tar.zst"
+}
+
+func (p *Provisioner) stepStevia(ctx context.Context) error {
+	installed, code, err := p.Client.Try(ctx, p.name(), "pacman", "-Q", "polyseat-stevia")
+	if err != nil {
+		return err
+	}
+
+	want := SteviaVersion + "-" + SteviaBuild
+
+	if code == 0 && steviaIsCurrent(installed) {
+		p.Log("stevia %s already installed", want)
+
+		return nil
+	}
+
+	p.Log("installing stevia %s", want)
+
+	return p.installOwnPackage(ctx, "polyseat-stevia", steviaPackageURL(), steviaPackageSHA256)
+}
+
+func steviaIsCurrent(out string) bool {
+	fields := strings.Fields(out)
+
+	return len(fields) == 2 && fields[0] == "polyseat-stevia" &&
+		fields[1] == SteviaVersion+"-"+SteviaBuild
 }
 
 // sunshineLatest is what LizardByte have published, for saying so and nothing

@@ -135,7 +135,7 @@ jobs:
       # a stricter check nobody has measured against these files.
       - name: Parse every script
         run: |
-          for f in host/*.sh packaging/scripts/*.sh packaging/sunshine/*.sh packaging/mangohud-shim/*.sh \
+          for f in host/*.sh packaging/scripts/*.sh packaging/sunshine/*.sh packaging/mangohud-shim/*.sh packaging/stevia/*.sh \
                    internal/seat/assets/*.sh spike/*/*.sh; do
             bash -n "$f"
           done
@@ -151,6 +151,7 @@ jobs:
           shellcheck --severity=warning packaging/build-packages.sh
           shellcheck --severity=warning packaging/sunshine/build.sh
           shellcheck --severity=warning packaging/mangohud-shim/build.sh
+          shellcheck --severity=warning packaging/stevia/build.sh
           # sh and not bash, and shellcheck has to be told: these two run under
           # whatever dpkg and rpm hand them, which is not bash on every machine.
           shellcheck --severity=warning --shell=sh packaging/scripts/*.sh

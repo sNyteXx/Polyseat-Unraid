@@ -1,0 +1,63 @@
+--- a/src/phosh-osk-stevia.c
++++ b/src/phosh-osk-stevia.c
+@@ -303,7 +303,7 @@
+                                       "anchor", ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+                                       ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
+                                       ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT,
+-                                      "layer", ZWLR_LAYER_SHELL_V1_LAYER_TOP,
++                                      "layer", ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
+                                       "kbd-interactivity", FALSE,
+                                       "exclusive-zone", POS_INPUT_SURFACE_DEFAULT_HEIGHT,
+                                       "namespace", "osk",
+@@ -321,13 +321,11 @@
+                           "visible",
+                           G_BINDING_SYNC_CREATE | G_BINDING_BIDIRECTIONAL);
+ 
+-  g_object_bind_property_full (im, "active",
+-                               self->input_surface, "surface-visible",
+-                               G_BINDING_SYNC_CREATE,
+-                               set_surface_prop_surface_visible,
+-                               NULL,
+-                               self,
+-                               NULL);
++  /* Polyseat: shown and hidden on request only, never by text focus. A client
++   * with a keyboard of its own would otherwise get this over every text field,
++   * and there is no hardware keyboard tracking outside phoc to stop it. */
++  (void) set_surface_prop_surface_visible;
++
+   g_object_bind_property (self->size_manager,
+                           "height",
+                           self->input_surface,
+--- a/src/pos-hw-tracker.c
++++ b/src/pos-hw-tracker.c
+@@ -72,6 +72,9 @@
+                                  gpointer      device_state)
+ {
+   self->device_state = device_state;
++  if (!device_state)
++    return;
++
+   zphoc_device_state_v1_add_listener (self->device_state, &device_state_listener, self);
+ }
+ 
+--- a/src/pos-size-manager.c
++++ b/src/pos-size-manager.c
+@@ -95,6 +95,9 @@
+     return osk_height;
+ 
+   screen_logical_height = pos_output_get_logical_height (output);
++  /* Polyseat: a share of the screen, for an output with no physical size. */
++  if (screen_logical_height > 0)
++    return MAX (osk_height, screen_logical_height * 0.26);
+   screen_physical_height = pos_output_get_transformed_phys_height (output);
+   pixel_size = pos_output_get_logical_pixel_size (output);
+ 
+--- a/src/pos-wayland.c
++++ b/src/pos-wayland.c
+@@ -387,6 +387,5 @@
+           self->zwlr_foreign_toplevel_manager_v1 &&
+           self->layer_shell &&
+           self->zxdg_output_manager_v1 &&
+-          self->zphoc_device_state_v1 &&
+           self->ext_data_control_manager);
+ }
