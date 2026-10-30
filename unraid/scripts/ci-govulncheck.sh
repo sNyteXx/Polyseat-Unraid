@@ -10,7 +10,10 @@ report=$3
 
 [ ! -f /etc/unraid-version ] || { echo 'refusing to scan on Unraid' >&2; exit 1; }
 [ -x "$scanner" ] || { echo 'govulncheck scanner is missing' >&2; exit 1; }
-[ -f "$binary" ] && [ ! -L "$binary" ] || { echo 'Go binary is missing or a symlink' >&2; exit 1; }
+if [ ! -f "$binary" ] || [ -L "$binary" ]; then
+  echo 'Go binary is missing or a symlink' >&2
+  exit 1
+fi
 
 set +e
 "$scanner" -mode=binary "$binary" > "$report" 2>&1
