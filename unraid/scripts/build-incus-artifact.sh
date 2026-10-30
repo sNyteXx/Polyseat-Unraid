@@ -108,7 +108,13 @@ build_lxc() {
     -Dcoverity-build=false -Dthread-safety=true \
     -Drootfs-mount-path=/var/lib/polyseat-lxc/rootfs
   ninja -C "$lxc_build"
-  meson install -C "$lxc_build" --strip
+  # The compiled-in rootfs mount point is an absolute path outside the prefix and meson install
+  # writes a README there. Install into a staging DESTDIR so the build never writes outside its
+  # own directory, then move only the prefix tree into place.
+  lxc_dest="$lxc_src.dest"
+  meson install -C "$lxc_build" --strip --destdir "$lxc_dest"
+  mkdir -p "$lxc_prefix"
+  cp -a "$lxc_dest$lxc_prefix/." "$lxc_prefix/"
 
   lxc_lib="$lxc_prefix/lib/liblxc.so.1"
   [ -e "$lxc_lib" ] || die 'liblxc.so.1 was not installed'
