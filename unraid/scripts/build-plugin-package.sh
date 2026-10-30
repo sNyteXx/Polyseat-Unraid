@@ -24,6 +24,8 @@ case "$gate" in
   *) die 'GATE must be closed or test-host; "open" is reserved for a separately approved release job' ;;
 esac
 if [ ! -d "$outdir" ] || [ -L "$outdir" ]; then die 'OUTDIR must be an existing real directory'; fi
+# The archive is written after changing into the staging directory, so the path must be absolute.
+outdir=$(cd "$outdir" && pwd -P)
 
 here=$(cd "$(dirname "$0")" && pwd)
 src="$here/../plugin/src/emhttp"

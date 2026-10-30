@@ -200,6 +200,13 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(again.returncode, 2)
         self.assertIn("overwrite", again.stderr)
 
+    def test_relative_output_directory_works(self):
+        (self.tmp / "rel").mkdir()
+        result = subprocess.run([str(SCRIPTS / "build-plugin-package.sh"), "2026.10.30.ci7", "rel", "test-host"],
+                                capture_output=True, text=True, cwd=self.tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.tmp / "rel" / "polyseat-unraid-2026.10.30.ci7-noarch-1.txz").is_file())
+
     def test_bad_versions_are_rejected(self):
         for version in ("1.0", "2026.10.30;x", "2026.10.30/../x"):
             self.assertEqual(self.build(version=version).returncode, 2, version)
