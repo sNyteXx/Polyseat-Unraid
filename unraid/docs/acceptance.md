@@ -15,6 +15,7 @@ only with recorded evidence from the relevant disposable test environment.
 | G | Shared library and per-seat storage on selected filesystem | TODO |
 | H | Backup, stage, upgrade, rollback and uninstall without data loss | Verified staging, journal, atomic switch, health-check rollback, recovery, manual rollback and exact-path uninstall pass in 170+ sandbox tests **and** the real-incusd end-to-end on Ubuntu (state and user-data comparison after uninstall). **Not run on Unraid**; power loss and vfat/ZFS flash behaviour **TODO** |
 | I | Steam/Proton/Once Human and anti-cheat | Unverified; no compatibility guarantee |
+| J | Production CPU-only canary on the owner's Tower | **No-Go**: preconditions P1–P9 in [production-canary-plan.md](production-canary-plan.md) open (signing, confinement, canary gate, profile policy, triage); no host change made |
 
 There is no installable `.plg` (only a non-installable template) until B2–H have passed. Production deployment
 or GOW migration requires a separate, explicit operator decision.

@@ -35,22 +35,14 @@ It is deliberately not a GitHub Release and not signed with a release key. A tes
 throw-away key (`ssh-keygen -Y sign -n polyseat-unraid-bundle <manifest>`) and puts the public line into
 `allowed_signers`; the controller verifies exactly that signature.
 
-## Minimal safe plan for a later isolated test VM (not on the production Tower)
+## Where the first Unraid test runs (decision of 2026-10-30)
 
-Preconditions (all need your explicit approval, none is done): a **separate** machine or VM with no production data and
-no important VMs or shares; Linux with cgroup v2, `jq`, `tar`, `xz`, `ssh-keygen`, `flock`, `rsync`; no GPU, no
-passthrough; a pool or disk path for `DATA_DIR` with `o+x` on every parent.
-
-1. Download the artifact, verify `SHA256SUMS`, compare the commit SHA with the PR head.
-2. Sign the manifest with a throw-away key; create `/boot/config/plugins/polyseat-unraid/DISPOSABLE_TEST_HOST` whose first
-   line is exactly `polyseat-unraid-disposable-test-host-v1` (on a non-Unraid Linux VM, run the CI procedure from
-   `ci-e2e-controller.sh` instead, which uses a sandbox root).
-3. Run `polyseatctl preflight` (read-only), then follow [test-system-runbook.md](test-system-runbook.md).
-4. Record evidence per step; compare `ip -br link`, firewall chain names and processes before and after.
-5. Stop on any unexpected change; do not repair host networking, drivers or storage automatically.
-
-Real Unraid remains a later, separate gate: it needs its own test system, USB boot media and license, which is a separate
-approval. TPM licensing inside an Unraid VM is not supported, and no licensing check is to be circumvented.
+The owner decided that the first small CPU-only compatibility test runs directly on the production Tower, after the
+preparation is complete. **That is a target decision, not an approval.** The conditions, impact list, budgets, abort
+criteria, backup gaps, rollback and the Go/No-Go protocol are in [production-canary-plan.md](production-canary-plan.md).
+Today's assessment there is **No-Go**. A separate disposable system (earlier plan, [test-system-runbook.md](test-system-runbook.md))
+remains the safer alternative and is still recommended whenever a risk to the GamingVM, Docker, libvirt, network, data or
+array cannot be excluded.
 
 ## Risks that remain after a green Ubuntu run
 

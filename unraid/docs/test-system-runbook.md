@@ -1,9 +1,9 @@
 # 🚧 WIP — DO NOT USE — CPU-only runbook for a separate Unraid test system
 
-**Never run this on the production server.** It is the checklist for a
+**Superseded as the first step by the owner's 2026-10-30 decision** (see [production-canary-plan.md](production-canary-plan.md); target decision only, no approval). This runbook stays valid as the safer alternative on a disposable system. **Do not run it on the production server without the separate Go/No-Go approval.** It is the checklist for a
 disposable Unraid 7.x host or VM that you explicitly approve (no GPU, no
 important VMs or shares, nothing you cannot reinstall). The production host
-with the exclusive-passthrough GPU is out of scope.
+with the exclusive-passthrough GPU is out of scope of *this* runbook; see the canary plan.
 
 ## Preconditions to approve first
 
