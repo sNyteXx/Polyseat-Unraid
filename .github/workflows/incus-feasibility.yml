@@ -1,0 +1,26 @@
+name: WIP Incus feasibility (non-deploying)
+on:
+  workflow_dispatch:
+    inputs:
+      incus_version:
+        description: 'Explicit version for metadata-only feasibility job'
+        required: true
+        default: '6.0.0'
+jobs:
+  metadata-only:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: sh -n unraid/scripts/build-incus-artifact.sh
+      - name: Generate blocked-build manifest
+        env:
+          INCUS_VERSION: ${{ inputs.incus_version }}
+        run: sh unraid/scripts/build-incus-artifact.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: incus-feasibility-metadata-NOT-RUNTIME
+          path: dist/
+          retention-days: 7
