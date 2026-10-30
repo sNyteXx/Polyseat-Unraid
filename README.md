@@ -1,3 +1,14 @@
+# 🚧 **WIP — DO NOT USE — UNDER ACTIVE DEVELOPMENT**
+
+> [!CAUTION]
+> **EXPERIMENTAL UNRAID PORT — NOT INSTALLABLE, NOT PRODUCTION-READY, NOT SUPPORTED.**
+> This fork is actively being developed and is **not a drop-in replacement** for the upstream Polyseat project.
+> Do **not** install it on Unraid, run `polyseat-prepare`, change GPU passthrough, modify Docker/libvirt/networking, or remove your existing gaming setup.
+> The native Unraid `.plg` is intentionally disabled. GitHub CI tests only isolated build and simulation logic — **no real Unraid/GPU/Moonlight acceptance has passed**.
+> Follow [Unraid WIP status and safety gates](UNRAID-WIP.md) and [Draft PR #1](https://github.com/sNyteXx/Polyseat-Unraid/pull/1).
+
+---
+
 # Polyseat
 
 **Several people playing on one Linux PC at the same time.** Each in their own
