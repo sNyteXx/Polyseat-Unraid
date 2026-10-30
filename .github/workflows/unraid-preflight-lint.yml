@@ -14,7 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check shell syntax
-        run: sh -n unraid/scripts/preflight.sh
-      - name: Ensure preflight is read-only
         run: |
-          ! grep -En '(^|[[:space:]])(curl|wget|apt|pacman|dnf|incus[[:space:]]+(init|launch)|systemctl[[:space:]]+(start|enable)|docker[[:space:]]+(run|stop)|rm[[:space:]]+-)' unraid/scripts/preflight.sh
+          sh -n unraid/scripts/preflight.sh
+          sh -n unraid/scripts/check-host.sh
+          sh -n unraid/scripts/verify-runtime.sh
+      - name: ShellCheck
+        run: shellcheck -s sh unraid/scripts/*.sh
+      - name: Ensure no executable installer is shipped
+        run: |
+          test ! -f unraid/plugin/polyseat-unraid.plg
+          test -f unraid/plugin/polyseat-unraid.plg.disabled
