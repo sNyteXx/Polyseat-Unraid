@@ -12,7 +12,7 @@ out=$2
 [ ! -e /etc/unraid-version ] || die 'never run on Unraid'
 [ "${GITHUB_ACTIONS:-}" = true ] || die 'CI only'
 [ -f "$proof/e2e-result.txt" ] || die 'the controller end-to-end did not pass; no test artifact is produced'
-[ -f "$proof/bundle.env" ] && [ -d "$proof/bundle" ] || die 'bundle missing'
+if [ ! -f "$proof/bundle.env" ] || [ ! -d "$proof/bundle" ]; then die 'bundle missing'; fi
 [ ! -e "$out" ] || die 'output directory already exists'
 
 # shellcheck disable=SC1091
