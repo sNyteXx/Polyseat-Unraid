@@ -95,7 +95,8 @@ printf '%s\n' 'CI-only root subordinate UID/GID ranges verified (no Unraid chang
 # liblxc has its rootfs mount point compiled in (/var/lib/polyseat-lxc/rootfs). The controller creates it;
 # this control run bypasses the controller on purpose, so it creates exactly that directory itself and
 # removes it again afterwards (disposable runner only).
-mkdir -p /var/lib/polyseat-lxc/rootfs
+# It must be traversable (0755) by the subordinate UID the container root maps to; this script runs with umask 077.
+(umask 022; mkdir -p /var/lib/polyseat-lxc/rootfs)
 
 daemon_pid=
 cleanup() {
