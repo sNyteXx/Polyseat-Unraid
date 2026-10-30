@@ -15,13 +15,13 @@ jobs:
   build:
     if: github.ref == 'refs/heads/wip/unraid-native-plugin'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
-      # Release tag v6.0.0, resolved to an immutable commit.
-      INCUS_COMMIT: 714bcc5e42b189f54025b8567df1f3408a1cae2c
-      # Compatible cowsql/raft source revisions from the Incus 6.0.0 period.
-      COWSQL_COMMIT: 8c7d8cf13d37a1e8d2ec6fa2ee575b07575248df
-      RAFT_COMMIT: e0928710bcc62806cc7074f010e462547decf4b7
+      # Signed Incus v7.0.2 LTS tag, resolved to its immutable commit.
+      INCUS_COMMIT: 01f81e5e607bbb5818410318e4b3496ad1820824
+      # Immutable v1.15.9 cowsql and v0.22.1 raft release commits.
+      COWSQL_COMMIT: 783815b901470e27b7dfbcce3a67c888dad19e78
+      RAFT_COMMIT: 9edb176a7924ce2b943cb56552366dc4b5a1a6b7
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -33,11 +33,12 @@ jobs:
             build-essential git pkg-config libsqlite3-dev libacl1-dev \
             libcap-dev libseccomp-dev libudev-dev libuv1-dev \
             liblz4-dev libzstd-dev libbtrfs-dev libdevmapper-dev \
-            liblxc-dev libapparmor-dev protobuf-compiler
+            liblxc-dev libapparmor-dev protobuf-compiler \
+            libdbus-1-dev libselinux1-dev
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.22.12'
+          go-version: '1.26.7'
           cache: false
 
       - name: Build pinned source and record binary dependencies
