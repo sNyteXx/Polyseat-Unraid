@@ -134,6 +134,10 @@ head -c 4096 /dev/urandom > "$data/games/save.dat"
 cleanup() {
   status=$?
   if [ "$status" -ne 0 ]; then
+    if [ -s "$work/diff.nft" ]; then
+      printf '%s\n' '--- nftables host-state difference (first 120 lines, disposable CI runner)' >&2
+      sed -n '1,120p' "$work/diff.nft" >&2
+    fi
     printf '\n== FAILURE DIAGNOSTICS (disposable runner)\n' >&2
     incus info --show-log polyseat-ci-cpu >&2 2>/dev/null || true
     for f in "$data"/incus/logs/polyseat-ci-cpu/lxc.log "$root"/var/log/polyseat-unraid/incusd.log \
