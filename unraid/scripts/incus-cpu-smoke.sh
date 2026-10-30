@@ -49,6 +49,10 @@ export INCUS_DIR="$runtime_root"
 export INCUS_CONF="$INCUS_PROOF_STAGE/smoke-client"
 export INCUS_EXEC_PATH="$bin/incusd"
 export INCUS_SKIP_INSTANCE_TYPES=true
+# The pinned liblxc is built without AppArmor (like the Unraid target, which has no LSM).
+# On this disposable runner AppArmor is active, so tell Incus explicitly; CI-only, the
+# controller path (ci-e2e-controller.sh) exercises the fail-closed LSM gate instead.
+export INCUS_SECURITY_APPARMOR=false
 export PATH="$bin:$PATH"
 umask 077
 mkdir -p "$INCUS_CONF"

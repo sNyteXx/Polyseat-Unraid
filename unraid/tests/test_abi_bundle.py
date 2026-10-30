@@ -157,6 +157,13 @@ class BundleTests(unittest.TestCase):
         with self.assertRaises(bundle.BundleError):
             self.build()
 
+    def test_built_without_is_recorded_and_validated(self):
+        _, manifest_path = self.build()
+        self.assertEqual(json.loads(manifest_path.read_text())["built_without"], ["apparmor", "selinux"])
+        for bad in (("tomoyo",), ("apparmor", "apparmor")):
+            with self.assertRaises(bundle.BundleError):
+                self.build(built_without=bad)
+
     def test_existing_output_is_not_overwritten(self):
         self.build()
         with self.assertRaises(bundle.BundleError):

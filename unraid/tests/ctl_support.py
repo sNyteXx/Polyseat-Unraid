@@ -53,6 +53,9 @@ if @FAIL_START@ or os.path.exists(d + "/FAIL_START"):
 open(d + "/stub.pid", "w").write(str(os.getpid()))
 with open(d + "/events.log", "a") as log:
     log.write("start %s\\n" % VER)
+with open(d + "/env.log", "a") as log:
+    log.write("apparmor=%s selinux=%s ld=%s\\n" % (os.environ.get("INCUS_SECURITY_APPARMOR"),
+              os.environ.get("INCUS_SECURITY_SELINUX"), os.environ.get("LD_LIBRARY_PATH")))
 sock = d + "/unix.socket"
 try:
     os.unlink(sock)
@@ -156,7 +159,7 @@ class Sandbox:
 
     # -- bundles -----------------------------------------------------------
     def make_bundle(self, version: str, *, fail_start=False, fail_smoke=False,
-                    needed_libs=None, sign_key=None, extra=None) -> dict:
+                    needed_libs=None, sign_key=None, extra=None, built_without=None) -> dict:
         payload = self.work / f"payload-{version}-{len(list(self.work.iterdir()))}"
         (payload / "bin").mkdir(parents=True)
         (payload / "lib").mkdir()
@@ -177,7 +180,8 @@ class Sandbox:
         archive, manifest = bundle.build(
             payload, out, name="polyseat-incus", version=version, incus_version=version,
             min_unraid="7.2.0", min_glibc="2.31", min_kernel="5.4",
-            needed_libs=needed_libs if needed_libs is not None else ["libc.so.6"])
+            needed_libs=needed_libs if needed_libs is not None else ["libc.so.6"],
+            **({"built_without": tuple(built_without)} if built_without is not None else {}))
         sig = self.sign(manifest, sign_key)
         return {"archive": archive, "manifest": manifest, "sig": sig,
                 "sha": archive.name.removesuffix(".tar.gz"), "version": version}
@@ -199,7 +203,7 @@ class Sandbox:
         manifest.write_text(json.dumps({
             "schema": 1, "name": "polyseat-incus", "version": version, "incus_version": version,
             "min_unraid": "7.2.0", "min_glibc": "2.31", "min_kernel": "5.4",
-            "needed_libs": ["libc.so.6"], "archive_sha256": sha, "source_date_epoch": 0,
+            "needed_libs": ["libc.so.6"], "built_without": ["apparmor", "selinux"], "archive_sha256": sha, "source_date_epoch": 0,
             "files": files}, sort_keys=True))
         return {"archive": archive, "manifest": manifest, "sig": self.sign(manifest), "sha": sha}
 
@@ -227,6 +231,10 @@ class Sandbox:
 
     def pointer(self) -> dict:
         return json.loads((self.state / "pointer.json").read_text())
+
+    def env_log(self) -> list[str]:
+        path = self.data / "incus" / "env.log"
+        return path.read_text().splitlines() if path.exists() else []
 
     def events(self) -> list[str]:
         path = self.data / "incus" / "events.log"

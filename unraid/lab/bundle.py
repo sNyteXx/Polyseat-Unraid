@@ -23,6 +23,7 @@ from .archive import MAX_BYTES, MAX_FILES, RejectedArchive, verify
 SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 SAFE_VERSION = re.compile(r"^[0-9][0-9A-Za-z.+_-]{0,40}$")
 SAFE_SONAME = re.compile(r"^[A-Za-z0-9_.+-]+$")
+LSM_NAMES = ("apparmor", "selinux")
 
 
 class BundleError(ValueError):
@@ -49,6 +50,7 @@ def _entries(payload: Path) -> list[tuple[str, Path, int]]:
 def build(payload: Path, out_dir: Path, *, name: str, version: str,
           incus_version: str, min_unraid: str, min_glibc: str,
           needed_libs: list[str], min_kernel: str = "6.12",
+          built_without: tuple[str, ...] = ("apparmor", "selinux"),
           source_date_epoch: int = 0) -> tuple[Path, Path]:
     if not SAFE_NAME.fullmatch(name) or not SAFE_VERSION.fullmatch(version):
         raise BundleError("unsafe bundle name or version")
@@ -58,6 +60,8 @@ def build(payload: Path, out_dir: Path, *, name: str, version: str,
             raise BundleError(f"unsafe {label}")
     if any(not SAFE_SONAME.fullmatch(lib) for lib in needed_libs):
         raise BundleError("unsafe needed library name")
+    if any(item not in LSM_NAMES for item in built_without) or len(set(built_without)) != len(built_without):
+        raise BundleError("built_without may list apparmor and selinux only, once each")
     if out_dir.is_symlink() or not out_dir.is_dir():
         raise BundleError("output directory must exist and not be a symlink")
 
@@ -91,6 +95,7 @@ def build(payload: Path, out_dir: Path, *, name: str, version: str,
         "min_unraid": min_unraid,
         "min_glibc": min_glibc,
         "min_kernel": min_kernel,
+        "built_without": sorted(built_without),
         "needed_libs": sorted(set(needed_libs)),
         "archive_sha256": digest,
         "source_date_epoch": source_date_epoch,

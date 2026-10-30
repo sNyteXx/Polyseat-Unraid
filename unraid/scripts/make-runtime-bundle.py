@@ -28,6 +28,10 @@ def main() -> int:
     parser.add_argument("--min-unraid", default="7.2.0")
     parser.add_argument("--min-glibc", required=True)
     parser.add_argument("--min-kernel", default="6.12")
+    parser.add_argument("--built-without", action="append", default=None,
+                        choices=["apparmor", "selinux"],
+                        help="LSM support deliberately absent from the bundled liblxc "
+                             "(default: apparmor and selinux)")
     parser.add_argument("--abi-report", required=True, type=Path,
                         help="JSON from check-bundle-abi.py; must have ok=true")
     args = parser.parse_args()
@@ -38,7 +42,8 @@ def main() -> int:
     archive, manifest = bundle.build(
         args.payload, args.out, name=args.name, version=args.version,
         incus_version=args.incus_version, min_unraid=args.min_unraid,
-        min_glibc=args.min_glibc, min_kernel=args.min_kernel, needed_libs=report["host_libraries"],
+        min_glibc=args.min_glibc, min_kernel=args.min_kernel,
+        built_without=tuple(args.built_without or ('apparmor', 'selinux')), needed_libs=report["host_libraries"],
         source_date_epoch=epoch)
     print(archive)
     print(manifest)

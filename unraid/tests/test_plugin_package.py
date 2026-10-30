@@ -125,6 +125,7 @@ class TemplateTests(unittest.TestCase):
         self.assertIsNone(cfg.find("SHA256"))      # no checksum: an existing file is kept
         self.assertIn('SERVICE="disabled"', cfg.find("INLINE").text)
         self.assertIn('DATA_DIR=""', cfg.find("INLINE").text)
+        self.assertIn('ACCEPT_NO_LSM="no"', cfg.find("INLINE").text)
 
     def test_unsafe_render_inputs_are_rejected(self):
         for overrides in ({"version": "1.0"}, {"version": "2026.10.30;rm"}, {"base": "http://x.invalid/a"},

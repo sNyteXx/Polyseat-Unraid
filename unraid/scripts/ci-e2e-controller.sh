@@ -34,8 +34,9 @@ chmod 0755 "$root/mnt" "$root/mnt/cache" "$root/mnt/cache/appdata" "$root/mnt/ca
 printf 'version="7.3.3"\n' > "$root/etc/unraid-version"
 data="$root/mnt/cache/appdata/polyseat"
 flash="$root/boot/config/plugins/polyseat-unraid"
-write_cfg() {
-  printf 'SERVICE="%s"\nDATA_DIR="/mnt/cache/appdata/polyseat"\nHEALTH_TIMEOUT="90"\n' "$1" > "$flash/polyseat-unraid.cfg"
+write_cfg() { # service-setting accept-no-lsm
+  printf 'SERVICE="%s"\nDATA_DIR="/mnt/cache/appdata/polyseat"\nHEALTH_TIMEOUT="90"\nACCEPT_NO_LSM="%s"\n' \
+    "$1" "${2:-no}" > "$flash/polyseat-unraid.cfg"
 }
 write_cfg disabled
 cur="$root/usr/local/polyseat-unraid/current"
@@ -48,7 +49,7 @@ printf 'polyseat-unraid-release namespaces="polyseat-unraid-bundle" %s\n' \
 
 ctl() {
   env POLYSEAT_ROOT="$root" POLYSEAT_SUBID_DIR=/etc CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
-    RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" "$@"
+    RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" POLYSEAT_PROBE_REAL_SYS=1 "$@"
 }
 polyseatctl() { ctl "$ctl_src" "$@"; }
 polyseatctl_crash() { crash_at=$1; shift; ctl env POLYSEAT_CRASH_AT="$crash_at" "$ctl_src" "$@"; }
@@ -114,7 +115,19 @@ polyseatctl update "$VA" "$VM" "$VS" --approve
 expect_status ACTIVE "$v1_version"
 polyseatctl verify
 
-step '2. start service without systemd and check health'
+step '2. LSM gate, then start without systemd and check health'
+# The runner has AppArmor active, the bundled liblxc has none (like the target Unraid, which has
+# no LSM at all). The controller must refuse until the operator accepts it explicitly.
+if [ -d /sys/kernel/security/apparmor ]; then
+  rc=0
+  polyseatctl start || rc=$?
+  [ "$rc" -ne 0 ] || fail 'start was allowed although AppArmor is active and unsupported by the bundle'
+  if pgrep -x incusd >/dev/null 2>&1; then fail 'daemon started despite the LSM gate'; fi
+  printf 'LSM gate refused the start as designed; accepting the disposable-runner state explicitly\n'
+else
+  printf 'AppArmor not active on this runner; the gate cannot be exercised here\n'
+fi
+write_cfg disabled yes
 polyseatctl start
 polyseatctl health
 
@@ -185,7 +198,7 @@ must_exec E2E_AFTER_FULL_STOP
 step '11. simulated reboot: RAM state gone, boot rebuilds from flash'
 polyseatctl stop
 case "$root" in /tmp/polyseat-ctl-*) rm -rf "$root/usr/local/polyseat-unraid" "$root/var/run/polyseat-unraid" ;; esac
-write_cfg enabled
+write_cfg enabled yes
 polyseatctl boot
 expect_status RUNNING "$v2_version"
 incus start polyseat-ci-cpu

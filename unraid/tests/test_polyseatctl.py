@@ -183,6 +183,79 @@ class InstallLifecycleTests(Base):
         self.assertEqual(again.code, 2, again.text)
 
 
+class LsmTests(Base):
+    """A host LSM the bundled liblxc cannot use must never be silently skipped."""
+
+    def fake_lsm(self, *parts):
+        path = self.sb.root.joinpath("sys", *parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if parts[-1] == "enforce":
+            path.write_text("1")
+        else:
+            path.mkdir()
+
+    def test_no_lsm_on_host_starts_and_tells_incus_apparmor_is_off(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        self.assertOk(self.sb.ctl("start"))
+        self.assertEqual(self.sb.env_log(), ["apparmor=false selinux=None ld=None"])
+
+    def test_active_apparmor_blocks_start_without_explicit_acceptance(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        self.fake_lsm("kernel", "security", "apparmor")
+        result = self.sb.ctl("start")
+        self.assertNotEqual(result.code, 0)
+        self.assertIn("apparmor is active", result.text)
+        self.assertIn("refusing to start containers", result.text)
+        self.assertEqual(self.sb.events(), [])
+        self.assertEqual(self.sb.status()["state"], "ACTIVE")
+
+    def test_active_selinux_blocks_start_too(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        self.fake_lsm("fs", "selinux", "enforce")
+        self.assertNotEqual(self.sb.ctl("start").code, 0)
+        self.assertEqual(self.sb.events(), [])
+
+    def test_explicit_acceptance_is_logged_and_allows_start(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        self.fake_lsm("kernel", "security", "apparmor")
+        self.sb.write_cfg(ACCEPT_NO_LSM="yes")
+        result = self.sb.ctl("start")
+        self.assertOk(result)
+        self.assertIn("WITHOUT apparmor confinement", self.sb.log_file.read_text())
+        self.assertEqual(self.sb.env_log(), ["apparmor=false selinux=None ld=None"])
+
+    def test_acceptance_value_must_be_exactly_yes(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        self.fake_lsm("kernel", "security", "apparmor")
+        for value in ("true", "YES", "1", "yes please"):
+            self.sb.write_cfg(ACCEPT_NO_LSM=value)
+            self.assertNotEqual(self.sb.ctl("start").code, 0, value)
+
+    def test_bundle_that_supports_the_lsm_is_not_blocked(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0", built_without=[])))
+        self.fake_lsm("kernel", "security", "apparmor")
+        self.assertOk(self.sb.ctl("start"))
+
+    def test_manifest_without_or_with_unknown_built_without_is_rejected(self):
+        d = b"data"
+        good = self.sb.craft_bundle([member("payload/bin/incus", d)], [file_entry("payload/bin/incus", d)])
+        manifest = json.loads(good["manifest"].read_text())
+        for value in ("MISSING", ["apparmor", "apparmor"], ["tomoyo"], "apparmor", ["apparmor", "selinux", "x"]):
+            broken = dict(manifest)
+            if value == "MISSING":
+                broken.pop("built_without")
+            else:
+                broken["built_without"] = value
+            good["manifest"].write_text(json.dumps(broken))
+            self.sb.sign(good["manifest"])
+            self.assertEqual(self.sb.stage(good).code, 5, value)
+
+    def test_preflight_reports_active_lsm(self):
+        self.fake_lsm("kernel", "security", "apparmor")
+        result = self.sb.ctl("preflight")
+        self.assertIn("AppArmor is active", result.out)
+
+
 class SubidRedirectTests(Base):
     def test_subid_directory_override_is_ignored_outside_github_runners(self):
         self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))

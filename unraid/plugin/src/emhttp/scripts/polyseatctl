@@ -278,6 +278,8 @@ validate_manifest_file() { # manifest sha
     and (.name|type=="string" and test("^[a-z][a-z0-9-]{1,40}$"))
     and (.version|ver) and (.incus_version|ver) and (.min_unraid|ver)
     and (.min_glibc|ver) and (.min_kernel|ver)
+    and (.built_without|type=="array" and length<=2 and (unique|length)==length
+         and all(.[]; .=="apparmor" or .=="selinux"))
     and (.archive_sha256==$sha)
     and (.needed_libs|type=="array" and length<=64 and all(.[]; type=="string" and test("^[A-Za-z0-9_.+-]+$")))
     and (.files|type=="array" and length>0 and length<=128)
@@ -607,6 +609,42 @@ subid_file_remove() { # file
   mv -T -- "$tmp" "$file"
 }
 
+# ----------------------------------------------------------------- LSM ----
+# The bundled liblxc is built without the LSM integrations listed in the manifest's
+# built_without. Incus enables AppArmor only if /sys/kernel/security/apparmor exists AND
+# apparmor_parser is in PATH (internal/server/sys/apparmor.go); a host that has such an LSM
+# active but a liblxc that cannot use it would run containers without the confinement the
+# operator expects. That is refused unless ACCEPT_NO_LSM="yes" is set explicitly.
+sys_root() {
+  # A sandbox probes its own fake tree unless a CI job asks for the runner's real /sys.
+  if sandbox && [[ ${POLYSEAT_PROBE_REAL_SYS:-} != 1 ]]; then printf '%s/sys\n' "$ROOT"; else printf '/sys\n'; fi
+}
+
+lsm_active() { # apparmor|selinux
+  local sys
+  sys=$(sys_root)
+  case "$1" in
+    apparmor) [[ -d $sys/kernel/security/apparmor ]] ;;
+    selinux) [[ -e $sys/fs/selinux/enforce ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+lsm_gate() { # manifest : returns 1 (and logs) if a deliberately unsupported LSM is active
+  local manifest=$1 lsm blocked=0
+  while IFS= read -r lsm; do
+    if lsm_active "$lsm"; then
+      if [[ $(cfg_get ACCEPT_NO_LSM no) == yes ]]; then
+        log warn "$lsm is active on this host but the bundled liblxc has no $lsm support; ACCEPT_NO_LSM=yes: containers run WITHOUT $lsm confinement"
+      else
+        log error "$lsm is active on this host but the bundled liblxc has no $lsm support; refusing to start containers without it (set ACCEPT_NO_LSM=\"yes\" only after reading docs/lsm-and-security.md)"
+        blocked=1
+      fi
+    fi
+  done < <(jq -r '.built_without[]' "$manifest")
+  [[ $blocked -eq 0 ]]
+}
+
 # ---------------------------------------------------------- data dir ----
 DATA_REAL=""
 INCUS_DIR=""
@@ -669,9 +707,11 @@ health_check() {
 }
 
 svc_start() {
-  local timeout i foreign slot_real
+  local timeout i foreign slot_real active_sha
   [[ -L $CURRENT ]] || { log error "no active bundle"; return 1; }
   slot_real=$(readlink -f -- "$CURRENT") || return 1
+  active_sha=$(current_sha_from_link) || { log error "active bundle link is not a slot"; return 1; }
+  lsm_gate "$(bundle_manifest "$active_sha")" || return 1
   validate_data_dir || return 1
   if svc_pid >/dev/null; then
     log info "service already running"
@@ -697,7 +737,7 @@ svc_start() {
     # shellcheck disable=SC2016  # $$ and $@ must expand in the child shell
     exec setsid env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
       INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
-      INCUS_SKIP_INSTANCE_TYPES=true \
+      INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
       bash -c 'echo $$ > "$1"; shift; exec "$@"' polyseat-launch "$PIDFILE" \
       "$slot_real/payload/bin/incusd" --group "" --logfile "$LOG_DIR/incusd.log" \
       > "$LOG_DIR/incusd.out" 2>&1 < /dev/null 9>&-
@@ -1055,6 +1095,8 @@ cmd_preflight() {
   DESC="newuidmap/newgidmap present"; chk command -v newuidmap newgidmap
   DESC="jq, tar, ssh-keygen present"; chk command -v jq tar ssh-keygen
   if [[ -s /etc/subuid ]]; then echo "INFO: /etc/subuid has entries"; else echo "INFO: /etc/subuid empty (plugin would add a managed block at service start)"; fi
+  lsm_active apparmor && echo "INFO: AppArmor is active (the bundled liblxc has none: start is refused unless ACCEPT_NO_LSM=yes)"
+  lsm_active selinux && echo "INFO: SELinux is active (the bundled liblxc has none: start is refused unless ACCEPT_NO_LSM=yes)"
   if [[ -e /sys/kernel/security/lsm ]]; then
     echo "INFO: LSM: $(cat /sys/kernel/security/lsm)"
   else
