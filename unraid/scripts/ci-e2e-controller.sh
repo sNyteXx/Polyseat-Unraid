@@ -57,6 +57,16 @@ incus() {
   env INCUS_DIR="$data/incus" INCUS_CONF="$root/var/run/polyseat-unraid/client" \
     PATH="$cur/payload/bin:$PATH" "$cur/payload/bin/incus" "$@"
 }
+ensure_running() {
+  n=0
+  while [ "$n" -lt 30 ]; do
+    [ "$(incus list -f csv -c s polyseat-ci-cpu)" = RUNNING ] && return 0
+    n=$((n + 1))
+    sleep 1
+  done
+  printf 'container was not restored by Incus; starting it explicitly\n'
+  incus start polyseat-ci-cpu
+}
 must_exec() {
   incus exec polyseat-ci-cpu -- /bin/busybox echo "$1" | grep -qx "$1" || fail "container exec failed: $1"
 }
@@ -197,12 +207,16 @@ polyseatctl rollback --approve
 expect_status RUNNING "$v2_version"
 must_exec E2E_AFTER_MANUAL_ROLLBACK
 
-step '10. graceful stop also stops instances; restart brings the daemon back'
+step '10. graceful stop stops instances; Incus restores their last power state when the daemon returns'
+container_pid=$(incus info polyseat-ci-cpu | sed -n 's/^PID: //p')
+[ -n "$container_pid" ] || fail 'could not read the container PID'
 polyseatctl stop
-if pgrep -x incusd >/dev/null 2>&1; then fail 'incusd still running after stop'; fi
+if pgrep -x incusd >/dev/null 2>&1; then fail 'incusd (daemon or helper) still running after stop'; fi
+[ ! -e "/proc/$container_pid" ] || fail 'container process survived the service stop'
 polyseatctl start
-[ "$(incus list -f csv -c s polyseat-ci-cpu)" = STOPPED ] || fail 'container was not stopped by service stop'
-incus start polyseat-ci-cpu
+# Incus restarts instances that were running at shutdown (their recorded power state). That is the
+# wanted behaviour for an array stop/start; accept it, otherwise start the container explicitly.
+ensure_running
 must_exec E2E_AFTER_FULL_STOP
 
 step '11. simulated reboot: RAM state gone, boot rebuilds from flash'
@@ -211,7 +225,7 @@ case "$root" in /tmp/polyseat-ctl-*) rm -rf "$root/usr/local/polyseat-unraid" "$
 write_cfg enabled yes
 polyseatctl boot
 expect_status RUNNING "$v2_version"
-incus start polyseat-ci-cpu
+ensure_running
 must_exec E2E_AFTER_BOOT
 
 step '12. uninstall keeps user data'
