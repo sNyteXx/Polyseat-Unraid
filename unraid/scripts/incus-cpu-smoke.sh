@@ -82,8 +82,7 @@ daemon_pid=
 cleanup() {
   # Only the unique lab instance and its daemon are within this script's scope.
   if [ -S "$INCUS_DIR/unix.socket" ]; then
-    "$bin/incus" stop polyseat-ci-cpu --force --timeout 15 >/dev/null 2>&1 || true
-    "$bin/incus" delete polyseat-ci-cpu >/dev/null 2>&1 || true
+    "$bin/incus" delete polyseat-ci-cpu --force >/dev/null 2>&1 || true
   fi
   if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
     kill -TERM "$daemon_pid" 2>/dev/null || true
@@ -144,10 +143,26 @@ fi
 python3 "$importer" --alias polyseat-ci-busybox
 
 "$bin/incus" init polyseat-ci-busybox polyseat-ci-cpu --storage default
-"$bin/incus" start polyseat-ci-cpu
+start_container() {
+  if "$bin/incus" start polyseat-ci-cpu; then
+    return
+  fi
+
+  # Report the actual LXC startup error before the EXIT trap deletes the
+  # disposable instance; otherwise the CI log only shows 'forklxc exit 1'.
+  printf '%s\n' 'Incus LXC start failed; collecting isolated instance log:' >&2
+  "$bin/incus" info --show-log polyseat-ci-cpu >&2 || true
+  lxc_log="$INCUS_DIR/logs/polyseat-ci-cpu/lxc.log"
+  if [ -r "$lxc_log" ]; then
+    tail -n 180 "$lxc_log" >&2 || true
+  fi
+  fail 'CPU-only instance could not boot on disposable runner'
+}
+
+start_container
 "$bin/incus" exec polyseat-ci-cpu -- /bin/busybox echo CPU_ONLY_SMOKE_OK
 "$bin/incus" stop polyseat-ci-cpu --force --timeout 15
-"$bin/incus" start polyseat-ci-cpu
+start_container
 "$bin/incus" exec polyseat-ci-cpu -- /bin/busybox echo CPU_ONLY_RESTART_OK
 "$bin/incus" stop polyseat-ci-cpu --force --timeout 15
 "$bin/incus" delete polyseat-ci-cpu
