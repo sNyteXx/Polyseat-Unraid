@@ -10,6 +10,18 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.43.0
+
+**A controller's mouse can be seen in a game.** A Steam Input mouse binding
+moved the pointer without showing it, because Steam sends those over XTest into
+gamescope and sway, which draws the pointer, never hears of them. Crusader Kings
+III could be clicked on but not aimed at. gamescope now runs with
+`--force-grab-cursor` and draws the pointer itself, confirmed in Crusader Kings
+III with a controller, and a Siri Remote and Moonlight on iOS with touch work as
+before. Events written straight into the absolute mouse did land in the corners
+of the screen, so if a client's pointer does that, this is the change to look
+at. Seats need building again, generation 68.
+
 ## 0.42.2
 
 **An uninstalled title leaves the list as soon as it is gone.** Uninstall

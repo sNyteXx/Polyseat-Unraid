@@ -572,6 +572,17 @@ func TestSteamRunsInsideGamescopeWithTheSteamIntegration(t *testing.T) {
 	}
 }
 
+// Steam Input moves the pointer over XTest, which sway never sees. Without the
+// flag sway keeps drawing its own pointer and the one that counts is invisible.
+// steam.sh has the measurement.
+func TestSteamInputPointerIsDrawnByGamescope(t *testing.T) {
+	runSteamScript(t, seatState{})
+
+	if !strings.Contains(gamescopeArgs, "--force-grab-cursor") {
+		t.Errorf("gamescope was called without --force-grab-cursor: %s", gamescopeArgs)
+	}
+}
+
 // The starting size is the screen as it is, not a number in a file: a seat
 // streams to whatever a client asks for, and polyseat-resize changes the output
 // under a running gamescope, which then follows it.

@@ -767,8 +767,27 @@ export STEAM_MULTIPLE_XWAYLANDS
 # because of gamescope, not because of that flag. Big Picture is opened the way
 # it always was, by the application entry, and the two workspaces are what a
 # player switches between.
+#
+# --force-grab-cursor is what makes a Steam Input mouse visible. Steam sends a
+# controller's mouse bindings over XTest, and gamescope takes that in without
+# sway ever hearing of it. A nested gamescope leaves drawing the pointer to the
+# compositor around it, so sway went on drawing its own pointer where it last
+# was, and in Crusader Kings III a player steering with the controller could not
+# see what they were clicking on. An Apple Remote was fine, because it comes in
+# through sway. With the flag sway draws nothing and gamescope draws the one
+# pointer that knows about both. The cursor_composite setting alone is not
+# enough: it leaves sway's pointer standing beside gamescope's, measured on
+# 2026-10-30.
+#
+# One thing to keep an eye on is an absolute pointer. The pointer is locked to
+# the window, so sway works out each absolute event against a position that
+# never moves, and events written straight into Sunshine's absolute mouse landed
+# in the corners of the screen. No real client has been seen to do that: a Siri
+# Remote and Moonlight on iOS with touch both work. Should one turn up, a
+# gamescope that leaves sway's pointer empty is the way out, not dropping this.
 start() {
     setsid gamescope --backend wayland -W "$1" -H "$2" -r "$3" -f -e \
+        --force-grab-cursor \
         --xwayland-count 2 -- "$CAPPED" steam -silent \
         >"$LOG" 2>&1 </dev/null 9>&- &
 }
