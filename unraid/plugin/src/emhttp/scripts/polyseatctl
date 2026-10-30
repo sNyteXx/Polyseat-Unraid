@@ -910,19 +910,24 @@ canary_cgroup_stop() {
 # container. Audit *all* profiles and instances, including expanded devices;
 # unknown JSON shape, extra projects/config or query failure always blocks.
 canary_profile_guard() {
-  local profiles instances pools
+  local projects profiles instances pools
   [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
+  # The profiles and instances endpoints operate in the default project only.
+  # Any additional project would bypass the checks below, so forbid it first.
+  projects=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/projects?recursion=1') || return 1
   profiles=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/profiles?recursion=1') || return 1
   instances=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || return 1
   pools=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/storage-pools?recursion=1') || return 1
-  jq -en --argjson profiles "$profiles" --argjson instances "$instances" --argjson pools "$pools" '
+  jq -en --argjson projects "$projects" --argjson profiles "$profiles" --argjson instances "$instances" --argjson pools "$pools" '
     def records: if type == "array" then . elif .type == "sync" and .status_code == 200
       and (.metadata|type) == "array" then .metadata else error("unexpected API data") end;
     def root_only: type == "object" and (to_entries | all(.[];
       .key == "root" and .value == {type:"disk", path:"/", pool:"default"}));
     def safe_cfg: type == "object" and (keys | all(.[];
       startswith("image.") or startswith("volatile.")));
-    ($profiles | records) as $ps | ($instances | records) as $is | ($pools | records) as $sp |
+    ($projects | records) as $pr | ($profiles | records) as $ps |
+    ($instances | records) as $is | ($pools | records) as $sp |
+    ($pr | length == 1 and .[0].name == "default" and (.[0].config // {} | type == "object")) and
     ($ps | length == 1 and .[0].name == "default" and (.[0].config // {} | safe_cfg)
       and (.[0].devices // {} | root_only)) and
     ($sp | length <= 1 and all(.[]; .name == "default" and .driver == "dir")) and
@@ -933,7 +938,7 @@ canary_profile_guard() {
       (.expanded_config // {} | safe_cfg) and
       (.devices // {} | root_only) and
       (.expanded_devices // {} | root_only)))' >/dev/null || {
-    log error "canary: Incus policy violation (profile, instance, storage, NIC or device)"; return 1;
+    log error "canary: Incus policy violation (project, profile, instance, storage, NIC or device)"; return 1;
   }
 }
 

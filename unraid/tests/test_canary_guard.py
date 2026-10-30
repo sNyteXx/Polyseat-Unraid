@@ -24,6 +24,7 @@ class CanaryPolicyTests(unittest.TestCase):
         self.addCleanup(self.workspace.cleanup)
         self.dir = Path(self.workspace.name)
         self.profiles = [{"name": "default", "config": {}, "devices": {"root": ROOT}}]
+        self.projects = [{"name": "default", "config": {}}]
         self.instances = [{
             "type": "container", "name": "polyseat-canary-cpu", "profiles": ["default"],
             "config": {"image.os": "BusyBox", "volatile.uuid": "a"},
@@ -32,8 +33,9 @@ class CanaryPolicyTests(unittest.TestCase):
         }]
         self.pools = [{"name": "default", "driver": "dir"}]
 
-    def audit(self, *, profiles=None, instances=None, pools=None):
+    def audit(self, *, projects=None, profiles=None, instances=None, pools=None):
         for name, value in (
+            ("projects", self.projects if projects is None else projects),
             ("profiles", self.profiles if profiles is None else profiles),
             ("instances", self.instances if instances is None else instances),
             ("pools", self.pools if pools is None else pools),
@@ -48,6 +50,7 @@ class CanaryPolicyTests(unittest.TestCase):
           # exported into a variable instead of being placed on the host.
           run_incus() {
             case "$2" in
+              '/1.0/projects?recursion=1') jq . "$TEST_DIR/projects.json" ;;
               '/1.0/profiles?recursion=1') jq . "$TEST_DIR/profiles.json" ;;
               '/1.0/instances?recursion=1') jq . "$TEST_DIR/instances.json" ;;
               '/1.0/storage-pools?recursion=1') jq . "$TEST_DIR/pools.json" ;;
@@ -82,6 +85,17 @@ class CanaryPolicyTests(unittest.TestCase):
         profiles = copy.deepcopy(self.profiles)
         profiles[0]["devices"]["eth0"] = {"type": "nic", "nictype": "bridged"}
         self.assertNotEqual(self.audit(profiles=profiles, instances=[]).returncode, 0)
+
+    def test_extra_project_cannot_hide_instances_or_devices(self):
+        projects = copy.deepcopy(self.projects)
+        projects.append({"name": "bypass", "config": {"features.profiles": "true"}})
+        self.assertNotEqual(self.audit(projects=projects).returncode, 0)
+        self.assertNotEqual(self.audit(projects=[projects[1]]).returncode, 0)
+
+    def test_project_api_must_be_accessible_and_well_formed(self):
+        self.assertNotEqual(self.audit(projects=[]).returncode, 0)
+        self.assertNotEqual(self.audit(projects={"unexpected": True}).returncode, 0)
+        self.assertNotEqual(self.audit(projects=[{"name": "default", "config": []}]).returncode, 0)
 
     def test_config_kernel_modules_raw_settings_and_privileged_are_refused(self):
         for key, val in (("linux.kernel_modules", "vfio-pci"), ("raw.lxc", "lxc.mount.auto=proc"),
