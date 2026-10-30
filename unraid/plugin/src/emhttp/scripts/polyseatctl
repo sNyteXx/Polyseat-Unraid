@@ -197,8 +197,9 @@ canary_approval_for() { # command args... (root only, non-sandbox)
      -f $CANARY_APPROVAL.sig && ! -L $CANARY_APPROVAL.sig &&
      -f $CANARY_SIGNERS && ! -L $CANARY_SIGNERS ]] ||
     die $EX_BLOCKED "canary approval/signature/allowlist missing"
-  check_private_file "$CANARY_APPROVAL" && check_private_file "$CANARY_APPROVAL.sig" ||
+  if ! check_private_file "$CANARY_APPROVAL" || ! check_private_file "$CANARY_APPROVAL.sig"; then
     die $EX_BLOCKED "canary approval and signature must be owner-private files"
+  fi
   local -a revoke=()
   if [[ -e $REVOKED || -L $REVOKED ]]; then
     [[ -f $REVOKED && ! -L $REVOKED ]] || die $EX_BLOCKED "invalid revocation list"
@@ -967,7 +968,7 @@ foreign_incusd() {
 }
 
 svc_start() {
-  local timeout i foreign slot_real active_sha deadline remaining watchdog_pid watchdog_ready
+  local timeout i foreign slot_real active_sha deadline remaining watchdog_pid watchdog_ready watchdog_wait
   [[ -L $CURRENT ]] || { log error "no active bundle"; return 1; }
   slot_real=$(readlink -f -- "$CURRENT") || return 1
   active_sha=$(current_sha_from_link) || { log error "active bundle link is not a slot"; return 1; }
@@ -1034,7 +1035,7 @@ svc_start() {
           printf '1\n' > "$CANARY_CGROUP/cgroup.kill"
         ) > /dev/null 2>&1 9>&- &
         watchdog_pid=$!
-        for ((i = 0; i < 20; i++)); do
+        for ((watchdog_wait = 0; watchdog_wait < 20; watchdog_wait++)); do
           [[ -f $watchdog_ready && ! -L $watchdog_ready ]] && break
           kill -0 "$watchdog_pid" 2>/dev/null || break
           sleep 0.1
