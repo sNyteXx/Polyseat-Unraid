@@ -203,7 +203,6 @@ function updateChoice(state) {
   if (!release) return { kind: "none", updater };
 
   if (updater.running) return { kind: "running", release, updater };
-  if (updater.error) return { kind: "failed", release, updater };
 
   // Installed and waiting for a restart. The version on disk is the new one and
   // the version serving is still the old one.
@@ -233,14 +232,20 @@ function updateChoice(state) {
     why = "That release has no package attached to it, so it cannot be installed from here.";
   }
 
+  // A failure offers the same button again when installing is possible at
+  // all. The daemon clears the error when a new attempt starts, and without the
+  // button the only way past one, a lookup that failed while the network was
+  // down for instance, was restarting the daemon.
+  if (updater.error) return { kind: "failed", release, updater, retry: !why };
+
   if (why) return { kind: "blocked", release, updater, why };
 
   return { kind: "install", release, updater };
 }
 
-function installButton(choice) {
+function installButton(choice, label = "Install it") {
   const button = document.createElement("button");
-  button.textContent = "Install it";
+  button.textContent = label;
 
   button.onclick = () => {
     // Asked here rather than posted and refused, so that the one setting that
@@ -558,7 +563,9 @@ function updateBanner() {
     div.className = "warning";
     const failed = document.createElement("div");
     failed.textContent = "The update failed: " + updater.error;
-    div.replaceChildren(text, link, failed);
+    div.replaceChildren(
+      ...[text, link, failed, choice.retry && installButton(choice, "Try again")].filter(Boolean),
+    );
 
     return [div];
   }
@@ -4228,7 +4235,9 @@ function drawOffer(state, box) {
 
     case "failed":
       detail.textContent = "The update failed: " + updater.error;
-      box.replaceChildren(line, detail, link);
+      box.replaceChildren(
+        ...[line, detail, choice.retry && installButton(choice, "Try again"), link].filter(Boolean),
+      );
 
       return;
 

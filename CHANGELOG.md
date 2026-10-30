@@ -10,6 +10,15 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.42.1
+
+**A failed update can be tried again.** When installing a release failed, a
+lookup that failed while the network was down for instance, the Updates panel
+and the line at the top showed the error and no button, and Check now did not
+bring one back: the only way past it was restarting the daemon. Both now offer
+Try again whenever installing from here is possible at all. Nothing else
+changed, and no seat needs building again.
+
 ## 0.42.0
 
 **A game uninstalled everywhere no longer comes back.** Uninstall deleted every
