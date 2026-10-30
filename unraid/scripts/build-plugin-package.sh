@@ -48,7 +48,10 @@ ctl="$dest/scripts/polyseatctl"
 sed -i "s/^POLYSEAT_RELEASE_GATE=\"closed\"/POLYSEAT_RELEASE_GATE=\"$gate\"/" "$ctl"
 grep -q "^POLYSEAT_RELEASE_GATE=\"$gate\"" "$ctl" || die 'could not set the release gate'
 
-find "$dest" -type d -exec chmod 0755 {} +
+# Normalize every shipped directory, including install/usr/local ancestors.
+# The outer mktemp directory stays private (0700); it is not part of the archive.
+# Caller umasks such as 077 (CI) or 002 (shared development) must not leak into it.
+find "$stage" -mindepth 1 -type d -exec chmod 0755 {} +
 find "$dest" -type f -exec chmod 0644 {} +
 chmod 0755 "$dest/scripts/polyseatctl" "$dest/event/disks_mounted" "$dest/event/stopping_svcs"
 printf '%s\n' \

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -235,6 +236,33 @@ class PackageTests(unittest.TestCase):
                                 capture_output=True, text=True, cwd=self.tmp)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.tmp / "rel" / "polyseat-unraid-2026.10.30.ci7-noarch-1.txz").is_file())
+
+    def test_all_shipped_directory_modes_and_package_bytes_ignore_caller_umask(self):
+        ordinary, canary = [], []
+        for mask in (0o077, 0o002, 0o022):
+            out = self.tmp / f"umask-{mask:03o}"
+            out.mkdir()
+            # subprocess.umask is child-local; never change the test process's umask.
+            result = subprocess.run([str(SCRIPTS / "build-plugin-package.sh"), "2026.10.30", str(out), "closed"],
+                                    capture_output=True, text=True, umask=mask)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            package = out / "polyseat-unraid-2026.10.30-noarch-1.txz"
+            ordinary.append(package.read_bytes())
+            with tarfile.open(package, "r:xz") as tar:
+                directories = {member.name: member.mode for member in tar if member.isdir()}
+            for name in ("install", "usr", "usr/local", "usr/local/emhttp", "usr/local/emhttp/plugins"):
+                self.assertEqual(directories[name], 0o755, (mask, name))
+            self.assertTrue(directories)
+            self.assertEqual(set(directories.values()), {0o755}, mask)
+            result = subprocess.run([sys.executable, str(SCRIPTS / "build-canary-package.py"),
+                                     "--version", "2026.10.30.canary", "--out", str(out),
+                                     "--acknowledge-artifacts-only"], capture_output=True, text=True, umask=mask)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            canary.append((out / "polyseat-unraid-2026.10.30.canary-noarch-1.txz").read_bytes())
+        self.assertEqual(ordinary[0], ordinary[1])
+        self.assertEqual(ordinary[0], ordinary[2])
+        self.assertEqual(canary[0], canary[1])
+        self.assertEqual(canary[0], canary[2])
 
     def test_bad_versions_are_rejected(self):
         for version in ("1.0", "2026.10.30;x", "2026.10.30/../x"):
