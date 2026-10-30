@@ -18,8 +18,12 @@ driver, or game data. No installable `.plg` is shipped.
 - An **Ubuntu-only, source-pinned Incus userspace build proof**. The requested
   **7.5.1** build and no-GPU binary smoke
   [passed GitHub Actions](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221184).
-  Its binaries are not a complete runtime bundle, and success says nothing
-  about Unraid ABI, kernel features, confinement, GPU mapping, boot, or rollback.
+  A **real no-GPU BusyBox container** now also boots, executes, stops, restarts
+  and is deleted on a separate disposable Ubuntu runner
+  ([successful CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41096323759)).
+  These binaries are not a complete Unraid runtime bundle; successful Ubuntu
+  boot says nothing about Unraid ABI, kernel features, confinement, GPU mapping
+  or real-host rollback.
 - **Offline-only Python safety rehearsals** for GPU ownership while a gaming VM
   runs, VM and Docker preservation, isolated network proposals, lifecycle
   transitions, and hostile archive rejection. They have zero host execution
@@ -53,8 +57,9 @@ host-owned GPU or agree another architecture in a separate review. See
 
 The safe no-GPU progression is documented in
 [the first no-GPU test plan](unraid/docs/no-gpu-test-plan.md): version-only
-binary smoke already passed; a new Actions job now attempts a CPU-only
-BusyBox container boot in a disposable runner, **pending green CI evidence**.
+binary smoke and the actual CPU-only BusyBox container lifecycle passed on a
+disposable GitHub-hosted Ubuntu runner. Unraid compatibility and real-host
+rollback remain untested.
 
 See [the acceptance matrix](unraid/docs/acceptance.md). There is no automatic
 installation, GOW migration, host service startup, or merge to `main` in this

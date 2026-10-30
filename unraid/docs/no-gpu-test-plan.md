@@ -11,11 +11,11 @@ or a container boot on a **separate disposable Linux environment**.
 |---|---|---|---|
 | 0 — code | GitHub Actions Ubuntu 24.04 | Incus 7.5.1 and C sources compile; checksums, limited SBOM; `incus --version` and `incusd --version` without a daemon | **Passed** ([CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221184)) |
 | 0 — models | GitHub Actions Ubuntu 24.04 | 18 pure tests: active VM/vfio, network policy, start/stop/rollback and malicious archives | **Passed** ([CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41091221252)); not hardware evidence |
-| 1 — container | Disposable GitHub-hosted Ubuntu Linux VM, **not** Unraid | Independent `incusd` process starts with dedicated socket and state directory, no host bridge; locally generated BusyBox container boots, executes, stops, restarts and cleans up | CI workflow **implemented, pending first successful run** |
+| 1 — container | Disposable GitHub-hosted Ubuntu Linux VM, **not** Unraid | Independent `incusd` process starts with dedicated socket and state directory, no host bridge; locally generated BusyBox container boots, executes, stops, restarts and cleans up | **Passed** ([real CPU-only CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41096323759)); Ubuntu only |
 | 2 — Unraid parity | Dedicated disposable Unraid 7.2-compatible host/VM | Same test with non-systemd lifecycle, Unraid libraries, kernel, cgroup v2, uidmaps and selected pool; clean rollback | **NOT implemented/tested** |
 | 3 — streaming | Separate hardware window | Host-owned GPU and Sunshine/Moonlight/NVENC one-/two-seat tests | Blocked while GPU is exclusively used by gaming VM |
 
-## Implemented first level-1 attempt
+## Verified level-1 CPU-only container boot
 
 The existing `.github/workflows/incus-feasibility.yml` now calls
 `unraid/scripts/incus-cpu-smoke.sh` in a **disposable GitHub-hosted Ubuntu
@@ -27,10 +27,9 @@ those UIDs cannot enter the runner's `/home/runner` directory. Private
 client configuration and binaries stay in the build staging directory; no
 existing parent-directory permissions are changed. The daemon uses a normal
 service `umask` of `022` to keep its generated container directories
-traversable; the calling script retains `077` for private files. The explicit preseed
-config defines a directory storage
-pool and a disk-only profile. **It does not call `incus admin init --minimal`,
-which would create a bridge.**
+traversable; the calling script retains `077` for private files. The explicit
+preseed config defines a directory storage pool and a disk-only profile.
+**It does not call `incus admin init --minimal`, which would create a bridge.**
 
 The test uses the upstream, source-pinned BusyBox image generator and a local
 `busybox-static` executable, without a third-party image registry. It then
@@ -38,12 +37,17 @@ starts, executes in, stops, restarts, and deletes a single CPU-only instance.
 The script checks for an unexpected `incusbr0` and stops with an error if
 the daemon or container cannot work in a GitHub-hosted runner.
 
-The first real run started the daemon, initialized the private database, and
-imported the image, but container creation failed because the hosted runner
-had no subordinate UID/GID mapping for `root`. The smoke script now checks
-those mappings and, if required, assigns a non-overlapping range **inside the
-disposable runner only**. The GitHub-hosted-only guard executes before this
-step. A subsequent green Actions run is required for level-1 acceptance.
+The first attempts exposed two runner-specific assumptions: the hosted runner
+did not allocate subordinate UID/GID mappings to `root`, and its `/home/runner`
+and initially private runtime directories were not traversable by guest UIDs.
+The script now establishes non-overlapping mappings **inside the disposable
+runner only**, isolates the Incus state in `/tmp`, and uses the daemon's normal
+service `umask`. The GitHub-hosted-only guard executes before any of this.
+
+The [successful level-1 run](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41096323759)
+records `CPU_ONLY_SMOKE_OK`, `CPU_ONLY_RESTART_OK`, and
+`PASS: real CPU-only Incus container start, exec, stop, restart, cleanup.`
+This is actual Ubuntu runner runtime evidence, not an Unraid compatibility test.
 
 ## Remaining before level 2 / production use
 

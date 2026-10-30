@@ -25,7 +25,7 @@ jobs:
       COWSQL_COMMIT: 783815b901470e27b7dfbcce3a67c888dad19e78
       RAFT_COMMIT: 9edb176a7924ce2b943cb56552366dc4b5a1a6b7
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install build dependencies on disposable runner only
         run: |
@@ -40,7 +40,7 @@ jobs:
             rsync attr squashfs-tools xz-utils iproute2 uidmap \
             busybox-static lxc-utils
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.7'
           cache: false
@@ -67,7 +67,7 @@ jobs:
           test ! -e ../unraid/plugin/polyseat-unraid.plg
           test -f ../unraid/plugin/polyseat-unraid.plg.disabled
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: incus-build-proof-NOT-FOR-UNRAID
           path: incus-build-proof/
