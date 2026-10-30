@@ -1129,10 +1129,47 @@ func foreignScan(dirs []string) string {
 // entries are written by different hands: Steam's shortcut is called whatever
 // Steam calls the title and ours is called whatever the manifest says, and
 // those differ often enough. What cannot differ is the thing being started.
+//
+// Against the last word of each command rather than anywhere in the text, for
+// two reasons a substring got wrong. A longer id starts with a shorter one, so a
+// shortcut to game 23 hid game 2. And an emulator names itself in every shortcut
+// it writes for a game, with the game after it, so one Pokémon shortcut took
+// Eden's own entry out of the launcher while it stayed in Moonlight. The word
+// after the target is what makes that a different thing to start.
 func alreadyListed(execs, launch string) bool {
 	target := launchTarget(launch)
+	if target == "" {
+		return false
+	}
 
-	return target != "" && strings.Contains(execs, target)
+	for _, line := range strings.Split(execs, "\n") {
+		if startsTarget(strings.TrimPrefix(strings.TrimSpace(line), "Exec="), target) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// startsTarget reports whether an Exec value ends in target, leaving out the
+// field codes a launcher fills in when it is handed a file, which say nothing
+// about what the entry itself starts.
+func startsTarget(command, target string) bool {
+	fields := strings.Fields(command)
+
+	for len(fields) > 0 {
+		last := fields[len(fields)-1]
+
+		if len(last) == 2 && last[0] == '%' {
+			fields = fields[:len(fields)-1]
+
+			continue
+		}
+
+		return strings.Trim(last, `"'`) == target
+	}
+
+	return false
 }
 
 // launchTarget is the part of a launch command that names the game: the URI for
