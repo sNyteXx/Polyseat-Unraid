@@ -8,8 +8,9 @@ die() {
   exit 2
 }
 
-[ "${CI:-}" = true ] && [ "${RUNNER_OS:-}" = Linux ] ||
+if [ "${CI:-}" != true ] || [ "${RUNNER_OS:-}" != Linux ]; then
   die 'isolated Linux GitHub Actions runner required'
+fi
 [ ! -e /etc/unraid-version ] ||
   die 'never run this build script on Unraid'
 

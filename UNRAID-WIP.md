@@ -15,9 +15,10 @@ driver, or game data. No installable `.plg` is shipped.
 
 - Read-only, non-certifying host capability reports in `unraid/scripts/`.
 - Syntax/ShellCheck checks and a CI guard that rejects an installable `.plg`.
-- An **Ubuntu-only, source-pinned Incus userspace build proof**. Its binaries are
-  not a complete runtime bundle, and success says nothing about Unraid ABI,
-  kernel features, confinement, GPU mapping, boot, or rollback.
+- An **Ubuntu-only, source-pinned Incus userspace build proof**, successfully
+  [built in CI](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41084969302).
+  Its binaries are not a complete runtime bundle, and success says nothing
+  about Unraid ABI, kernel features, confinement, GPU mapping, boot, or rollback.
 - An explicit security/rollback design in
   [unraid/docs/security-rollback-contract.md](unraid/docs/security-rollback-contract.md).
 

@@ -19,6 +19,10 @@ Incus with the matching headers and libraries. It records the three exact
 source revisions, Go/toolchain information, dynamic dependency listing and
 SHA-256 checksums.
 
+The first complete [isolated build run](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41084969302)
+passed its compilation, dependency, checksum and artifact-upload steps. That
+evidence does not authorize the binaries to run on Unraid.
+
 **Limitations:** Ubuntu package dependencies and GitHub's runner image are
 not pinned, so this is source-pinned but not bit-for-bit reproducible. Incus
 6.0.0 is an old baseline and is **not approved for deployment**. The output

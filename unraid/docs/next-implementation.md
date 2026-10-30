@@ -1,11 +1,12 @@
 # 🚧 WIP — DO NOT USE — Next implementation milestones
 
 The branch now contains a **source-pinned real Incus build workflow** on an
-isolated Ubuntu runner. It must pass in GitHub Actions before even the limited
-build-proof claim is made. The output is **not** an installable Unraid bundle,
-and the disabled `.plg` must remain disabled.
+isolated Ubuntu runner. Its first full build, dependency check and checksum
+verification [passed in GitHub Actions](https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41084969302).
+The output is **not** an installable Unraid bundle, and the disabled `.plg`
+must remain disabled.
 
-1. Fix and verify the pinned C dependency and Incus build in GitHub Actions.
+1. Keep the pinned C dependency and Incus build passing in GitHub Actions.
 2. Record binary and dynamic library requirements; update the source pins for
    a security-supported Incus release before choosing a deployable baseline.
 3. Create a reproducible runtime package with SBOM, signatures/attestations,
