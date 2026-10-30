@@ -9,7 +9,7 @@ refuses to run outside a GitHub-hosted Linux runner or on an Unraid host.
 The workflow now uses the signed Incus **v7.5.1** tag's immutable target commit
 (checked against the upstream GitHub tag API) and release-tagged C dependencies.
 This is the latest **7.5.x** patch, **not** the latest 7.x release or an LTS
-branch. The runner uses the version required by upstream, Go 1.26.7:
+branch. The runner pins the security-patched Go 1.26.10 toolchain (CI proof pending):
 
 | Source | Revision |
 |---|---|

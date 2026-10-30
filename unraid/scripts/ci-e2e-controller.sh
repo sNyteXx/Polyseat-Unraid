@@ -116,7 +116,9 @@ host_state() { # label
   lsmod | awk 'NR>1 {print $1}' | sort > "$d/modules"
   { iptables-save 2>/dev/null || true; } | grep -v '^[#:]' | sort > "$d/iptables"
   { ip6tables-save 2>/dev/null || true; } | grep -v '^[#:]' | sort > "$d/ip6tables"
-  { nft list ruleset 2>/dev/null || true; } > "$d/nft"
+  # Counter packets/bytes increase as CI uses the network; compare the rules themselves.
+  # --stateless drops volatile counters, but retains chains, rules, policies and sets.
+  { nft --stateless list ruleset 2>/dev/null || true; } > "$d/nft"
   for k in $sysctl_keys; do printf '%s=%s\n' "$k" "$(sysctl -n "$k" 2>/dev/null || echo n/a)"; done > "$d/sysctl"
   ip -br addr | awk '{print $1,$3}' | sort > "$d/addresses"
   ss -ltnH 2>/dev/null | awk '{print $4}' | sort > "$d/listeners"

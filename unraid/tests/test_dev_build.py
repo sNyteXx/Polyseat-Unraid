@@ -124,7 +124,7 @@ class Pins(unittest.TestCase):
             good + "INCUS_RELEASE=$(touch /tmp/polyseat-pin-pwned)\n",
             good + "INCUS_RELEASE='x y'\n",
             good.replace("@sha256:", ":"),                    # base image not pinned by digest
-            good.replace("GO_LINUX_AMD64_SHA256=ff", "GO_LINUX_AMD64_SHA256=zz"),
+            re.sub(r"(GO_LINUX_AMD64_SHA256=)[0-9a-f]{2}", r"\g<1>zz", good),
             "\n".join(line for line in good.splitlines() if not line.startswith("LXC_COMMIT")) + "\n",
         ]
         for text in mutations:

@@ -56,8 +56,9 @@ the controller end-to-end and for every artifact that is shared.
 
 ## `ubuntudev` as build host
 
-Not evaluated: the name is unresolvable from the workstation (no SSH alias, no DNS) and no address was guessed or
-scanned. Needed before any use: the host name or address, permission to run `docker run` (or a Go 1.26.7 + C toolchain
-for `--native`), at least 10 GB free in the cache path and 14 GB of available memory. With Forgejo/BuildKit running
-there, `--cpus 4 --memory 12` limits the build container but not `docker build` of the one-time image; `--native` avoids
-the shared BuildKit altogether. Abort if memory or disk is tight (the script checks both before starting).
+Termix SSH access to `ubuntudev` was verified on 2026-10-30. A `--dry-run` on the separate
+`polyseat-unraid-codex` checkout succeeded without modifying the host. Read-only resource inspection:
+32 GiB disk free (89% used), 20 GiB available memory, nearly 4 GiB swap used, low system load.
+Forgejo/BuildKit and other workloads share this server. A restricted build (`--jobs 2 --memory 8`)
+is possible only if preflight checks pass and resource usage stays safe; none has been started yet.
+`--memory` caps `docker run`, not the one-time builder image creation. Never build on production Unraid.
