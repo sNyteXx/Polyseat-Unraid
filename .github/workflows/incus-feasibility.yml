@@ -1,26 +1,38 @@
-name: WIP Incus feasibility (non-deploying)
+name: WIP Incus real build (isolated, no deployment)
 on:
   workflow_dispatch:
-    inputs:
-      incus_version:
-        description: 'Explicit version for metadata-only feasibility job'
-        required: true
-        default: '6.0.0'
+  push:
+    paths:
+      - '.github/workflows/incus-feasibility.yml'
 jobs:
-  metadata-only:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - name: Syntax check
-        run: sh -n unraid/scripts/build-incus-artifact.sh
-      - name: Generate blocked-build manifest
-        env:
-          INCUS_VERSION: ${{ inputs.incus_version }}
-        run: sh unraid/scripts/build-incus-artifact.sh
+      - name: Checkout pinned Incus release
+        run: |
+          git clone --depth 1 --branch v6.0.0 https://github.com/lxc/incus.git incus
+          cd incus
+          git rev-parse HEAD | tee ../incus-source-commit.txt
+      - name: Install build dependencies in ephemeral runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libsqlite3-dev libacl1-dev libcap-dev libseccomp-dev libudev-dev libuv1-dev liblz4-dev libzstd-dev libbtrfs-dev libdevmapper-dev liblxc-dev libapparmor-dev protobuf-compiler
+      - name: Build incus binaries
+        run: |
+          cd incus
+          make -j2
+      - name: Package artifacts with checksums
+        run: |
+          mkdir -p dist
+          find incus/bin -maxdepth 1 -type f -exec cp {} dist/ \;
+          test -n "$(find dist -type f -print -quit)"
+          (cd dist && sha256sum * > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
-          name: incus-feasibility-metadata-NOT-RUNTIME
-          path: dist/
+          name: incus-build-WIP-NOT-UNRAID-VALIDATED
+          path: |
+            dist/
+            incus-source-commit.txt
           retention-days: 7
