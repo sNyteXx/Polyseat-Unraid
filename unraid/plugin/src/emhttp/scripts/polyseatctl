@@ -33,7 +33,13 @@ CANARY_HOST_CPUSET="0-27"  # verified read-only on Tower; CI fixtures may overri
 CANARY_CPU_MAX="100000 1000000"  # 10% of one CPU
 CANARY_MEMORY_MAX=536870912
 CANARY_PIDS_MAX=256
-CANARY_DATA_DIR="/mnt/cache/appdata/polyseat-canary"
+CANARY_WATCHDOG_CGROUP="/sys/fs/cgroup/polyseat-unraid-canary-watchdog"
+CANARY_WATCHDOG_MEMORY_MAX=33554432
+CANARY_DATA_DIR="/var/lib/polyseat-unraid-canary"
+CANARY_DATA_MAX_KB=262144  # monitored abort threshold, NOT a filesystem quota
+CANARY_LOG_MAX_BYTES=16777216  # likewise, one-second monitoring may overshoot
+CANARY_HOST_MIN_AVAILABLE_KB=4194304
+CANARY_HOST_MAX_LOAD=14
 CANARY_SIGN_IDENTITY="polyseat-unraid-canary-approver"
 CANARY_SIGN_NAMESPACE="polyseat-unraid-canary-approval-v1"
 
@@ -42,6 +48,9 @@ EX_USAGE=1 EX_BLOCKED=2 EX_CORRUPT=3 EX_HEALTH=4 EX_VERIFY=5 EX_SPACE=6 EX_PENDI
 LOG_ENABLED=0
 LOCK_HELD=0
 APPROVED=0
+CANARY_OPERATION=0
+CANARY_HEALTH_DEADLINE=0
+CANARY_RUN_OWNED=0
 
 # ---------------------------------------------------------------- paths ----
 init_paths() {
@@ -59,6 +68,7 @@ init_paths() {
   SLOTS="$RAM_DIR/slots"
   CURRENT="$RAM_DIR/current"
   RUN_DIR="$ROOT/var/run/$PLUGIN"
+  CANARY_SESSION="$RUN_DIR/canary-session.json"
   LOG_DIR="$ROOT/var/log/$PLUGIN"
   SUBID_DIR="$ROOT/etc"
   # A real daemon reads /etc/subuid, probes /sys and uses absolute compiled-in paths, none of which a
@@ -171,6 +181,11 @@ cfg_get() { # KEY fallback : user setting, else schema default, else fallback
 
 # Validate one KEY=VALUE against schema.json (the single source of truth shared with the WebUI).
 schema_validate() { # key value
+  # The one-shot canary has a separate, fixed RAM-root workspace. Never widen
+  # the ordinary pool-path schema or accept arbitrary /var paths.
+  if [[ $POLYSEAT_RELEASE_GATE == canary && $1 == DATA_DIR ]]; then
+    [[ $2 == "$CANARY_DATA_DIR" ]]; return
+  fi
   [[ -f $SCHEMA ]] || return 1
   jq -e --arg k "$1" --arg v "$2" '
     .[$k] as $s
@@ -219,10 +234,10 @@ canary_approval_for() { # command args... (root only, non-sandbox)
     (.expires_at | type == "number" and . == floor) and
     .issued_at <= $now and $now < .expires_at and
     (.expires_at - .issued_at) <= 1800 and
-    (.actions | type == "array" and length <= 8 and length > 0 and
+    (.actions | type == "array" and length <= 6 and length > 0 and
       (unique | length) == length and all(.[];
-       . == "stage" or . == "activate" or . == "start" or . == "restart" or
-       . == "boot" or . == "config-set" or . == "config-reset")) and
+       . == "stage" or . == "activate" or . == "start" or . == "canary-smoke" or
+       . == "config-set" or . == "config-reset")) and
     (.actions | index($action) != null)' "$CANARY_APPROVAL" >/dev/null 2>&1 ||
     die $EX_BLOCKED "canary approval expired, wrong host, invalid scope or bad schema"
   token_sha=$(jq -r .archive_sha256 "$CANARY_APPROVAL")
@@ -231,7 +246,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
       [[ -f ${1:-} && ! -L ${1:-} ]] || die $EX_BLOCKED "canary stage archive unavailable"
       target=$(sha256sum -- "$1" | awk '{print $1}') ;;
     activate) target=${1:-} ;;
-    start | restart | boot)
+    start | canary-smoke)
       read_pointer
       target=$PTR_CURRENT ;;
     config-set | config-reset)
@@ -239,9 +254,10 @@ canary_approval_for() { # command args... (root only, non-sandbox)
       if [[ $action == config-set ]]; then
         local arg
         for arg in "$@"; do
-          [[ $arg != SERVICE=enabled && $arg != DATA_DIR=* ]] ||
-            [[ $arg == "DATA_DIR=$CANARY_DATA_DIR" ]] ||
-            die $EX_BLOCKED "canary service auto-start or DATA_DIR change refused"
+          case "$arg" in
+            SERVICE=disabled | "DATA_DIR=$CANARY_DATA_DIR" | ACCEPT_NO_LSM=yes | ACCEPT_NO_LSM=no) ;;
+            *) die $EX_BLOCKED "canary accepts only fixed DATA_DIR, disabled SERVICE and LSM acknowledgement" ;;
+          esac
         done
       fi
       [[ -f $STATE_DIR/pointer.json ]] && { read_pointer; target=$PTR_CURRENT; }
@@ -264,7 +280,8 @@ require_mutation_allowed() {
       700 | 711) ;;
       *) die $EX_BLOCKED "sandbox root must have mode 0700 or 0711" ;;
     esac
-    return 0
+    if [[ $POLYSEAT_RELEASE_GATE != canary ]]; then return 0; fi
+    ci_real_system || die $EX_BLOCKED "real canary sandbox needs a disposable GitHub-hosted runner"
   fi
   case "$POLYSEAT_RELEASE_GATE" in
     open) ;;
@@ -407,7 +424,7 @@ validate_manifest_file() { # manifest sha
 
 verify_signature() { # manifest sig
   local manifest=$1 sig=$2
-  if sandbox && [[ ${POLYSEAT_TEST_UNSIGNED:-} == 1 ]]; then
+  if sandbox && [[ $POLYSEAT_RELEASE_GATE != canary && ${POLYSEAT_TEST_UNSIGNED:-} == 1 ]]; then
     log warn "TEST ONLY: signature check skipped (sandbox)"
     return 0
   fi
@@ -790,9 +807,66 @@ remove_lxc_rootfs_mount() {
 DATA_REAL=""
 INCUS_DIR=""
 
+# Every ancestor must protect the name below it from untrusted replacement.
+# Root-owned sticky directories (e.g. /tmp in disposable CI) protect the
+# root-owned child too. Do not "fix" permissions on any shared host directory.
+canary_secure_path() { # existing absolute directory (ancestors included)
+  local path=$1 mode
+  [[ -d $path && ! -L $path && $(realpath -e -- "$path") == "$path" ]] || return 1
+  while :; do
+    [[ $(stat -c %u -- "$path") == 0 ]] || return 1
+    mode=$(stat -c %a -- "$path") || return 1
+    (( (8#$mode & 8#022) == 0 || (8#$mode & 8#1000) != 0 )) || return 1
+    [[ $path == / ]] && break
+    path=$(dirname -- "$path")
+  done
+}
+
+canary_validate_data_dir() { # candidate, may be absent for the first start
+  local requested=$1 parent
+  [[ -z $requested || $requested == "$CANARY_DATA_DIR" ]] || {
+    log error "canary: only the fixed ephemeral workspace is allowed"; return 1;
+  }
+  DATA_REAL="$ROOT$CANARY_DATA_DIR" INCUS_DIR="$ROOT$CANARY_DATA_DIR/incus"
+  parent=$(dirname -- "$DATA_REAL")
+  canary_secure_path "$parent" || {
+    log error "canary: workspace ancestors are not root-owned and replacement-safe"; return 1;
+  }
+  if [[ -e $DATA_REAL || -L $DATA_REAL ]]; then
+    canary_secure_path "$DATA_REAL" || return 1
+    case "$(stat -c %a -- "$DATA_REAL")" in 711 | 755) ;; *) return 1 ;; esac
+  fi
+  return 0
+}
+
+canary_fresh_state_prepare() {
+  local active_sha=$1
+  [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
+  # Never start an existing database: Incus can auto-start persisted instances
+  # before an API audit is possible. Failed or completed sessions are retained
+  # for inspection, not silently deleted or re-used by start/restart/recover.
+  [[ ! -e $INCUS_DIR && ! -L $INCUS_DIR && ! -e $CANARY_SESSION && ! -L $CANARY_SESSION ]] || {
+    log error "canary: prior state/session exists; inspection required, no restart"; return 1;
+  }
+  if [[ -d $DATA_REAL ]]; then
+    [[ -z $(find "$DATA_REAL" -mindepth 1 -maxdepth 1 -print -quit) ]] || {
+      log error "canary: workspace is not empty; refusing all persisted state"; return 1;
+    }
+  else
+    (umask 022; mkdir -- "$DATA_REAL") || return 1
+  fi
+  (umask 022; mkdir -- "$INCUS_DIR") || return 1
+  # Kept after stop/uninstall: intentional evidence of a one-shot run.
+  write_json_atomic "$DATA_REAL/one-shot.json" \
+    "$(jq -n --arg sha "$active_sha" '{schema:1,archive_sha256:$sha,kind:"ephemeral-cpu-only"}')"
+}
+
 validate_data_dir() { # [candidate logical path]
   local d anc mode
   d=${1:-$(cfg_get DATA_DIR "")}
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+    canary_validate_data_dir "$d"; return
+  fi
   [[ -n $d ]] || { log error "DATA_DIR is not configured (select a pool path first)"; return 1; }
   [[ $d =~ ^/mnt/[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || { log error "DATA_DIR must be an absolute path below /mnt"; return 1; }
   case "$d" in
@@ -831,10 +905,43 @@ svc_pid() {
 }
 
 run_incus() { # args...
+  local limit=${INCUS_CMD_TIMEOUT:-20} remaining
   # Never fall back to Incus' default state directory: it could belong to someone else.
   [[ -n $INCUS_DIR && $INCUS_DIR == "$DATA_REAL/incus" ]] || { log error "refusing to run incus without a validated INCUS_DIR"; return 1; }
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+    canary_command_allowed "$@" || { log error "canary: Incus command outside the fixed CPU-only path"; return 1; }
+    canary_watchdog_check || { log error "canary: expiry supervisor is not healthy"; return 1; }
+    if [[ $CANARY_HEALTH_DEADLINE -gt 0 ]]; then
+      remaining=$((CANARY_HEALTH_DEADLINE - $(canary_monotonic_seconds)))
+      [[ $remaining -gt 0 ]] || return 1
+      [[ $limit -le $remaining ]] || limit=$remaining
+    fi
+  fi
   env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" INCUS_CONF="$RUN_DIR/client" \
-    timeout "${INCUS_CMD_TIMEOUT:-20}" "$CURRENT/payload/bin/incus" "$@"
+    timeout "$limit" "$CURRENT/payload/bin/incus" "$@"
+}
+
+canary_command_allowed() {
+  # Defense against accidental controller expansion, NOT a sandbox against
+  # trusted host root opening the Incus socket or executing a binary directly.
+  case "$*" in
+    'info' | 'config get core.https_address' | 'query /1.0' | \
+    'query /1.0/projects?recursion=1' | 'query /1.0/profiles?recursion=1' | \
+    'query /1.0/instances?recursion=1' | 'query /1.0/storage-pools?recursion=1' | \
+    'query /1.0/networks?recursion=1' | 'query /1.0/instances/polyseat-canary-cpu/state') return 0 ;;
+  esac
+  [[ $CANARY_OPERATION -eq 1 ]] || return 1
+  case "$*" in
+    "storage create default dir source=$INCUS_DIR/storage-pools/default" | \
+    'profile device add default root disk path=/ pool=default' | \
+    "image import $CURRENT/payload/share/canary/busybox.tar.gz --alias polyseat-canary-busybox" | \
+    'init polyseat-canary-busybox polyseat-canary-cpu --storage default --config boot.autostart=false --config security.privileged=false --config security.nesting=false' | \
+    'start polyseat-canary-cpu' | \
+    'exec polyseat-canary-cpu -- /bin/busybox echo POLYSEAT_CANARY_OK' | \
+    'stop polyseat-canary-cpu --force --timeout 5' | 'delete polyseat-canary-cpu' | \
+    'image delete polyseat-canary-busybox') return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # A canary package is NOT built by the regular package job. Even if a future,
@@ -843,13 +950,13 @@ run_incus() { # args...
 canary_cgroup_prepare() {
   local controller available enabled parent_cpus parent_mems
   [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
-  [[ $(cfg_get DATA_DIR '') == "$CANARY_DATA_DIR" ]] || {
+  [[ -z $(cfg_get DATA_DIR '') || $(cfg_get DATA_DIR '') == "$CANARY_DATA_DIR" ]] || {
     log error "canary: DATA_DIR must be dedicated to this CPU-only test"; return 1;
   }
-  [[ $(fs_type /sys/fs/cgroup) == cgroup2fs && ! -L $CANARY_CGROUP ]] || {
+  [[ $(fs_type /sys/fs/cgroup) == cgroup2fs && ! -L $CANARY_CGROUP && ! -L $CANARY_WATCHDOG_CGROUP ]] || {
     log error "canary: unified cgroup v2 required"; return 1;
   }
-  [[ ! -e $CANARY_CGROUP ]] || {
+  [[ ! -e $CANARY_CGROUP && ! -e $CANARY_WATCHDOG_CGROUP ]] || {
     log error "canary: stale/existing cgroup requires manual inspection"; return 1;
   }
   available=" $(< /sys/fs/cgroup/cgroup.controllers) "
@@ -865,19 +972,33 @@ canary_cgroup_prepare() {
     log error "canary: unexpected CPU or NUMA topology: refusing fixed E-core assignment"; return 1;
   }
   mkdir -- "$CANARY_CGROUP" || return 1
+  if ! mkdir -- "$CANARY_WATCHDOG_CGROUP"; then rmdir -- "$CANARY_CGROUP"; return 1; fi
   if ! {
     printf '%s\n' "$parent_mems" > "$CANARY_CGROUP/cpuset.mems" &&
     printf '%s\n' "$CANARY_CPUSET" > "$CANARY_CGROUP/cpuset.cpus" &&
+    printf '%s\n' "$parent_mems" > "$CANARY_WATCHDOG_CGROUP/cpuset.mems" &&
+    printf '%s\n' "$CANARY_CPUSET" > "$CANARY_WATCHDOG_CGROUP/cpuset.cpus" &&
     printf '%s\n' "$CANARY_CPU_MAX" > "$CANARY_CGROUP/cpu.max" &&
     printf '%s\n' "$CANARY_MEMORY_MAX" > "$CANARY_CGROUP/memory.max" &&
+    printf '1\n' > "$CANARY_CGROUP/memory.oom.group" &&
     printf '0\n' > "$CANARY_CGROUP/memory.swap.max" &&
-    printf '%s\n' "$CANARY_PIDS_MAX" > "$CANARY_CGROUP/pids.max";
+    printf '%s\n' "$CANARY_PIDS_MAX" > "$CANARY_CGROUP/pids.max" &&
+    printf '50000 1000000\n' > "$CANARY_WATCHDOG_CGROUP/cpu.max" &&
+    printf '%s\n' "$CANARY_WATCHDOG_MEMORY_MAX" > "$CANARY_WATCHDOG_CGROUP/memory.max" &&
+    printf '0\n' > "$CANARY_WATCHDOG_CGROUP/memory.swap.max" &&
+    printf '16\n' > "$CANARY_WATCHDOG_CGROUP/pids.max" &&
+    mkdir -- "$CANARY_CGROUP/daemon";
   }; then
+    rmdir -- "$CANARY_CGROUP/daemon" 2>/dev/null || true
     rmdir -- "$CANARY_CGROUP" 2>/dev/null || true
+    rmdir -- "$CANARY_WATCHDOG_CGROUP" 2>/dev/null || true
     log error "canary: cgroup limits could not be set; daemon not launched"
     return 1
   fi
-  canary_cgroup_check || return 1
+  if ! canary_cgroup_check; then
+    rmdir -- "$CANARY_CGROUP/daemon" "$CANARY_CGROUP" "$CANARY_WATCHDOG_CGROUP" 2>/dev/null || true
+    return 1
+  fi
 }
 
 canary_cgroup_check() {
@@ -886,51 +1007,256 @@ canary_cgroup_check() {
   [[ $(< "$CANARY_CGROUP/cpuset.cpus") == "$CANARY_CPUSET" &&
      $(< "$CANARY_CGROUP/cpu.max") == "$CANARY_CPU_MAX" &&
      $(< "$CANARY_CGROUP/memory.max") == "$CANARY_MEMORY_MAX" &&
+     $(< "$CANARY_CGROUP/memory.oom.group") == 1 &&
      $(< "$CANARY_CGROUP/memory.swap.max") == 0 &&
-     $(< "$CANARY_CGROUP/pids.max") == "$CANARY_PIDS_MAX" ]]
+     $(< "$CANARY_CGROUP/pids.max") == "$CANARY_PIDS_MAX" &&
+     -d $CANARY_WATCHDOG_CGROUP && ! -L $CANARY_WATCHDOG_CGROUP &&
+     $(< "$CANARY_WATCHDOG_CGROUP/cpuset.cpus") == "$CANARY_CPUSET" &&
+     $(< "$CANARY_WATCHDOG_CGROUP/cpu.max") == "50000 1000000" &&
+     $(< "$CANARY_WATCHDOG_CGROUP/memory.max") == "$CANARY_WATCHDOG_MEMORY_MAX" &&
+     $(< "$CANARY_WATCHDOG_CGROUP/memory.swap.max") == 0 &&
+     $(< "$CANARY_WATCHDOG_CGROUP/pids.max") == 16 ]]
+}
+
+canary_cgroup_remove() { # one exact plugin-owned cgroup and its descendants
+  local group=$1 i child
+  [[ $group == "$CANARY_CGROUP" || $group == "$CANARY_WATCHDOG_CGROUP" ]] || return 1
+  [[ ! -e $group ]] && return 0
+  [[ -d $group && ! -L $group && $(fs_type "$group") == cgroup2fs ]] || return 1
+  printf '1\n' > "$group/cgroup.kill" || return 1
+  for ((i = 0; i < 50; i++)); do
+    # cgroupfs cannot contain symlinks or user files. Remove empty *directories*
+    # only, below this owned boundary; never recursively delete data files.
+    while IFS= read -r -d '' child; do rmdir -- "$child" 2>/dev/null || true; done \
+      < <(find "$group" -xdev -depth -mindepth 1 -type d -print0)
+    rmdir -- "$group" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  return 1
 }
 
 canary_cgroup_stop() {
-  local i
+  local rc=0
   [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
-  [[ ! -e $CANARY_CGROUP ]] && return 0
-  [[ -d $CANARY_CGROUP && ! -L $CANARY_CGROUP ]] || return 1
-  # This subtree is exclusively owned by the canary process tree. Never kill
-  # any process outside it, and never act on a non-canary controller build.
-  printf '1\n' > "$CANARY_CGROUP/cgroup.kill" || return 1
+  # Stop work BEFORE its supervisor. No Incus API, token, PID file, or healthy
+  # database is needed for this emergency path, including after token expiry.
+  canary_cgroup_remove "$CANARY_CGROUP" || rc=1
+  [[ $rc -ne 0 ]] || canary_cgroup_remove "$CANARY_WATCHDOG_CGROUP" || rc=1
+  [[ $rc -eq 0 ]] || log error "canary: owned cgroup could not be emptied and removed"
+  return "$rc"
+}
+
+canary_monotonic_seconds() {
+  local uptime _unused
+  read -r uptime _unused < /proc/uptime || return 1
+  printf '%s\n' "${uptime%%.*}"
+}
+
+canary_process_starttime() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+
+canary_budget_check() {
+  local kb bytes=0 file size
+  kb=$(du -skx -- "$DATA_REAL" 2>/dev/null | awk '{print $1}') || return 1
+  [[ $kb =~ ^[0-9]+$ && $kb -le $CANARY_DATA_MAX_KB ]] || return 1
+  for file in "$LOG_DIR/incusd.log" "$LOG_DIR/incusd.out" "$LOG_DIR/$PLUGIN.log" "$LOG_DIR/$PLUGIN.log.1"; do
+    [[ ! -e $file && ! -L $file ]] && continue
+    [[ -f $file && ! -L $file && $(stat -c %u -- "$file") == 0 ]] || return 1
+    size=$(stat -c %s -- "$file") || return 1
+    bytes=$((bytes + size))
+  done
+  [[ $bytes -le $CANARY_LOG_MAX_BYTES ]]
+}
+
+canary_host_pressure_check() {
+  awk -v minimum="$CANARY_HOST_MIN_AVAILABLE_KB" \
+    '$1 == "MemAvailable:" { ok = ($2 >= minimum) } END { exit !ok }' /proc/meminfo &&
+    awk -v maximum="$CANARY_HOST_MAX_LOAD" '{ exit !($1 <= maximum) }' /proc/loadavg
+}
+
+canary_watchdog_loop() { # epoch deadline, monotonic deadline
+  local expiry=$1 deadline=$2 pid=$BASHPID started aborted=0
+  printf '%s\n' "$pid" > "$CANARY_WATCHDOG_CGROUP/cgroup.procs" || return 1
+  renice -n 19 -p "$pid" >/dev/null || return 1
+  trap 'printf "1\n" > "$CANARY_CGROUP/cgroup.kill" 2>/dev/null || true' EXIT
+  trap 'exit 1' TERM HUP INT
+  started=$(canary_process_starttime "$pid") || return 1
+  write_json_atomic "$CANARY_SESSION" "$(jq -n --argjson p "$pid" --arg s "$started" \
+    --argjson e "$expiry" --argjson d "$deadline" \
+    '{schema:1,pid:$p,starttime:$s,expires_at:$e,deadline_monotonic:$d}')" || return 1
+  # This supervisor has its own small cgroup and survives a workload OOM.
+  # It is not a security boundary against host root; host root is trusted.
+  # SIGTERM/HUP/session closure still tears down the bounded workload first.
+  while [[ -d $CANARY_CGROUP ]]; do
+    if (( $(date -u +%s) >= expiry || $(canary_monotonic_seconds) >= deadline )); then
+      [[ $aborted -ne 0 ]] || log error "canary: signed window expired; hard-stopping workload"
+      [[ $aborted -ne 0 ]] || printf 'expired\n' > "$CANARY_SESSION.reason"
+      aborted=1
+    fi
+    if [[ $aborted -eq 0 ]] && { ! canary_cgroup_check || ! canary_budget_check || ! canary_host_pressure_check; }; then
+      log error "canary: resource policy/budget changed; hard-stopping workload"
+      printf 'resource-policy-or-budget\n' > "$CANARY_SESSION.reason"
+      aborted=1
+    fi
+    if [[ $aborted -eq 1 ]]; then
+      # Keep reaping until explicit cleanup removes the tree. This also
+      # catches a launcher crossing the exact expiry instant, or lost SSH.
+      printf '1\n' > "$CANARY_CGROUP/cgroup.kill" || return 1
+      sleep 0.1
+      continue
+    fi
+    sleep 1
+  done
+}
+
+canary_watchdog_start() {
+  local expiry now remaining mono pid i
+  [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
+  expiry=$(jq -er '.expires_at' "$CANARY_APPROVAL") || return 1
+  now=$(date -u +%s) mono=$(canary_monotonic_seconds) || return 1
+  remaining=$((expiry - now))
+  [[ $remaining -gt 0 && $remaining -le 1800 ]] || return 1
+  # setsid via a function-exported bash keeps the supervisor independent of
+  # SSH/interactive sessions. No child inherits controller lock descriptor 9.
+  # shellcheck disable=SC2016  # arguments expand only in the child Bash
+  env -i PATH="$SAFE_PATH" POLYSEAT_RELEASE_GATE="$POLYSEAT_RELEASE_GATE" \
+    ROOT="$ROOT" LOG_ENABLED=0 PLUGIN="$PLUGIN" LOG_DIR="$LOG_DIR" DATA_REAL="$DATA_REAL" \
+    CANARY_CGROUP="$CANARY_CGROUP" CANARY_WATCHDOG_CGROUP="$CANARY_WATCHDOG_CGROUP" \
+    CANARY_SESSION="$CANARY_SESSION" CANARY_CPUSET="$CANARY_CPUSET" CANARY_CPU_MAX="$CANARY_CPU_MAX" \
+    CANARY_MEMORY_MAX="$CANARY_MEMORY_MAX" CANARY_PIDS_MAX="$CANARY_PIDS_MAX" \
+    CANARY_WATCHDOG_MEMORY_MAX="$CANARY_WATCHDOG_MEMORY_MAX" \
+    CANARY_DATA_MAX_KB="$CANARY_DATA_MAX_KB" CANARY_LOG_MAX_BYTES="$CANARY_LOG_MAX_BYTES" \
+    CANARY_HOST_MIN_AVAILABLE_KB="$CANARY_HOST_MIN_AVAILABLE_KB" CANARY_HOST_MAX_LOAD="$CANARY_HOST_MAX_LOAD" \
+    setsid bash -u -o pipefail -c "$(declare -f canary_watchdog_loop canary_process_starttime write_json_atomic sync_path \
+      canary_monotonic_seconds canary_cgroup_check canary_budget_check canary_host_pressure_check log sandbox)"$'\n''canary_watchdog_loop "$@"' \
+    canary-watchdog "$expiry" "$((mono + remaining))" \
+    >/dev/null 2>&1 </dev/null 9>&- &
+  pid=$!
   for ((i = 0; i < 50; i++)); do
-    rmdir -- "$CANARY_CGROUP" 2>/dev/null && return 0
+    [[ -f $CANARY_SESSION && ! -L $CANARY_SESSION ]] && canary_watchdog_check && return 0
+    kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
   done
-  log error "canary: cgroup could not be emptied and removed"
+  log error "canary: independent expiry supervisor did not become ready"
   return 1
+}
+
+canary_watchdog_check() {
+  local pid started expiry deadline
+  [[ ! -e $CANARY_SESSION.reason && ! -L $CANARY_SESSION.reason ]] || return 1
+  check_private_file "$CANARY_SESSION" || return 1
+  read -r pid started expiry deadline < <(jq -er \
+    '[.pid,.starttime,.expires_at,.deadline_monotonic] | @tsv' "$CANARY_SESSION") || return 1
+  [[ $pid =~ ^[0-9]+$ && $started =~ ^[0-9]+$ && $expiry =~ ^[0-9]+$ && $deadline =~ ^[0-9]+$ ]] || return 1
+  [[ $(canary_process_starttime "$pid") == "$started" && \
+     $(< "/proc/$pid/cgroup") == "0::/${CANARY_WATCHDOG_CGROUP##*/}" ]] || return 1
+  (( $(date -u +%s) < expiry && $(canary_monotonic_seconds) < deadline ))
+}
+
+canary_guardian_start() {
+  local pid started expiry deadline guardian i
+  [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
+  canary_watchdog_check || return 1
+  read -r pid started expiry deadline < <(jq -er \
+    '[.pid,.starttime,.expires_at,.deadline_monotonic] | @tsv' "$CANARY_SESSION") || return 1
+  # This tiny witness shares the WORKLOAD OOM group, not the supervisor group.
+  # If the external supervisor disappears (including SIGKILL/OOM), it kills
+  # its own entire workload tree. If the witness itself OOMs, oom.group=1 does
+  # the same. Thus a watchdog-cgroup OOM cannot silently remove the TTL limit.
+  # shellcheck disable=SC2016  # positional parameters expand in the witness
+  env -i PATH="$SAFE_PATH" setsid bash -u -o pipefail -c '
+    group=$1 ready=$2 supervisor=$3 expected=$4 expiry=$5 deadline=$6 me=$BASHPID
+    printf "%s\n" "$me" > "$group/daemon/cgroup.procs" || exit 1
+    mine=$(awk "{print \$22}" "/proc/$me/stat") || exit 1
+    printf "%s %s\n" "$me" "$mine" > "$ready" || exit 1
+    trap '\''printf "1\n" > "$group/cgroup.kill" 2>/dev/null || true'\'' EXIT
+    trap '\''exit 1'\'' HUP INT TERM
+    while [[ -d $group ]]; do
+      actual=$(awk "{print \$22}" "/proc/$supervisor/stat" 2>/dev/null) || exit 1
+      read -r uptime unused < /proc/uptime || exit 1
+      [[ $actual == "$expected" ]] || exit 1
+      (( ${uptime%%.*} < deadline && $(date -u +%s) < expiry )) || exit 1
+      sleep 1
+    done
+  ' canary-guardian "$CANARY_CGROUP" "$RUN_DIR/canary-guardian.pid" "$pid" "$started" "$expiry" "$deadline" \
+    >/dev/null 2>&1 </dev/null 9>&- &
+  guardian=$!
+  for ((i = 0; i < 30; i++)); do
+    canary_guardian_check && return 0
+    kill -0 "$guardian" 2>/dev/null || break
+    sleep 0.1
+  done
+  return 1
+}
+
+canary_guardian_check() {
+  local pid started
+  check_private_file "$RUN_DIR/canary-guardian.pid" || return 1
+  read -r pid started < "$RUN_DIR/canary-guardian.pid" || return 1
+  [[ $pid =~ ^[0-9]+$ && $started =~ ^[0-9]+$ && $(canary_process_starttime "$pid") == "$started" && \
+    $(< "/proc/$pid/cgroup") == "0::/${CANARY_CGROUP##*/}/daemon" ]]
+}
+
+canary_deny_tools_prepare() {
+  local tool dir="$RUN_DIR/deny-tools"
+  [[ ! -e $dir && ! -L $dir ]] || return 1
+  mkdir -m 0700 -- "$dir" || return 1
+  for tool in 'modprobe' 'insmod' 'rmmod'; do
+    # Fixed, root-private commands in OUR PATH. Never touch host /sbin tools.
+    # CAP_SYS_MODULE alone would not block modprobe configuration install hooks.
+    printf '%s\n' '#!/bin/sh' \
+      'printf "%s\n" "canary: kernel module tools are disabled" >&2' 'exit 126' > "$dir/$tool" || return 1
+    chmod 0700 -- "$dir/$tool" || return 1
+  done
 }
 
 # Incus is only allowed to operate one isolated, unprivileged disk-only
 # container. Audit *all* profiles and instances, including expanded devices;
 # unknown JSON shape, extra projects/config or query failure always blocks.
 canary_profile_guard() {
-  local projects profiles instances pools
+  local server projects profiles instances pools networks
   [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
   # The profiles and instances endpoints operate in the default project only.
   # Any additional project would bypass the checks below, so forbid it first.
+  server=$(INCUS_CMD_TIMEOUT=5 run_incus query /1.0) || return 1
   projects=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/projects?recursion=1') || return 1
   profiles=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/profiles?recursion=1') || return 1
   instances=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || return 1
   pools=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/storage-pools?recursion=1') || return 1
-  jq -en --argjson projects "$projects" --argjson profiles "$profiles" --argjson instances "$instances" --argjson pools "$pools" '
+  networks=$(INCUS_CMD_TIMEOUT=5 run_incus query '/1.0/networks?recursion=1') || return 1
+  jq -en --argjson server "$server" --argjson projects "$projects" --argjson profiles "$profiles" \
+    --argjson instances "$instances" --argjson pools "$pools" --argjson networks "$networks" \
+    --arg source "$INCUS_DIR/storage-pools/default" '
+    def object: if type == "object" and .type == "sync" and .status_code == 200
+      then .metadata else . end | if type == "object" then . else error("unexpected API object") end;
     def records: if type == "array" then . elif .type == "sync" and .status_code == 200
       and (.metadata|type) == "array" then .metadata else error("unexpected API data") end;
     def root_only: type == "object" and (to_entries | all(.[];
       .key == "root" and .value == {type:"disk", path:"/", pool:"default"}));
-    def safe_cfg: type == "object" and (keys | all(.[];
-      startswith("image.") or startswith("volatile.")));
+    def safe_cfg: type == "object" and (to_entries | all(.[];
+      (.key | startswith("image.")) and (.value|type == "string") or
+      (.key as $k | ["volatile.base_image", "volatile.idmap.base", "volatile.idmap.current",
+        "volatile.idmap.next", "volatile.last_state.idmap", "volatile.last_state.power",
+        "volatile.last_state.ready", "volatile.uuid", "volatile.uuid.generation",
+        "volatile.apply_template", "volatile.cloud-init.instance-id"] | index($k) != null)
+        and (.value|type == "string") or
+      (.key == "boot.autostart" or .key == "security.privileged" or .key == "security.nesting")
+        and .value == "false"));
+    def project_cfg: type == "object" and (to_entries | all(.[];
+      (.key as $k | ["features.images", "features.networks", "features.networks.zones",
+        "features.profiles", "features.storage.buckets", "features.storage.volumes"] | index($k) != null)
+      and .value == "true"));
+    ($server | object) as $srv |
     ($projects | records) as $pr | ($profiles | records) as $ps |
     ($instances | records) as $is | ($pools | records) as $sp |
-    ($pr | length == 1 and .[0].name == "default" and (.[0].config // {} | type == "object")) and
-    ($ps | length == 1 and .[0].name == "default" and (.[0].config // {} | safe_cfg)
+    ($srv.config | type == "object" and length == 0) and
+    (($srv.environment.server_clustered // false) == false) and
+    ($networks | records | all(.[]; .managed == false)) and
+    ($pr | length == 1 and .[0].name == "default" and (.[0].config // {} | project_cfg)) and
+    ($ps | length == 1 and .[0].name == "default" and (.[0].config // {} | type == "object" and length == 0)
       and (.[0].devices // {} | root_only)) and
-    ($sp | length <= 1 and all(.[]; .name == "default" and .driver == "dir")) and
+    ($sp | length <= 1 and all(.[]; .name == "default" and .driver == "dir" and
+      (.config | type == "object" and .source == $source and
+        (to_entries|all(.[]; (.key == "source" or .key == "volatile.initial_source") and .value == $source))))) and
     ($is | length <= 1 and all(.[];
       .type == "container" and .name == "polyseat-canary-cpu" and
       (.profiles == ["default"]) and
@@ -938,7 +1264,7 @@ canary_profile_guard() {
       (.expanded_config // {} | safe_cfg) and
       (.devices // {} | root_only) and
       (.expanded_devices // {} | root_only)))' >/dev/null || {
-    log error "canary: Incus policy violation (project, profile, instance, storage, NIC or device)"; return 1;
+    log error "canary: Incus policy violation (server, project, profile, instance, storage, network or device)"; return 1;
   }
 }
 
@@ -946,17 +1272,55 @@ health_check() {
   local pid addr
   pid=$(svc_pid) || { log error "health: daemon process not running"; return 1; }
   [[ -S $INCUS_DIR/unix.socket ]] || { log error "health: management socket missing"; return 1; }
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+    [[ ! -L $INCUS_DIR/unix.socket && $(stat -c '%u %a' -- "$INCUS_DIR/unix.socket") == '0 600' ]] || return 1
+    canary_watchdog_check || { log error "health: expiry supervisor missing or expired"; return 1; }
+    canary_guardian_check || { log error "health: supervisor witness missing"; return 1; }
+  fi
   run_incus info >/dev/null 2>&1 || { log error "health: 'incus info' failed"; return 1; }
   addr=$(run_incus config get core.https_address 2>/dev/null) || { log error "health: cannot read listener config"; return 1; }
   [[ -z $addr ]] || { log error "health: unexpected network listener configured: $addr"; return 1; }
   if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
     canary_cgroup_check || { log error "health: canary cgroup limits invalid"; return 1; }
-    [[ $(< "/proc/$pid/cgroup") == "0::/polyseat-unraid-canary" ]] || {
+    [[ $(< "/proc/$pid/cgroup") == "0::/${CANARY_CGROUP##*/}/daemon" ]] || {
       log error "health: daemon escaped dedicated cgroup"; return 1;
     }
     canary_profile_guard || return 1
   fi
   log debug "health ok (pid $pid)"
+}
+
+canary_launch() { # resolved slot; called in the disposable launch subshell
+  local slot_real=$1
+  [[ ! -e $RUN_DIR/canary-emergency-stop ]] && canary_watchdog_check || return 1
+  renice -n 19 -p "$BASHPID" >/dev/null || return 1
+  printf '%s\n' "$BASHPID" > "$CANARY_CGROUP/daemon/cgroup.procs" || return 1
+  # The OUTER parent has the hard aggregate limits. Do NOT enable controllers
+  # in its subtree: this daemon leaf then advertises no controllers to LXC.
+  # LXC supports that mode, and monitor/payload descendants still inherit all
+  # outer limits. This avoids cgroup-v2's no-internal-processes rule.
+  # LXC normally reads /proc/1/cgroup for root containers. Both a private PID
+  # namespace and a private proc mount are essential to keep that root local.
+  # Drop explicit kernel-module/raw-I/O privileges for the entire process tree.
+  # shellcheck disable=SC2016  # launcher body must expand in its new namespaces
+  exec setsid env -i PATH="$RUN_DIR/deny-tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
+    INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
+    INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
+    setpriv --bounding-set=-sys_module,-sys_rawio \
+    unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private \
+    bash -u -o pipefail -c '
+      # /proc is still the outer proc mount here, so its self/stat yields the
+      # HOST pid even though $$ is already 1 in the new PID namespace.
+      read -r host_pid unused < /proc/self/stat || exit 1
+      [[ $host_pid =~ ^[0-9]+$ && $$ == 1 ]] || exit 1
+      printf "%s\n" "$host_pid" > "$1" || exit 1
+      mount -t proc -o nosuid,nodev,noexec proc /proc || exit 1
+      mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup || exit 1
+      [[ $(< /proc/1/cgroup) == "0::/" && -z $(< /sys/fs/cgroup/cgroup.controllers) ]] || exit 1
+      shift
+      exec "$@"
+    ' polyseat-canary-launch "$PIDFILE" "$slot_real/payload/bin/incusd" \
+      --group "" --logfile "$LOG_DIR/incusd.log" 9>&-
 }
 
 # An incusd that is not ours. Helper processes of running containers (forklxc, forkexec, ...) carry the
@@ -973,7 +1337,12 @@ foreign_incusd() {
 }
 
 svc_start() {
-  local timeout i foreign slot_real active_sha deadline remaining watchdog_pid watchdog_ready watchdog_wait
+  local timeout i foreign slot_real active_sha deadline
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+    require_approval start
+    if [[ $CANARY_OPERATION -eq 1 ]]; then canary_approval_for canary-smoke; else canary_approval_for start; fi
+    canary_host_pressure_check || { log error "canary: host memory/load outside approved safety window"; return 1; }
+  fi
   [[ -L $CURRENT ]] || { log error "no active bundle"; return 1; }
   slot_real=$(readlink -f -- "$CURRENT") || return 1
   active_sha=$(current_sha_from_link) || { log error "active bundle link is not a slot"; return 1; }
@@ -983,12 +1352,20 @@ svc_start() {
   if svc_pid >/dev/null; then
     if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
       health_check || return 1
+      CANARY_RUN_OWNED=1
     fi
     log info "service already running"
     return 0
   fi
   foreign=$(foreign_incusd)
   [[ -z $foreign ]] || { log error "another incusd process exists (pid ${foreign// /,}); refusing to start"; return 1; }
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+    command -v unshare setpriv mount setsid >/dev/null || return 1
+    canary_fresh_state_prepare "$active_sha" || return 1
+    canary_deny_tools_prepare || return 1
+    [[ -d $LOG_DIR && ! -L $LOG_DIR && $(stat -c %u -- "$LOG_DIR") == 0 ]] || return 1
+    canary_budget_check || { log error "canary: initial workspace/log budget exceeded"; return 1; }
+  fi
   if [[ ! -d $INCUS_DIR ]]; then
     (umask 022; mkdir -- "$INCUS_DIR") || return 1
     chmod 0711 -- "$INCUS_DIR" || return 1
@@ -999,17 +1376,18 @@ svc_start() {
   fi
   mkdir -p -- "$RUN_DIR/client" || return 1
   canary_cgroup_prepare || return 1
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then CANARY_RUN_OWNED=1; fi
   subid_file_ensure "$SUBID_DIR/subuid" || { canary_cgroup_stop || true; return 1; }
   subid_file_ensure "$SUBID_DIR/subgid" || { canary_cgroup_stop || true; return 1; }
   rm -f -- "$PIDFILE"
+  canary_watchdog_start || { canary_cgroup_stop || true; return 1; }
+  canary_guardian_start || { canary_cgroup_stop || true; return 1; }
   (
     umask 022
     cd / || exit 1
     if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
-      renice -n 19 -p "$BASHPID" >/dev/null || exit 1
-      # Move the launcher *before* exec, so incusd, helpers and every instance
-      # inherit the limits atomically (no post-launch move race).
-      printf '%s\n' "$BASHPID" > "$CANARY_CGROUP/cgroup.procs" || exit 1
+      canary_launch "$slot_real" > "$LOG_DIR/incusd.out" 2>&1 < /dev/null
+      exit 1
     fi
     # shellcheck disable=SC2016  # $$ and $@ must expand in the child shell
     exec setsid env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
@@ -1021,48 +1399,41 @@ svc_start() {
   ) &
   timeout=$(cfg_get HEALTH_TIMEOUT 60)
   [[ $timeout =~ ^[0-9]+$ ]] || timeout=60
+  deadline=$(( $(canary_monotonic_seconds) + timeout ))
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then CANARY_HEALTH_DEADLINE=$deadline; fi
   for ((i = 0; i < timeout * 2; i++)); do
     sleep 0.5
-    if health_check 2>/dev/null; then
-      if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
-        deadline=$(jq -r .expires_at "$CANARY_APPROVAL") || { svc_stop full; return 1; }
-        remaining=$((deadline - $(date -u +%s)))
-        [[ $remaining -gt 0 && $remaining -le 1800 ]] || { svc_stop full; return 1; }
-        watchdog_ready="$RUN_DIR/canary-watchdog.ready"
-        rm -f -- "$watchdog_ready"
-        # Disposable watchdog lives IN the dedicated cgroup, not outside it.
-        # When the signed window expires, it kills the entire process tree,
-        # including containers; no daemon/instance can outlive approval TTL.
-        (
-          printf '%s\n' "$BASHPID" > "$CANARY_CGROUP/cgroup.procs" || exit 1
-          printf 'ready\n' > "$watchdog_ready" || exit 1
-          sleep "$remaining"
-          printf '1\n' > "$CANARY_CGROUP/cgroup.kill"
-        ) > /dev/null 2>&1 9>&- &
-        watchdog_pid=$!
-        for ((watchdog_wait = 0; watchdog_wait < 20; watchdog_wait++)); do
-          [[ -f $watchdog_ready && ! -L $watchdog_ready ]] && break
-          kill -0 "$watchdog_pid" 2>/dev/null || break
-          sleep 0.1
-        done
-        if [[ ! -f $watchdog_ready ]] || ! kill -0 "$watchdog_pid" 2>/dev/null; then
-          log error "canary: expiry watchdog did not enter cgroup; aborting"
-          svc_stop full || true
-          return 1
-        fi
+    if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+      (( $(canary_monotonic_seconds) < deadline )) || break
+      canary_watchdog_check || break
+      # The daemon creates its own Unix socket. Narrow its default root-group
+      # mode once, before it can be used by any controller operation.
+      if [[ -S $INCUS_DIR/unix.socket && ! -L $INCUS_DIR/unix.socket && \
+        $(stat -c %u -- "$INCUS_DIR/unix.socket") == 0 ]]; then
+        chmod 0600 -- "$INCUS_DIR/unix.socket" || break
       fi
+    fi
+    if health_check 2>/dev/null; then
+      CANARY_HEALTH_DEADLINE=0
       log info "service started and healthy"
       return 0
     fi
     svc_pid >/dev/null || { [[ $i -gt 6 ]] && break; }
   done
   log error "service did not become healthy within ${timeout}s"
+  CANARY_HEALTH_DEADLINE=0
   svc_stop daemon || true
   return 1
 }
 
 svc_stop() { # full|daemon
   local mode=$1 pid i
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+    canary_cgroup_stop || return 1
+    rm -f -- "$PIDFILE"
+    log info "canary: bounded process trees stopped; one-shot state kept for inspection"
+    return 0
+  fi
   pid=$(svc_pid) || {
     rm -f -- "$PIDFILE"
     rm -f -- "$RUN_DIR/canary-watchdog.ready"
@@ -1093,6 +1464,79 @@ svc_stop() { # full|daemon
   fi
   ! kill -0 "$pid" 2>/dev/null
 }
+
+canary_image_verify() {
+  local sha=$1 image="$CURRENT/payload/share/canary/busybox.tar.gz"
+  verify_bundle_files "$sha" && verify_slot "$sha" || return 1
+  [[ -f $image && ! -L $image ]] || return 1
+  jq -e '.files | any(.[]; .path == "payload/share/canary/busybox.tar.gz" and
+    .mode == 420 and .size > 0 and .size <= 8388608)' "$(bundle_manifest "$sha")" >/dev/null || return 1
+  # verify_slot has just checked this actual file against the signed manifest.
+  # No caller-provided path, alias, registry download or image hash override.
+}
+
+canary_instance_containment() {
+  local state namespace_pid file pid found=""
+  state=$(run_incus query /1.0/instances/polyseat-canary-cpu/state) || return 1
+  namespace_pid=$(jq -er '(.metadata // .).pid | select(type == "number" and . > 1 and . == floor)' <<< "$state") || return 1
+  # The API returns a PID in the daemon namespace, not a host PID. Resolve it
+  # using only processes in our bounded cgroup tree, then verify subordinate
+  # UID mapping. An escaped/missing process cannot accidentally pass this test.
+  while IFS= read -r -d '' file; do
+    while IFS= read -r pid; do
+      [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/status ]] || continue
+      if awk -v n="$namespace_pid" '$1 == "NSpid:" && NF == 4 && $3 == n && $4 == 1 { ok=1 } END { exit !ok }' \
+        "/proc/$pid/status" 2>/dev/null; then
+        [[ $(< "/proc/$pid/cgroup") == "0::/${CANARY_CGROUP##*/}/daemon/"* ]] || return 1
+        awk '$1 == 0 && $2 >= 100000 && $3 >= 65536 { ok=1 } END { exit !ok }' \
+          "/proc/$pid/uid_map" || return 1
+        found=$pid
+      fi
+    done < "$file"
+  done < <(find "$CANARY_CGROUP/daemon" -xdev -type f -name cgroup.procs -print0)
+  [[ -n $found ]] || { log error "canary: container init is not an unprivileged descendant of the bounded tree"; return 1; }
+  log info "canary instance host_pid=$found namespace_pid=$namespace_pid"
+}
+
+cmd_canary_smoke() (
+  # Subshell keeps the teardown trap local to this single fixed operation.
+  [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 0 ]] || die $EX_BLOCKED "canary-smoke needs a canary build and takes no arguments"
+  require_approval canary-smoke
+  require_no_journal
+  read_pointer
+  [[ -n $PTR_CURRENT && $(current_sha_from_link) == "$PTR_CURRENT" ]] || die $EX_BLOCKED "no active canary bundle"
+  canary_image_verify "$PTR_CURRENT" || die $EX_VERIFY "fixed CPU image or runtime bundle failed verification"
+  CANARY_OPERATION=1
+  trap 'rc=$?; if [[ $CANARY_RUN_OWNED -eq 1 ]]; then svc_stop full || rc=4; fi; exit "$rc"' EXIT
+  svc_start || exit $EX_HEALTH
+  canary_profile_guard || exit $EX_HEALTH
+  log info "canary phase: storage"
+  run_incus storage create default dir "source=$INCUS_DIR/storage-pools/default" || exit $EX_HEALTH
+  run_incus profile device add default root disk path=/ pool=default || exit $EX_HEALTH
+  canary_profile_guard || exit $EX_HEALTH
+  log info "canary phase: import"
+  run_incus image import "$CURRENT/payload/share/canary/busybox.tar.gz" --alias polyseat-canary-busybox || exit $EX_HEALTH
+  run_incus init polyseat-canary-busybox polyseat-canary-cpu --storage default \
+    --config boot.autostart=false --config security.privileged=false --config security.nesting=false || exit $EX_HEALTH
+  canary_profile_guard || exit $EX_HEALTH
+  for phase in start restart; do
+    log info "canary phase: $phase"
+    run_incus start polyseat-canary-cpu || exit $EX_HEALTH
+    canary_instance_containment && canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+    log info "canary phase: exec"
+    run_incus exec polyseat-canary-cpu -- /bin/busybox echo POLYSEAT_CANARY_OK || exit $EX_HEALTH
+    log info "canary phase: stop"
+    run_incus stop polyseat-canary-cpu --force --timeout 5 || exit $EX_HEALTH
+  done
+  log info "canary phase: delete"
+  run_incus delete polyseat-canary-cpu || exit $EX_HEALTH
+  run_incus image delete polyseat-canary-busybox || exit $EX_HEALTH
+  canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+  log info "canary phase: daemon-stop"
+  svc_stop full || exit $EX_HEALTH
+  trap - EXIT
+  printf 'PASS: fresh CPU-only canary lifecycle; state retained, no persistence claim.\n'
+)
 
 # --------------------------------------------------------- transaction ----
 # Only a service that was running is restarted after a switch/restore. Starting an
@@ -1586,6 +2030,7 @@ usage: polyseatctl COMMAND [args]
              list | metrics | logs [controller|incusd] [N] | config-get
  settings:   config-set KEY=VALUE... | config-reset
  service:    start | stop | restart | boot
+ canary:     canary-smoke --approve (fixed local image; one-shot CPU-only run)
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
 EOF
@@ -1614,10 +2059,18 @@ main() {
     metrics) cmd_metrics; return ;;
     logs) cmd_logs "${args[@]}"; return ;;
     config-get) cmd_config_get; return ;;
-    stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot) ;;
+    stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke) ;;
     *) usage ;;
   esac
   require_mutation_allowed "$cmd" "${args[@]}"
+  if [[ $POLYSEAT_RELEASE_GATE == canary && $cmd == stop ]]; then
+    # Emergency stop must not queue behind the operation it is meant to stop.
+    if [[ -d $RUN_DIR && ! -L $RUN_DIR ]]; then
+      printf 'stop requested\n' > "$RUN_DIR/canary-emergency-stop"
+    fi
+    svc_stop full
+    return
+  fi
   ensure_state_dirs
   acquire_lock
   case "$cmd" in
@@ -1630,6 +2083,7 @@ main() {
     boot) cmd_boot ;;
     config-set) cmd_config_set "${args[@]}" ;;
     config-reset) cmd_config_reset ;;
+    canary-smoke) cmd_canary_smoke "${args[@]}" ;;
     start)
       require_no_journal
       read_pointer

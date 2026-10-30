@@ -25,20 +25,25 @@ class CanaryPolicyTests(unittest.TestCase):
         self.dir = Path(self.workspace.name)
         self.profiles = [{"name": "default", "config": {}, "devices": {"root": ROOT}}]
         self.projects = [{"name": "default", "config": {}}]
+        self.server = {"config": {}, "environment": {"server_clustered": False}}
+        self.networks = [{"name": "lo", "managed": False}]
         self.instances = [{
             "type": "container", "name": "polyseat-canary-cpu", "profiles": ["default"],
             "config": {"image.os": "BusyBox", "volatile.uuid": "a"},
             "expanded_config": {"image.os": "BusyBox", "volatile.uuid": "a"},
             "devices": {}, "expanded_devices": {"root": ROOT},
         }]
-        self.pools = [{"name": "default", "driver": "dir"}]
+        self.pools = [{"name": "default", "driver": "dir",
+                       "config": {"source": "/var/lib/polyseat-unraid-canary/incus/storage-pools/default"}}]
 
-    def audit(self, *, projects=None, profiles=None, instances=None, pools=None):
+    def audit(self, *, server=None, projects=None, profiles=None, instances=None, pools=None, networks=None):
         for name, value in (
+            ("server", self.server if server is None else server),
             ("projects", self.projects if projects is None else projects),
             ("profiles", self.profiles if profiles is None else profiles),
             ("instances", self.instances if instances is None else instances),
             ("pools", self.pools if pools is None else pools),
+            ("networks", self.networks if networks is None else networks),
         ):
             (self.dir / f"{name}.json").write_text(json.dumps(value))
         # Source the functions, without evaluating the controller's main().
@@ -46,14 +51,17 @@ class CanaryPolicyTests(unittest.TestCase):
         script = r'''
           source <(sed '$d' "$1")
           POLYSEAT_RELEASE_GATE=canary
+          INCUS_DIR=/var/lib/polyseat-unraid-canary/incus
           # run_incus is invoked with query URI only; the test workspace is
           # exported into a variable instead of being placed on the host.
           run_incus() {
             case "$2" in
+              '/1.0') jq . "$TEST_DIR/server.json" ;;
               '/1.0/projects?recursion=1') jq . "$TEST_DIR/projects.json" ;;
               '/1.0/profiles?recursion=1') jq . "$TEST_DIR/profiles.json" ;;
               '/1.0/instances?recursion=1') jq . "$TEST_DIR/instances.json" ;;
               '/1.0/storage-pools?recursion=1') jq . "$TEST_DIR/pools.json" ;;
+              '/1.0/networks?recursion=1') jq . "$TEST_DIR/networks.json" ;;
               *) return 99 ;;
             esac
           }
@@ -117,6 +125,45 @@ class CanaryPolicyTests(unittest.TestCase):
         self.assertNotEqual(self.audit(pools=[{"name": "default", "driver": "zfs"}]).returncode, 0)
         instances = copy.deepcopy(self.instances)
         instances[0]["expanded_devices"]["root"]["source"] = "/mnt/user"
+        self.assertNotEqual(self.audit(instances=instances).returncode, 0)
+
+    def test_storage_source_cannot_point_to_host_files_or_missing_config(self):
+        for source in ("/", "/mnt/user", "/var/lib/polyseat-unraid-canary/incus/storage-pools/default/../foreign", None):
+            with self.subTest(source=source):
+                pools = copy.deepcopy(self.pools)
+                pools[0]["config"]["source"] = source
+                self.assertNotEqual(self.audit(pools=pools).returncode, 0)
+        pools = copy.deepcopy(self.pools)
+        pools[0]["config"]["volatile.initial_source"] = "/mnt/user"
+        self.assertNotEqual(self.audit(pools=pools).returncode, 0)
+
+    def test_server_listeners_cluster_settings_and_unknown_config_are_refused(self):
+        for key in ("core.https_address", "core.metrics_address", "core.bgp_address", "core.dns_address",
+                    "cluster.https_address", "images.remote_cache_expiry", "future.setting"):
+            with self.subTest(key=key):
+                server = copy.deepcopy(self.server)
+                server["config"][key] = "0.0.0.0:1234"
+                self.assertNotEqual(self.audit(server=server).returncode, 0)
+        self.assertNotEqual(self.audit(server={"environment": {"server_clustered": False}}).returncode, 0)
+        self.assertNotEqual(self.audit(server={"config": {}, "environment": {"server_clustered": True}}).returncode, 0)
+
+    def test_managed_network_and_project_mutation_are_refused(self):
+        self.assertNotEqual(self.audit(networks=[{"name": "incusbr0", "managed": True}]).returncode, 0)
+        self.assertNotEqual(self.audit(projects=[{"name": "default", "config": {"restricted": "false"}}]).returncode, 0)
+        self.assertEqual(self.audit(projects=[{"name": "default", "config": {"features.images": "true"}}]).returncode, 0)
+
+    def test_canary_explicit_unprivileged_and_no_autostart_are_allowed(self):
+        instances = copy.deepcopy(self.instances)
+        for key in ("boot.autostart", "security.privileged", "security.nesting"):
+            instances[0]["config"][key] = "false"
+            instances[0]["expanded_config"][key] = "false"
+        self.assertEqual(self.audit(instances=instances).returncode, 0)
+        instances[0]["config"]["boot.autostart"] = "true"
+        self.assertNotEqual(self.audit(instances=instances).returncode, 0)
+
+    def test_unknown_volatile_settings_are_not_an_escape_hatch(self):
+        instances = copy.deepcopy(self.instances)
+        instances[0]["config"]["volatile.future.raw"] = "unsafe"
         self.assertNotEqual(self.audit(instances=instances).returncode, 0)
 
     def test_malformed_query_or_missing_data_fail_closed(self):
@@ -231,7 +278,32 @@ class CanaryApprovalTests(unittest.TestCase):
         self.assertEqual(self.check("update", self.archive).returncode, 2)
         self.assertEqual(self.check("config-set", "SERVICE=enabled").returncode, 2)
         self.assertEqual(self.check("config-set", "DATA_DIR=/mnt/user/bad").returncode, 2)
-        self.assertEqual(self.check("config-set", "DATA_DIR=/mnt/cache/appdata/polyseat-canary").returncode, 0)
+        self.assertEqual(self.check("config-set", "DATA_DIR=/mnt/cache/appdata/polyseat-canary").returncode, 2)
+        self.assertEqual(self.check("config-set", "DATA_DIR=/var/lib/polyseat-unraid-canary").returncode, 0)
+
+    def test_restart_and_boot_cannot_be_authorized(self):
+        for action in ("restart", "boot", "update", "rollback"):
+            with self.subTest(action=action):
+                self.token["actions"] = [action]
+                self.sign()
+                self.assertEqual(self.check(action).returncode, 2)
+
+    def test_configuration_cannot_weaken_limits_or_mapping(self):
+        self.sign()
+        for setting in ("HEALTH_TIMEOUT=300", "SUBID_START=0", "SUBID_COUNT=4294967295"):
+            self.assertEqual(self.check("config-set", setting).returncode, 2)
+
+    def test_canary_smoke_action_is_signed_and_fixed_bundle_bound(self):
+        self.token["actions"] = ["canary-smoke"]
+        self.sign()
+        state = self.flash / "state"
+        state.mkdir()
+        pointer = state / "pointer.json"
+        pointer.write_text(json.dumps({"current": self.sha, "previous": None}))
+        pointer.chmod(0o600)
+        self.assertEqual(self.check("canary-smoke").returncode, 0)
+        pointer.write_text(json.dumps({"current": "f" * 64, "previous": None}))
+        self.assertEqual(self.check("canary-smoke").returncode, 2)
 
 
 if __name__ == "__main__":

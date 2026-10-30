@@ -18,6 +18,8 @@ source <(sed '$d' "$ctl")
 [[ $POLYSEAT_RELEASE_GATE == closed ]] || fail 'committed controller gate was changed'
 POLYSEAT_RELEASE_GATE=canary
 CANARY_CGROUP="/sys/fs/cgroup/polyseat-unraid-canary-ci-$GITHUB_RUN_ID"
+# shellcheck disable=SC2034  # consumed by the sourced controller functions
+CANARY_WATCHDOG_CGROUP="/sys/fs/cgroup/polyseat-unraid-canary-watchdog-ci-$GITHUB_RUN_ID"
 CANARY_HOST_CPUSET=$(< /sys/fs/cgroup/cpuset.cpus.effective)
 CANARY_CPUSET=${CANARY_HOST_CPUSET%%,*}
 CANARY_CPUSET=${CANARY_CPUSET%%-*}
@@ -33,11 +35,14 @@ canary_cgroup_prepare || fail 'refused to prepare bounded cgroup'
 canary_cgroup_check || fail 'initial cgroup limits invalid'
 sleep 30 &
 child=$!
-printf '%s\n' "$child" > "$CANARY_CGROUP/cgroup.procs"
+printf '%s\n' "$child" > "$CANARY_CGROUP/daemon/cgroup.procs"
 grep -q "/polyseat-unraid-canary-ci-$GITHUB_RUN_ID" "/proc/$child/cgroup" ||
   fail 'child process did not enter cgroup'
 [[ $(< "$CANARY_CGROUP/cpuset.cpus.effective") == "$CANARY_CPUSET" ]] ||
   fail 'effective CPU set is not the bounded CPU'
+[[ -z $(< "$CANARY_CGROUP/cgroup.subtree_control") &&
+   -z $(< "$CANARY_CGROUP/daemon/cgroup.controllers") ]] ||
+  fail 'canary daemon leaf must not delegate controllers (aggregate limits remain at parent)'
 printf '1\n' > "$CANARY_CGROUP/cgroup.kill"
 wait "$child" 2>/dev/null || true
 [[ $(< "$CANARY_CGROUP/cgroup.events") == *'populated 0'* ]] ||

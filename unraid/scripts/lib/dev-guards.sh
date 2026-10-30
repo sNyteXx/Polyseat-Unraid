@@ -59,21 +59,27 @@ dev_load_pins() { # file
     key=${line%%=*}
     val=${line#*=}
     case "$key" in
-      INCUS_COMMIT | RAFT_COMMIT | COWSQL_COMMIT | LXC_COMMIT)
+      INCUS_COMMIT | INCUS_TAG_OBJECT | RAFT_COMMIT | COWSQL_COMMIT | LXC_COMMIT)
         printf '%s' "$val" | grep -Eq '^[0-9a-f]{40}$' || dev_die "$key must be a full lowercase 40-character SHA" ;;
-      GO_LINUX_AMD64_SHA256)
+      GO_LINUX_AMD64_SHA256 | BUSYBOX_DEB_SHA256 | BUSYBOX_BINARY_SHA256)
         printf '%s' "$val" | grep -Eq '^[0-9a-f]{64}$' || dev_die "$key must be a 64-character SHA-256" ;;
       BUILDER_BASE_IMAGE)
         printf '%s' "$val" | grep -Eq '^[a-z0-9./:_-]+@sha256:[0-9a-f]{64}$' || dev_die 'BUILDER_BASE_IMAGE must be pinned by digest' ;;
-      INCUS_RELEASE | LXC_RELEASE | RAFT_RELEASE | COWSQL_RELEASE | GO_VERSION) ;;
+      INCUS_RELEASE | LXC_RELEASE | RAFT_RELEASE | COWSQL_RELEASE | GO_VERSION | BUSYBOX_VERSION | BUSYBOX_DEB_VERSION) ;;
+      BUSYBOX_DEB_URL)
+        case "$val" in
+          https://security.ubuntu.com/ubuntu/pool/main/b/busybox/busybox-static_*_amd64.deb) ;;
+          *) dev_die 'BUSYBOX_DEB_URL must be the official Ubuntu amd64 busybox-static package' ;;
+        esac ;;
       *) dev_die "unknown pin key: $key" ;;
     esac
     eval "$key=\$val"
     # shellcheck disable=SC2163  # exporting the variable named by $key is intended
     export "$key"
   done < "$1"
-  for need in INCUS_COMMIT INCUS_RELEASE RAFT_COMMIT COWSQL_COMMIT LXC_COMMIT LXC_RELEASE GO_VERSION \
-              GO_LINUX_AMD64_SHA256 BUILDER_BASE_IMAGE; do
+  for need in INCUS_COMMIT INCUS_RELEASE INCUS_TAG_OBJECT RAFT_COMMIT COWSQL_COMMIT LXC_COMMIT LXC_RELEASE GO_VERSION \
+              GO_LINUX_AMD64_SHA256 BUILDER_BASE_IMAGE BUSYBOX_VERSION BUSYBOX_DEB_VERSION BUSYBOX_DEB_URL \
+              BUSYBOX_DEB_SHA256 BUSYBOX_BINARY_SHA256; do
     eval "[ -n \"\${$need:-}\" ]" || dev_die "pin missing: $need"
   done
 }

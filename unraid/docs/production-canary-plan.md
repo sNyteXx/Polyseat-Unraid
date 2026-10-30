@@ -1,178 +1,174 @@
-# 🚧 WIP — DO NOT USE — Minimal-invasive CPU-only canary on the production Unraid (PLAN ONLY)
+# WIP — First native CPU-only Unraid canary (preparation, not permission to start)
 
-**Status: target decision, not an approval.** On 2026-10-30 the owner decided that the first small CPU-only compatibility
-test should run on the production Tower instead of a separate test machine. Nothing in this document authorizes any
-change. The Tower stays strictly read-only until the owner approves **exactly the actions** listed in the Go/No-Go report
-(see "Approval protocol"). `polyseat-unraid.plg.disabled` stays inert; there is no installable `.plg`. A canary is not a
-production release.
+The owner chose production Tower for the first **small, supervised compatibility test** after Ubuntu/CI evidence.
+This document defines that test; it does not authorize a write, installation, daemon start or reboot.
+The repository controller remains `closed`, the ordinary package builder remains `closed|test-host`,
+and `polyseat-unraid.plg.disabled` remains inert. A separately assembled, hash-bound canary kit is not a release.
 
-Inventory facts below come from read-only SSH on 2026-10-30 (details in
-[host-inventory-unraid-7.3.3.md](host-inventory-unraid-7.3.3.md)).
+## 1. One deliberately small test
 
-## 1. What the canary is
+The first test proves only:
 
-One signed bundle (Incus 7.5.1 + LXC 6.0.6, no AppArmor/SELinux support, no GPU, no VM driver use), one unprivileged
-BusyBox container with a disk-only profile (no NIC, no device), a daemon with a private root-only socket and no network
-listener, started and stopped by `polyseatctl` for a bounded window, then uninstalled with `DATA_DIR` removed by the owner.
+1. The signed native Incus/LXC userspace passes the recorded Tower ABI check.
+2. The controller starts a fresh daemon with aggregate CPU/RAM/PID limits.
+3. It imports the exact bundled, pinned BusyBox image, creates **one unprivileged disk-only container**,
+   starts it, executes a fixed command, stops/restarts it, then removes the test instance and stops the daemon.
+4. The lifetime supervisor and emergency stop work and the recorded host state is unchanged afterward.
 
-Not part of the canary, ever: GPU, PCI/USB devices, VMs, networks or bridges, Docker, libvirt, shares, users, services.
+There is **no GPU, PCI/USB passthrough, VM, NIC, bridge, external image download, game, host share or user workload**.
+There is no automatic boot start and no open-ended access to the Incus CLI. The controller owns the fixed test sequence.
 
-## 2. Pre-conditions that must be closed first (all fail-closed and verifiable)
+**Not in this first production test:** plugin-manager installation/boot integration, persistent ZFS storage, updates,
+rollback fault injection, reboot, multi-seat streaming or gaming. Update/recovery/rollback tests stay on disposable CI.
+A later test must separately establish ZFS persistence and full plugin lifecycle behaviour.
 
-| # | Condition | Status |
+## 2. Why the first data directory is in RAM
+
+Read-only Tower inspection on 2026-10-30 established:
+
+| Path | Owner / mode | Consequence |
 |---|---|---|
-| P1 | Signed bundle: a maintainer-held release key signs the manifest of the exact CI artifact; key policy in [signing-key-policy.md](signing-key-policy.md); `allowed_signers` pinned; revocation list supported and tested | policy + revocation implemented; **no release key created, nothing signed** |
-| P2 | Provenance: bundle SHA-256 = CI artifact = local rebuild comparison documented; commit SHA, pins, run URL in `TEST-REPORT.md` | Local cold/warm dev bundles at `2e2c94f` have identical SHA-256 (`3e972d5b…`); independent CI/release-artifact comparison **open** (dev differs by design) |
-| P3 | Runtime SBOM + dependency review: `SBOM-runtime.cdx.json`, OSV lookup, `govulncheck` binary mode, human triage of every advisory | SBOM + OSV report implemented; **triage open**, see [security-analysis.md](security-analysis.md) |
-| P4 | Resource confinement: the daemon and all containers run inside a dedicated cgroup v2 subtree with `memory.max`, `cpu.max`, `pids.max`, `cpuset` on E-cores only, plus `cgroup.kill` as hard stop | **WIP controller implementation:** fixed 512 MiB, 0 swap, 0.1 CPU, E-cores 24–27, 256 PIDs and `nice 19`; checks inherited controllers without modifying the shared root; fail-closed watchdog. Disposable CI cgroup exercise added; **green CI and Unraid proof still required**. |
-| P5 | Gate `canary`: a third release-gate value that needs a **signed, time-limited, bundle-bound approval file** on the flash; `test-host` (disposable marker) must not be reusable on production | **WIP validator implemented, offline tests pass.** Separate Ed25519 approval identity and namespace, host SHA, exact archive SHA, 30-minute TTL, action allowlist, revocation check. Emergency stop/uninstall/recover remains possible after expiry. **No release approval key or canary package exists.** |
-| P6 | Profile policy: the controller refuses any profile or instance device except `disk root` (no `gpu`, `pci`, `nic`, `usb`, `unix-*`), because Incus calls `modprobe` (e.g. `vfio-pci`) only for such devices, QEMU VMs and `linux.kernel_modules` | **WIP runtime audit implemented**: the sole project must be `default` (otherwise other projects bypass the default-project API checks), with the exact `default` disk-only profile, at most one `polyseat-canary-cpu` container, `dir` pool, no privileged/raw/kernel settings or other devices. Offline attack-case tests pass. **A pre-start policy and unbypassable instance command path are not yet proven**; privileged root clients can mutate Incus between audits. |
-| P7 | Host-state diff proven in CI: modules, netfilter, sysctls, addresses, listeners, mounts, top-level cgroups before/after a full run | **CI passed at `2e2c94f`**; nftables rules are compared without volatile packet counters, actual firewall-rule and sysctl changes still fail; Unraid-specific behaviour untested |
-| P8 | Controller package built with the canary gate and signed; PLG template rendered by a separately approved release job | **not done** |
-| P9 | A dry run of the whole procedure on a Linux VM/CI with identical commands | CI e2e covers the controller; the **Unraid-specific steps are untested** |
+| `/`, `/var`, `/var/lib` | root:root, 0755 | suitable protected parent chain |
+| `/mnt/cache`, `/mnt/cache/appdata` | uid 99 / gid 100, 0777 | not a protected ancestor chain for privileged runtime state |
+| `/var/lib/polyseat-unraid-canary` | absent | reserved, fresh test-only directory |
 
-## 3. Read-only preflight (safe to run any time; already partly done)
+The canary uses **exactly `/var/lib/polyseat-unraid-canary`** on the existing Unraid RAM-root.
+It does not chmod existing shares, create a dataset, change quotas or add a host mount.
+Pre-existing Incus state is refused before start rather than trusted or automatically deleted.
+No existing seat/game/configuration can be imported into this test.
 
-`ssh tower 'sh -s' < unraid/scripts/preflight.sh` and `polyseatctl preflight` print facts only and write nothing on the
-host. Required result before a Go: Unraid ≥ 7.2 (found 7.3.3), kernel ≥ 6.12 (6.18.54), cgroup2 unified with
-`cpuset cpu io memory hugetlb pids` (found), `max_user_namespaces` > 0 (320422), seccomp (kernel interface present),
-no foreign `incusd`, `/dev/net/tun` irrelevant (no NIC), pools `ONLINE`, array started, no parity check or rebuild
-running, no mover/backup job running, `MemAvailable` ≥ 6 GiB, load average (5 min) ≤ 8, `cache` ≥ 20 GiB free.
+This is intentionally **not a ZFS or persistence test**. RAM-root storage has no separate hard disk quota:
+fixed authenticated inputs and a fixed command sequence bound expected growth, while the supervisor monitors
+a 256 MiB data threshold and a 16 MiB log threshold. These are abort thresholds, not filesystem quotas.
+Preparation/unpacking outside the workload cgroup also consumes host RAM and is included in preflight headroom.
 
-## 4. Impact list (everything a canary run would touch)
+## 3. Technical gates before the first test
 
-**Flash `/boot/config/plugins/polyseat-unraid/`** (ZFS flash here, 12 GB free; vfat on other systems):
-`polyseat-unraid.cfg`(+`.bak`), `allowed_signers`, `revoked_keys`, `bundles/<sha>.{tar.gz,manifest.json,manifest.json.sig}`
-(~60 MB), `state/{pointer,journal}.json`, `pkg/*.txz` (34 KB), the canary approval file. Nothing else on the flash;
-`/boot/config/go`, `domain.cfg`, `docker.cfg`, other plugins are not touched.
+The corresponding CI output, source commit, origin run, signatures and hashes belong in the generated kit/evidence.
+A green generic workflow alone does not satisfy this table.
 
-**RAM root (lost at reboot, counts against memory, ≈ 130 MB per slot, 2 slots ≈ 260 MB):**
-`/usr/local/polyseat-unraid/`, `/usr/local/emhttp/plugins/polyseat-unraid/` (installpkg), `/usr/local/sbin/polyseatctl`
-(symlink), `/var/run/polyseat-unraid/`, `/var/log/polyseat-unraid/` (≤ 1 MB + rotation; `/var/log` tmpfs is 128 MB),
-`/var/lib/polyseat-lxc/rootfs` (0755, empty mount point), `/etc/subuid` and `/etc/subgid` (managed block, currently
-empty files; no overlap with any other owner).
-
-**Persistent data:** `DATA_DIR` = a new directory under `/mnt/cache/appdata/` (ZFS, no new dataset, no quota change).
-Budget ≤ 1 GiB: Incus database, dir storage pool, one BusyBox container (~5 MB). The Unraid appdata backup will include it.
-
-**Processes/sockets/cgroups:** `incusd` (+ `incusd forklxc/forkexec` helpers per container), one container init; a unix
-socket in `DATA_DIR/incus` (root only), **no TCP listener** (health check fails on any `core.https_address`); a new cgroup
-subtree (P4). No Docker/libvirt interaction. The `cgroup2-unraid` daemon removes empty cgroups; its effect on the subtree is
-**untested** (abort criterion).
-
-**Kernel/network:** no module is loaded by a disk-only container workload (pinned-source review; to be proven by the CI
-host-state diff); no bridge, veth, route, sysctl or netfilter change; Incus only *detects* firewall tools. Incus' VM driver
-sees `qemu-system-x86_64` on the host but is never used.
-
-**Not touched:** GamingVM (CPUs 2–15, RTX 5070 Ti + NVMe + USB controller on `vfio-pci`), UbuntuServer VM, CachyOS VM,
-the 32 Docker containers, libvirt, `br0`/`docker0`/`virbr0`, WireGuard/Tailscale, shares, array, pools.
-
-## 5. Budget and caps
-
-| Resource | Budget | Why |
-|---|---|---|
-| RAM | daemon+container cgroup `memory.max` 512 MiB, `memory.swap.max` 0; RAM root 260 MB | `MemAvailable` was 7.7 GiB, no swap; ARC 5.3 of 10 GiB; the 36 GiB VM could be an OOM victim |
-| CPU | `cpuset` 24–27 (E-cores), `cpu.max` 100000 1000000 (10 % of one core ≈ 0.1 CPU), nice 19 | GamingVM uses 2–15 + emulator 0–1; UbuntuServer is unpinned over 0–27 |
-| Disk | DATA_DIR ≤ 1 GiB, flash ≤ 200 MB | 272 GiB free on `cache`, 12 GiB on flash |
-| Time | maintenance window ≤ 30 min, all commands wrapped in `timeout` | |
-| Processes | `pids.max` 256 | |
-
-## 6. Hard abort criteria (any one: stop, run the rollback, report; do not retry)
-
-1. Before start: any preflight value out of range in §3, a snapshot/backup job running, GamingVM or another VM not in its normal state.
-2. During: `MemAvailable` < 4 GiB, load (1 min) > 14, any `vfio`, `nvidia`, `zfs`, `oom`, `Out of memory`, `BUG`, `Call Trace`
-   or `cgroup` error in `dmesg` that was not present before, any change in the set of running Docker containers or libvirt
-   domains, any difference in `ip -br link`, `iptables-save`, listening ports, or loaded modules, pool not `ONLINE`.
-3. Controller/Incus: health not reached in 60 s, journal pending, signature/revocation/ABI/LSM gate refusal, `cgroup2-unraid`
-   removing a subtree directory under a running container, any unexpected exit code.
-4. Owner decision, or loss of the independent access path (§8).
-
-## 7. Backup status found by read-only verification (the flash backup alone is not enough)
-
-| Asset | Covered? | Evidence / gap |
-|---|---|---|
-| Flash (`/boot`) | **Yes**, daily | dataset `backupssd/backup_unraid/flash`, 6 snapshots, newest 2026-10-30 02:12; contains `config` incl. keys and VM XML backups. Restore never tested. |
-| Appdata | **Yes**, daily | `backup_unraid/cache/appdata` (308 GB), 7 snapshots, newest 2026-10-30 02:02 |
-| libvirt config (`libvirt.img`, VM definitions) | **Yes**, daily copy | `system/libvirt/libvirt.img` (1 GiB) present in the 2026-10-30 event snapshot |
-| UbuntuServer vdisk (300 GB, running VM) | **Crash-consistent copy** | `vm/UbuntuServer/vdisk1.img` copied 2026-10-30 02:02 while the VM runs |
-| **GamingVM storage** | **NO** | the VM has no file disk: a whole NVMe (WD SN810/SN850) and a USB controller are passed through (`vfio-pci`); nothing backs up that NVMe |
-| CachyOS VM (stopped) | **NO** | uses raw `/dev/sdf` (931 GB SSD) |
-| Docker "snapshots" | **Not backups** | `cache/docker/<hash>@…` are the ZFS storage driver's layer snapshots; container *data* lives in appdata (covered). Image layers (45 GB) are re-pullable, not backed up |
-| Array shares (~40 TB used) | **Not seen** | `backupssd` is 928 GB; parity status was not checked |
-| Restorability of any of the above | **Unverified** | no restore test was performed or is possible read-only |
-
-Optional extra safeguards before a canary (each is a host action needing approval, none done): a manual ZFS snapshot of
-`cache/appdata` right before the window; confirmation of the last parity check; an image of the GamingVM NVMe if the owner
-wants insurance against *any* host incident (the canary does not touch it). The owner must also confirm that the flash
-backup restores to a bootable stick.
-
-## 8. Independent access and maintenance window (to be confirmed by the owner)
-
-Known: SSH from the workstation works. **Unknown and required before a Go:** a second access path that survives an
-SSH/network hang (local console, IPMI/AMT, physical access), who is present, the length of the window, and a pause of
-backup jobs and Docker auto-updates during it. Without an independent path the answer is No-Go.
-
-## 9. Rollback
-
-Normal: `polyseatctl stop` (graceful instance shutdown, then SIGTERM, then verified SIGKILL), `polyseatctl uninstall
---approve` (exact manifest-listed files, managed subuid block, `rmdir` of the mount point; settings and data kept),
-`removepkg` of the exact package, owner deletes `DATA_DIR`. Then compare the host state with the baseline captured before.
-
-Hang: every step runs under `timeout`; the cgroup subtree is emptied with `cgroup.kill` (P4); `polyseatctl recover --approve`
-restores the previous bundle after an interrupted transaction; the controller's journal makes a second invocation safe.
-
-Persistence: the canary only writes RAM files, the plugin directory on the flash and `DATA_DIR`. A reboot clears the RAM
-part; the flash part is removed by uninstall or restored from the flash backup. **A reboot of the Tower is a last resort**
-because it stops every VM and container and needs an explicit owner decision.
-
-**Untested on Unraid:** all of the above, the Unraid plugin manager and `.plg` flow, `cgroup2-unraid` interplay,
-idmapped mounts on ZFS, `installpkg` of the package, boot ordering, vfat flash behaviour, `cgroup.kill` on this kernel.
-
-## 10. Approval protocol
-
-1. Close P1–P9 and attach evidence to the Go/No-Go report.
-2. The report lists every first write action by exact command, path and effect (see the template below).
-3. **Wait for the owner's explicit approval of exactly those actions.** No earlier prompt, build permission or plan counts as
-   approval. Any deviation, extra package, service change, Incus start or test container needs a new approval.
-4. Discard the test or choose a safer alternative (CI-only evidence, or a separate machine) whenever a risk to the
-   GamingVM/RTX 5070 Ti, Docker, libvirt, network, data or array cannot be excluded.
-
-### Implemented canary approval format (design; not issued)
-
-When a separately approved release package eventually sets `POLYSEAT_RELEASE_GATE="canary"`, the controller requires
-`/boot/config/plugins/polyseat-unraid/canary-approval.json`, its detached `.sig`, and a dedicated
-`canary_allowed_signers` file for the identity `polyseat-unraid-canary-approver` in SSH signing namespace
-`polyseat-unraid-canary-approval-v1`. The `allowed_signers` for *runtime bundles* is intentionally independent.
-
-The signed JSON must contain **exactly** `schema: 1`, `host_sha256` (SHA-256 of normalized DMI `product_uuid`),
-`archive_sha256` (the exact approved bundle), integer `issued_at`/`expires_at` (UTC epoch seconds; max 1800 seconds),
-and an explicit unique `actions` list. Allowed actions are `stage`, `activate`, `start`, `restart`, `boot`,
-`config-set`, `config-reset`; only those listed in the *signed* document are accepted. `update` and `rollback`
-are not authorized in the one-bundle canary; tear-down actions remain available for safety. The test data
-directory must be exactly `/mnt/cache/appdata/polyseat-canary`, and automatic service enabling is refused.
-
-`canary-approval.json`/`.sig` must be regular owner-private files on filesystems with Unix permissions; the approval
-key must be held **outside GitHub/CI**. A temporary signing key generated by tests is not a release key. The
-controller source **remains committed as `closed`**; ordinary build jobs can render only `closed`/`test-host`,
-and the `.plg.disabled` stays inert. No signed approval, signer allowlist, canary build or host installation
-has been created.
-
-### Go/No-Go report template (to be issued before the very first write action)
-
-| Section | Content |
+| Gate | Required evidence |
 |---|---|
-| Artifact | commit SHA, run URL, bundle SHA-256, package SHA-256, signature fingerprint, SBOM, triage result |
-| Evidence | CI e2e result, host-state diff, P1–P9 status with links |
-| Window | date, duration, who is present, independent access path, paused jobs |
-| Backups | which of §7 are fresh, extra snapshots taken (each approved) |
-| Exact actions | numbered list: command, path, effect, rollback for each |
-| Budget/aborts | §5/§6 values confirmed against the live preflight |
-| Decision | GO / NO-GO by the owner, timestamp |
+| Inputs | Exact Incus commit and annotated release tag, explicit checksum-pinned dependency overlay, pinned C sources, Go toolchain, pinned Ubuntu BusyBox DEB and binary hashes |
+| Inventory and security | Runtime SBOM for **both** shipped Go binaries, host ABI closure, working OSV and govulncheck reports, individual disposition of remaining findings; scanner errors fail |
+| Provenance | Origin CI run and commit, exact archive/controller/manifest hashes; local-vs-CI comparison reports real differences instead of claiming unequal builds identical |
+| Signed kit | Exact source-derived canary controller, runtime, BusyBox image, plan and evidence file set; external pinned signer fingerprint; revocation checked; no live approval included |
+| Fresh state | Protected parent chain, private root socket, fresh one-shot Incus database; no startup of an old instance database |
+| Fixed policy | Sole default project/profile, dir pool under the private test data directory, one allowed unprivileged container; no raw settings, extra devices or network/metrics/BGP/DNS listeners |
+| Resource boundary | Aggregate 512 MiB/no swap, 0.1 CPU, E-cores 24–27, 256 PIDs; real Incus and LXC processes stay under the boundary |
+| Lifetime | Independent bounded supervisor active before daemon startup; wall/monotonic lifetime; emergency cgroup kill available without a responsive Incus API |
+| Exact Linux rehearsal | Real **canary-gate** lifecycle, containment, expiry/teardown and termination after loss of the supervisor on a disposable GitHub-hosted Linux runner, not just a mock or the broader test-host controller |
+| Host state | Before/after kernel modules, network links/addresses, TCP **and UDP** listeners, firewall rules (excluding counters), selected sysctls, mounts and top-level cgroups; unexpected persistent changes fail |
+| Live read-only preflight | Actual Tower resources, tools, fresh paths, VM/Docker state and absence of conflicting maintenance jobs |
 
-## 11. Current assessment
+### What is not a circular prerequisite
 
-**No-Go today.** P1 (no signed release bundle), P2/P3 supply-chain evidence, the CI/Unraid-specific validations
-for P4–P6, P8 and independent-access confirmation remain open. In particular a *post-start* profile check is
-not a security boundary against root-level Incus API clients. The §7 gaps (GamingVM NVMe, array, restore tests)
-require an explicit risk decision by the owner. Next: green full CI and cgroup proof; harden the pre-start
-instance policy and restrict canary commands; then signing ceremony, dry-run and a fresh Go/No-Go report.
+Success of the first native container on Unraid, interaction with `cgroup2-unraid`, Unraid RAM-root/idmapping behaviour
+and target-kernel behaviour are **test objectives**, not facts that can be proven before that first test.
+They remain explicit risks and abort conditions. Full PLG/boot/ZFS behaviour is outside this first test.
+
+### What the local build means
+
+UbuntuDev is for fast compiler, dependency, scanner and offline-test feedback using the same pinned build core.
+Local-dev artifacts remain labelled local-dev and are not silently relabelled as approved CI artifacts.
+A same-source local build may have different ELF bytes because of toolchain paths and build flags.
+Those differences must be recorded honestly; signing always binds the **exact chosen candidate bytes**.
+
+## 4. Resource and host guardrails
+
+| Resource | Limit / condition |
+|---|---|
+| Workload memory | `memory.max=536870912`, `memory.swap.max=0` |
+| Workload CPU | `cpu.max=100000 1000000`, cpuset 24–27, nice 19 |
+| Workload tasks | `pids.max=256` |
+| Supervisor | Separate small bounded cgroup, outside the workload OOM domain; exact values in rendered controller |
+| RAM-root data / logs | Monitored abort thresholds 256 MiB / 16 MiB, not claimed as hard quotas |
+| Approval lifetime | At most 1800 seconds; issued only for the actual owner-approved window |
+| Before start | MemAvailable at least 6 GiB, 5-minute load at most 8, no conflicting maintenance job |
+| During test | Abort if MemAvailable below 4 GiB, 1-minute load above 14, unexpected host/service/kernel change |
+
+The host's shared cgroup controllers are inspected, never enabled/reconfigured by the canary.
+LXC's root-container default can otherwise escape the daemon's current cgroup: daemon inheritance by itself is insufficient.
+The confined launcher therefore needs its reviewed private namespaces and a real CI containment check.
+Private namespace mounts must not become host-global mounts.
+
+The absence of AppArmor/SELinux on Tower is not hidden: user namespaces, seccomp, capabilities and cgroups reduce exposure
+but this is still experimental root-operated software. A malicious host root can bypass a root-owned controller;
+the policy is not advertised as a security boundary against an already compromised administrator.
+
+## 5. Exact first-write scope
+
+The final Go report must use the kit's actual hashes, signer fingerprints and commands, not placeholders.
+Preparation may build, inspect and sign files on the development machine; Tower remains read-only until that report is approved.
+
+| Area | Allowed first-test effect | Explicitly excluded |
+|---|---|---|
+| Flash plugin directory | Exact hash-addressed bundle, signed manifests, pinned public signers, private configuration/transaction state and current approval | Changes to `config/go`, Docker/libvirt settings, other plugins or license |
+| RAM runtime/controller | Exact manifest-owned files under Polyseat runtime/controller paths; no general plugin auto-install | Broad library replacement, system package update, autostart |
+| Private test data | Fresh `/var/lib/polyseat-unraid-canary` only | `/mnt/user`, cache/appdata shares, existing Incus databases, games or seats |
+| Runtime bookkeeping | Private pid/log/socket files, reviewed plugin-only cgroups, empty `/var/lib/polyseat-lxc/rootfs` mountpoint, exact managed subuid/subgid block if required | Existing user mappings, host namespace mounts, foreign cgroups |
+| Processes | One daemon, fixed BusyBox instance, lifetime supervisor, controller helpers | Docker/libvirt/GOW control, VMs, GPU/NVMe/USB or host kernel-module changes |
+
+The final package/plan file set determines the exact installation/removal mechanics.
+The first test does **not** require installing an auto-starting `.plg`, running `upgradepkg` broadly, or exposing the WebUI.
+The controller and its matching `schema.json` may run from the verified package in a private temporary directory,
+without installing any WebUI or event hook. The minimum sequence is `stage ... --approve`,
+`activate SHA --approve`, `verify`, then `canary-smoke --approve`. A separate `start` is unnecessary:
+the fixed smoke action includes daemon startup and teardown. Activation already runs each native binary with
+`--version` under a 15-second command timeout; it is the first native execution and must be included in the approved
+action list even though it does not start a daemon. This short version probe is outside the daemon cgroup.
+Do not set `ACCEPT_NO_LSM=yes` on Tower merely because the Ubuntu CI fixture needs it; the normal fail-closed
+LSM default remains in effect and the live read-only preflight must confirm the actual target state.
+
+## 6. Signing and approval are different
+
+The canary-only artifact identity signs the exact runtime and test-kit manifests.
+A **separate approval identity** signs a short-lived action list bound to the normalized Tower DMI UUID hash and exact archive SHA-256.
+
+The approval namespace is `polyseat-unraid-canary-approval-v1`; identity is `polyseat-unraid-canary-approver`.
+Approval JSON contains exactly `schema`, `host_sha256`, `archive_sha256`, `issued_at`, `expires_at`, `actions`.
+Only the controller's narrow canary actions may be approved. Boot, service enablement, update and rollback are not part of this run.
+Emergency stop/uninstall/recover remains possible after expiry; expiry cannot prevent cleanup.
+
+Private keys never go into Git, CI artifacts, the kit, tool output or Tower.
+A software canary-only key on the owner's development machine is weaker than hardware/separate-user custody:
+a build process compromised under the same UID could read it. That tradeoff and the public fingerprints must be explicitly
+accepted in the final Go. Test-generated CI keys are never production signers. See [signing-key-policy.md](signing-key-policy.md).
+
+## 7. Abort and return path
+
+Abort on any failed signature, revocation, ABI/policy/path/resource check; an existing daemon/database; failed health;
+unexpected container behaviour; loss of the supervisor; expiry; or a new kernel/VM/Docker/network anomaly.
+Do not automatically weaken a limit, broaden a capability, touch another service or retry on production.
+
+Normal stop terminates the single instance and daemon. Emergency stop kills only the validated canary workload cgroup.
+Cleanup removes only recorded plugin-owned files and empty owned cgroup/mountpoint directories; configuration/data are
+kept unless the exact test-owned removal is separately listed in the approved plan. Compare host state afterward.
+A failed cleanup is a reported blocker, not permission for a recursive delete or a server reboot.
+
+A Tower reboot is outside the canary scope and always needs a separate owner decision.
+
+## 8. Operational owner decisions immediately before the test
+
+- Confirm the window and an independent recovery path (physical console or equivalent); SSH alone does not survive a host hang.
+- Accept the exact candidate, public signer fingerprints, action list, resource limits and experimental-host risk.
+- Confirm no concurrent mover, backup, parity/rebuild or auto-update job will conflict.
+- Recheck the relevant backups without implying that they cover every disk or have been restore-tested.
+
+Read-only inventory found flash/appdata backups and libvirt configuration copies. The running Ubuntu VM copy is only
+crash-consistent. GamingVM's raw passed-through NVMe and the raw CachyOS disk were **not** covered by those copies.
+Docker ZFS layer snapshots are not themselves a backup of application data. Restorability was not tested.
+This does not require backing up all array data merely to prepare a tiny test; it does require an honest risk decision.
+The canary never intentionally opens or modifies those VM disks.
+
+## 9. Handoff / Go report
+
+The generated candidate must include:
+
+- Exact repository commit, CI run, archive/package/controller/BusyBox hashes, pinned signer fingerprints and expiry.
+- Results of offline tests, generic lifecycle CI, exact canary rehearsal and security triage.
+- Exact numbered first-write commands, affected paths, measured budgets, stop and rollback commands.
+- Fresh read-only Tower findings and the remaining owner-only decisions in section 8.
+
+**Stop before the first Tower write.** The next action after a completed technical preparation is the owner's approval
+of that concrete run, not another speculative implementation phase or an unannounced production test.

@@ -30,6 +30,35 @@ def code_lines(path: Path) -> list[str]:
             if line.strip() and not line.lstrip().startswith("#")]
 
 
+CANARY_NAMESPACE_LINES = (
+    "unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private \\",
+    "mount -t proc -o nosuid,nodev,noexec proc /proc || exit 1",
+    "mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup || exit 1",
+)
+
+
+def reviewed_canary_namespace_line(function: str, line: str, body: str) -> bool:
+    """Only the reviewed private PID/mount/cgroup launcher may mount these two pseudo-filesystems.
+
+    This is intentionally not a global exemption for mount flags or the canary
+    function: targets, options, namespace isolation and command order are exact.
+    """
+    if function != "canary_launch" or line.strip() not in CANARY_NAMESPACE_LINES:
+        return False
+    wrapper = (
+        "setpriv --bounding-set=-sys_module,-sys_rawio \\",
+        CANARY_NAMESPACE_LINES[0],
+        "bash -u -o pipefail -c '",
+        CANARY_NAMESPACE_LINES[1],
+        CANARY_NAMESPACE_LINES[2],
+    )
+    active = [item.strip() for item in body.splitlines() if item.strip() and not item.lstrip().startswith("#")]
+    if any(active.count(item) != 1 for item in wrapper):
+        return False
+    positions = [active.index(item) for item in wrapper]
+    return positions == sorted(positions)
+
+
 def run(*args, cwd=None):
     return subprocess.run([str(a) for a in args], capture_output=True, text=True, cwd=cwd)
 
@@ -180,7 +209,7 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 0))
             ctl = tar.extractfile(members[f"{base}/scripts/polyseatctl"]).read().decode()
             self.assertIn('POLYSEAT_RELEASE_GATE="test-host"', ctl)
-            self.assertEqual(ctl.count("POLYSEAT_RELEASE_GATE="), 1)  # exactly one assignment
+            self.assertEqual(len(re.findall(r"^POLYSEAT_RELEASE_GATE=", ctl, re.MULTILINE)), 1)
             self.assertIn("install/slack-desc", members)
         self.assertIn('POLYSEAT_RELEASE_GATE="closed"',
                       (PLUGIN / "src/emhttp/scripts/polyseatctl").read_text())
@@ -228,12 +257,42 @@ class DenylistTests(unittest.TestCase):
 
     def test_no_forbidden_host_mutations_in_shipped_code(self):
         for path in self.FILES:
+            text = path.read_text()
+            launcher = re.search(r"^canary_launch\(\) \{[^\n]*\n(.*?)^\}", text, re.MULTILINE | re.DOTALL)
+            launch_body = launcher.group(1) if launcher else ""
+            function = ""
             for line in code_lines(path):
+                definition = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{", line)
+                if definition:
+                    function = definition.group(1)
                 for pattern in FORBIDDEN:
                     if re.search(pattern, line):
+                        if path.name == "polyseatctl" and pattern == r"\bmount\s":
+                            if reviewed_canary_namespace_line(function, line, launch_body):
+                                continue
+                            # `command -v` inspects availability; it does not run mount.
+                            if function == "svc_start" and line.strip() == "command -v unshare setpriv mount setsid >/dev/null || return 1":
+                                continue
                         # The controller may *read* or log about these; it may not run them.
                         self.assertRegex(line, r"(log |echo |printf |die |#|\".*\"|'.*')",
                                          f"{path.name}: {line}")
+                if line == "}":
+                    function = ""
+
+    def test_namespace_exception_is_narrow_and_requires_private_wrapper(self):
+        body = "\n".join(("setpriv --bounding-set=-sys_module,-sys_rawio \\", CANARY_NAMESPACE_LINES[0],
+                          "bash -u -o pipefail -c '", CANARY_NAMESPACE_LINES[1], CANARY_NAMESPACE_LINES[2]))
+        for line in CANARY_NAMESPACE_LINES:
+            self.assertTrue(reviewed_canary_namespace_line("canary_launch", line, body))
+            self.assertFalse(reviewed_canary_namespace_line("svc_start", line, body))
+            self.assertFalse(reviewed_canary_namespace_line("canary_launch", line, body.replace("--propagation private", "--propagation shared")))
+            self.assertFalse(reviewed_canary_namespace_line("canary_launch", line, body.replace("--pid", "")))
+            self.assertFalse(reviewed_canary_namespace_line("canary_launch", line, body.replace("--mount", "")))
+        self.assertFalse(reviewed_canary_namespace_line("canary_launch", "mount /dev/sda /mnt/cache", body))
+        self.assertFalse(reviewed_canary_namespace_line("canary_launch", CANARY_NAMESPACE_LINES[1].replace("/proc", "/host/proc"), body))
+        self.assertFalse(reviewed_canary_namespace_line("canary_launch", CANARY_NAMESPACE_LINES[2].replace("nosuid,nodev,noexec", "defaults"), body))
+        reordered = "\n".join((CANARY_NAMESPACE_LINES[1], body))
+        self.assertFalse(reviewed_canary_namespace_line("canary_launch", CANARY_NAMESPACE_LINES[1], reordered))
 
     def test_shipped_code_never_runs_python_or_other_missing_host_tools(self):
         for path in self.FILES:

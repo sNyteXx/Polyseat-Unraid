@@ -10,6 +10,14 @@ on:
       - 'unraid/scripts/incus-cpu-smoke.sh'
       - 'unraid/scripts/ci-e2e-controller.sh'
       - 'unraid/scripts/ci-canary-cgroup.sh'
+      - 'unraid/scripts/ci-e2e-canary.sh'
+      - 'unraid/scripts/prepare-canary-image.sh'
+      - 'unraid/scripts/make-canary-image.py'
+      - 'unraid/scripts/build-canary-package.py'
+      - 'unraid/scripts/canary-artifacts.py'
+      - 'unraid/scripts/prepare-incus-deps.py'
+      - 'unraid/scripts/*dependenc*'
+      - 'unraid/dependency-overrides.json'
       - 'unraid/scripts/check-bundle-abi.py'
       - 'unraid/scripts/make-runtime-bundle.py'
       - 'unraid/scripts/make-test-report.sh'
@@ -48,6 +56,7 @@ jobs:
       # Signed Incus v7.5.1 tag (newest 7.5.x), immutable target commit.
       INCUS_COMMIT: b20ec6c3cb17eaff28fc1145238b8769e44ce39d
       INCUS_RELEASE: v7.5.1
+      INCUS_TAG_OBJECT: f3242b56ed7ab0127f5716d03e270224e24c0762
       # Immutable v1.15.9 cowsql and v0.22.1 raft release commits.
       COWSQL_COMMIT: 783815b901470e27b7dfbcce3a67c888dad19e78
       RAFT_COMMIT: 9edb176a7924ce2b943cb56552366dc4b5a1a6b7
@@ -76,6 +85,42 @@ jobs:
 
       - name: Build pinned source and record binary dependencies
         run: sh unraid/scripts/build-incus-artifact.sh
+
+      - name: Recheck the pinned GoBGP malformed-input regression
+        timeout-minutes: 5
+        run: |
+          test -n "${INCUS_PROOF_STAGE:-}"
+          cd "$INCUS_PROOF_STAGE/incus"
+          go test -mod=readonly -p=2 -timeout=120s \
+            -run '^TestRecvMessageWithError_MalformedNextHop$' \
+            -count=1 -json github.com/osrg/gobgp/v4/pkg/server \
+            > "$GITHUB_WORKSPACE/incus-build-proof/gobgp-regression.jsonl"
+          jq -se 'any(.[]; .Action == "pass" and .Test == "TestRecvMessageWithError_MalformedNextHop")' \
+            "$GITHUB_WORKSPACE/incus-build-proof/gobgp-regression.jsonl"
+
+      - name: Exact CPU-only canary lifecycle and hard stop on disposable runner
+        timeout-minutes: 12
+        run: |
+          test -n "${INCUS_PROOF_STAGE:-}"
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_TEMP="$RUNNER_TEMP" GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            INCUS_PROOF_STAGE="$INCUS_PROOF_STAGE" \
+            bash unraid/scripts/ci-e2e-canary.sh
+
+      - name: Preserve exact canary diagnostics even if the rehearsal failed
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-canary-diagnostics-NOT-FOR-UNRAID
+          path: |
+            incus-build-proof/canary-e2e/
+            incus-build-proof/canary-e2e-result.txt
+            incus-build-proof/canary-rehearsal.json
+            incus-build-proof/gobgp-regression.jsonl
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Controller end-to-end with the real bundle (CPU-only, disposable runner)
         timeout-minutes: 20
@@ -110,10 +155,12 @@ jobs:
       - name: Vulnerability lookups (report findings; fail on lookup errors)
         run: |
           python3 unraid/scripts/osv-check.py --modules incus-build-proof/go-modules.txt \
-            --buildinfo incus-build-proof/incusd-go-buildinfo.txt --pins unraid/build-pins.env \
+            --buildinfo incus-build-proof/incusd-go-buildinfo.txt \
+            --cli-buildinfo incus-build-proof/incus-go-buildinfo.txt --pins unraid/build-pins.env \
             --out-json incus-build-proof/osv-report.json --out-text incus-build-proof/osv-report.txt
           python3 unraid/scripts/make-runtime-sbom.py --manifest incus-build-proof/bundle/*.manifest.json \
             --abi-report incus-build-proof/abi-report.json --buildinfo incus-build-proof/incusd-go-buildinfo.txt \
+            --cli-buildinfo incus-build-proof/incus-go-buildinfo.txt \
             --pins unraid/build-pins.env --osv-report incus-build-proof/osv-report.json --label ci \
             --output incus-build-proof/SBOM-runtime-osv-triage.cdx.json
 
@@ -123,9 +170,13 @@ jobs:
           # Its module inventory must match the one recorded by the build.
           diff -u <(go version -m incus-build-proof/bin/incusd | tail -n +2) \
             <(tail -n +2 incus-build-proof/incusd-go-buildinfo.txt)
+          diff -u <(go version -m incus-build-proof/bin/incus | tail -n +2) \
+            <(tail -n +2 incus-build-proof/incus-go-buildinfo.txt)
           GOBIN="$RUNNER_TEMP/govulncheck-bin" go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           sh unraid/scripts/ci-govulncheck.sh "$RUNNER_TEMP/govulncheck-bin/govulncheck" \
             incus-build-proof/bin/incusd incus-build-proof/govulncheck.txt
+          sh unraid/scripts/ci-govulncheck.sh "$RUNNER_TEMP/govulncheck-bin/govulncheck" \
+            incus-build-proof/bin/incus incus-build-proof/govulncheck-cli.txt
 
       - name: Preserve scan diagnostics even if a scanner failed
         if: always()
@@ -134,9 +185,11 @@ jobs:
           name: polyseat-security-scan-diagnostics-NOT-FOR-UNRAID
           path: |
             incus-build-proof/govulncheck.txt
+            incus-build-proof/govulncheck-cli.txt
             incus-build-proof/osv-report.json
             incus-build-proof/osv-report.txt
             incus-build-proof/incusd-go-buildinfo.txt
+            incus-build-proof/incus-go-buildinfo.txt
           retention-days: 7
           if-no-files-found: warn
 

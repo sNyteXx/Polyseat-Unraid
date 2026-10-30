@@ -35,6 +35,16 @@ checkout_pinned() { # url sha destination [mirror]
   commit=$2
   destination=$3
   mirror=${4:-}
+  # A shallow SHA-only checkout otherwise gets a v7.0.0 pseudo-version in Go
+  # metadata, making fixed Incus vulnerabilities look unfixed. Restore only the
+  # exact official annotated tag object, not a mutable or invented version label.
+  release_tag=
+  if [ "$remote_url" = https://github.com/lxc/incus.git ]; then
+    core_check_pins "${INCUS_TAG_OBJECT:?official Incus tag object pin required}"
+    printf '%s\n' "$INCUS_RELEASE" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || die 'invalid Incus release tag'
+    [ "$commit" = "$INCUS_COMMIT" ] || die 'Incus checkout does not match the build pin'
+    release_tag=$INCUS_RELEASE
+  fi
   if [ -n "$mirror" ]; then
     [ -d "$mirror" ] || git init -q --bare "$mirror"
     if ! git -C "$mirror" cat-file -e "$commit^{commit}" 2>/dev/null; then
@@ -43,6 +53,13 @@ checkout_pinned() { # url sha destination [mirror]
     [ "$(git -C "$mirror" cat-file -t "$commit" 2>/dev/null)" = commit ] || die 'mirror does not contain the pinned commit'
     # Keep the pinned commit reachable (survives gc) and fetchable by SHA from this local mirror only.
     git -C "$mirror" update-ref "refs/pins/$commit" "$commit"
+    if [ -n "$release_tag" ]; then
+      if ! git -C "$mirror" cat-file -e "$INCUS_TAG_OBJECT^{tag}" 2>/dev/null; then
+        git -C "$mirror" fetch -q --depth 1 "$remote_url" "$INCUS_TAG_OBJECT"
+      fi
+      [ "$(git -C "$mirror" rev-parse "$INCUS_TAG_OBJECT^{}")" = "$commit" ] || die 'Incus tag targets a different commit'
+      git -C "$mirror" update-ref "refs/tags/$release_tag" "$INCUS_TAG_OBJECT"
+    fi
     git -C "$mirror" config uploadpack.allowAnySHA1InWant true
     remote_url=$mirror
   fi
@@ -52,6 +69,12 @@ checkout_pinned() { # url sha destination [mirror]
   git -C "$destination" checkout -q --detach FETCH_HEAD
   actual=$(git -C "$destination" rev-parse HEAD)
   [ "$actual" = "$commit" ] || die 'downloaded source does not match pinned SHA'
+  if [ -n "$release_tag" ]; then
+    git -C "$destination" fetch -q --depth 1 origin "$INCUS_TAG_OBJECT"
+    [ "$(git -C "$destination" cat-file -t "$INCUS_TAG_OBJECT")" = tag ] || die 'Incus release is not the pinned annotated tag'
+    [ "$(git -C "$destination" rev-parse "$INCUS_TAG_OBJECT^{}")" = "$commit" ] || die 'Incus release tag does not peel to the pinned source'
+    git -C "$destination" update-ref "refs/tags/$release_tag" "$INCUS_TAG_OBJECT"
+  fi
 }
 
 # shellcheck disable=SC2016  # the literal string $ORIGIN is the ELF RUNPATH token
@@ -164,8 +187,12 @@ core_build_deps() { # prefix work [mirror_dir]
 }
 
 core_build_incus() { # incus_src
+  python3 "$CORE_REPO/unraid/scripts/prepare-incus-deps.py" --source "$1" \
+    --pins "$CORE_REPO/unraid/build-pins.env" --plan "$CORE_REPO/unraid/dependency-overrides.json" \
+    --report "$1.polyseat-dependency-overrides.json"
   pkg-config --modversion raft cowsql lxc
-  make -C "$1" -j"$CORE_JOBS"
+  # No additional dependency mutation is permitted during compilation.
+  GOFLAGS="${GOFLAGS:-} -mod=readonly" make -C "$1" -j"$CORE_JOBS"
 }
 
 # Everything after the compile: ELF records, version smoke, source SBOM, relocatable payload, ABI gate,
@@ -210,8 +237,20 @@ core_package() { # incus_src prefix output
   (
     cd "$src" || exit 1
     go list -m all > "$output/go-modules.txt"
+    go list -mod=readonly -tags libsqlite3 -deps ./cmd/incusd > "$output/incusd-go-packages.txt"
+    go list -mod=readonly -tags libsqlite3 -deps ./cmd/incus > "$output/incus-go-packages.txt"
   )
   go version -m "$GOBIN/incusd" > "$output/incusd-go-buildinfo.txt"
+  go version -m "$GOBIN/incus" > "$output/incus-go-buildinfo.txt"
+  cp "$src.polyseat-dependency-overrides.json" "$output/dependency-overrides.json"
+  # Do not stamp a made-up release or suppress findings. Go itself must report
+  # the real release plus its deliberate dependency changes, including dirty VCS.
+  awk -v wanted="$INCUS_RELEASE+dirty" '$1 == "mod" && $2 == "github.com/lxc/incus/v7" && $3 == wanted { found=1 }
+    END { exit !found }' "$output/incusd-go-buildinfo.txt" || die 'incorrect Incus module version metadata'
+  grep -Fq 'vcs.modified=true' "$output/incusd-go-buildinfo.txt" || die 'Go build metadata hides dependency modifications'
+  if grep -Eq '^golang.org/x/crypto/openpgp(/|$)' "$output/incusd-go-packages.txt" "$output/incus-go-packages.txt"; then
+    die 'unmaintained OpenPGP code was imported into a shipped binary; advisory GO-2026-5932 needs a new review'
+  fi
   python3 "$CORE_REPO/unraid/scripts/make_proof_sbom.py" --mode "$CORE_MODE" --allowed-dir "$output" \
     --modules "$output/go-modules.txt" \
     --output "$output/SBOM-build-source-only.cdx.json"
@@ -233,6 +272,11 @@ core_package() { # incus_src prefix output
   chmod 0755 "$payload/bin/incus" "$payload/bin/incusd"
   chmod 0644 "$payload/lib/"*
 
+  # Fully offline, static CPU-only canary image; exact official .deb and binary
+  # hashes are pinned, no Ubuntu package is installed on the build or target host.
+  sh "$CORE_REPO/unraid/scripts/prepare-canary-image.sh" "$CORE_REPO/unraid/build-pins.env" \
+    "$payload/share/canary/busybox.tar.gz" "$output/busybox-image-provenance.json"
+
   # The bundle may only be built if every library resolves on the recorded Unraid baseline.
   python3 "$CORE_REPO/unraid/scripts/check-bundle-abi.py" \
     --payload "$payload" --baseline "$CORE_REPO/unraid/abi/unraid-7.3.3-x86_64" \
@@ -251,12 +295,15 @@ core_package() { # incus_src prefix output
   for manifest in "$output"/bundle/*.manifest.json; do
     python3 "$CORE_REPO/unraid/scripts/make-runtime-sbom.py" --manifest "$manifest" \
       --abi-report "$output/abi-report.json" --buildinfo "$output/incusd-go-buildinfo.txt" \
+      --cli-buildinfo "$output/incus-go-buildinfo.txt" \
       --pins "$CORE_REPO/unraid/build-pins.env" --label "$CORE_LABEL" --output "$output/SBOM-runtime.cdx.json"
   done
 
   {
     printf 'INCUS_COMMIT=%s\n' "$INCUS_COMMIT"
     printf 'INCUS_RELEASE=%s\n' "$INCUS_RELEASE"
+    printf 'INCUS_TAG_OBJECT=%s\n' "$INCUS_TAG_OBJECT"
+    printf 'INCUS_DEPENDENCY_OVERLAY=dependency-overrides.json\n'
     printf 'RAFT_COMMIT=%s\n' "$RAFT_COMMIT"
     printf 'COWSQL_COMMIT=%s\n' "$COWSQL_COMMIT"
     printf 'LXC_COMMIT=%s\n' "$LXC_COMMIT"
@@ -269,7 +316,8 @@ core_checksums() { # output
   (
     cd "$1" || exit 1
     sha256sum -- bin/* bundle/* abi-report.json bundle.env build-info.txt *-ldd.txt *-elf-dynamic.txt \
-      *-elf-versions.txt incusd-go-buildinfo.txt \
+      *-elf-versions.txt incusd-go-buildinfo.txt incus-go-buildinfo.txt incusd-go-packages.txt incus-go-packages.txt \
+      dependency-overrides.json busybox-image-provenance.json \
       incus-cli-version.txt incusd-cli-version.txt \
       go-modules.txt SBOM-build-source-only.cdx.json SBOM-runtime.cdx.json NOTICE.txt > SHA256SUMS
     sha256sum --check SHA256SUMS
