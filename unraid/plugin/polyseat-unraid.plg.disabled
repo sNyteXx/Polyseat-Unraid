@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WIP DO NOT USE. Deliberately disabled extension: no installer or executable commands. -->
+<PLUGIN name="polyseat-unraid" version="0.0.0-wip" pluginURL="">
+  <!-- No install sections until Incus runtime and lifecycle safety are verified. -->
+</PLUGIN>
