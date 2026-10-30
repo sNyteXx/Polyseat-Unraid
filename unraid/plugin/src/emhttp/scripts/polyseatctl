@@ -48,7 +48,13 @@ init_paths() {
   CURRENT="$RAM_DIR/current"
   RUN_DIR="$ROOT/var/run/$PLUGIN"
   LOG_DIR="$ROOT/var/log/$PLUGIN"
-  SUBID_DIR="${POLYSEAT_SUBID_DIR:-$ROOT/etc}"
+  SUBID_DIR="$ROOT/etc"
+  # Pointing the sub-ID files at the runner's real /etc is allowed only in a sandbox on a
+  # disposable GitHub-hosted runner (the daemon reads /etc/subuid, not the sandbox copy).
+  if [[ -n ${POLYSEAT_SUBID_DIR:-} && -n $ROOT && ${CI:-} == true && ${GITHUB_ACTIONS:-} == true &&
+        ${RUNNER_ENVIRONMENT:-} == github-hosted && ! -e /etc/unraid-version ]]; then
+    SUBID_DIR=$POLYSEAT_SUBID_DIR
+  fi
   UNRAID_VERSION_FILE="$ROOT/etc/unraid-version"
   PIDFILE="$RUN_DIR/incusd.pid"
   LOCKFILE="$RUN_DIR/lock"

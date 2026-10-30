@@ -183,6 +183,21 @@ class InstallLifecycleTests(Base):
         self.assertEqual(again.code, 2, again.text)
 
 
+class SubidRedirectTests(Base):
+    def test_subid_directory_override_is_ignored_outside_github_runners(self):
+        self.assertOk(self.sb.install(self.sb.make_bundle("1.0.0")))
+        elsewhere = self.sb.work / "other-etc"
+        elsewhere.mkdir()
+        (elsewhere / "subuid").write_text("")
+        (elsewhere / "subgid").write_text("")
+        env = {"POLYSEAT_SUBID_DIR": str(elsewhere), "CI": "true", "GITHUB_ACTIONS": "true",
+               "RUNNER_ENVIRONMENT": "self-hosted"}
+        self.assertOk(self.sb.ctl("start", env=env))
+        self.assertEqual((elsewhere / "subuid").read_text(), "")
+        self.assertIn("root:1000000", (self.sb.root / "etc/subuid").read_text())
+        self.assertEqual(self.sb.ctl("start", env={"POLYSEAT_SUBID_DIR": "/etc"}, root=False).code, 2)
+
+
 class BootOrderingTests(Base):
     def test_plugin_reinstall_early_in_boot_never_needs_the_pool(self):
         b = self.sb.make_bundle("1.0.0")
