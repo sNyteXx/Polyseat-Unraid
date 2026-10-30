@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 
-def create(modules: str, release: str, revisions: dict[str, str]) -> dict:
+def create(modules: str, release: str, revisions: dict[str, str], mode: str = "ci") -> dict:
     components = []
     seen = set()
     for line in modules.splitlines():
@@ -53,6 +53,7 @@ def create(modules: str, release: str, revisions: dict[str, str]) -> dict:
                 {"name": "polyseat:purpose", "value": "source-inventory-only-not-runtime"},
                 {"name": "polyseat:incus-commit", "value": revisions["incus"]},
                 {"name": "polyseat:unraid-certified", "value": "false"},
+                {"name": "polyseat:build-mode", "value": mode},
             ],
         },
         "components": components,
@@ -63,20 +64,33 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--modules", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--mode", choices=("ci", "local-dev"), default="ci")
+    parser.add_argument("--allowed-dir", type=Path, default=None,
+                        help="local-dev only: the one directory both files must live in")
     args = parser.parse_args()
-    if (os.environ.get("CI") != "true" or os.environ.get("RUNNER_OS") != "Linux"
-            or Path("/etc/unraid-version").exists()):
-        parser.error("only an isolated Linux CI build can write this inventory")
-    workspace = Path(os.environ.get("GITHUB_WORKSPACE", "/nonexistent")).resolve()
-    allowed = workspace / "incus-build-proof"
+    if Path("/etc/unraid-version").exists():
+        parser.error("never run on Unraid")
+    if args.mode == "ci":
+        # Unchanged CI behaviour: only an isolated Linux CI build may write this inventory.
+        if os.environ.get("CI") != "true" or os.environ.get("RUNNER_OS") != "Linux":
+            parser.error("only an isolated Linux CI build can write this inventory")
+        workspace = Path(os.environ.get("GITHUB_WORKSPACE", "/nonexistent")).resolve()
+        allowed = workspace / "incus-build-proof"
+    else:
+        # local-dev has its own guards instead of borrowing CI variables.
+        if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI") == "true":
+            parser.error("local-dev mode must not run inside CI; use the CI build script")
+        if args.allowed_dir is None or args.allowed_dir.is_symlink():
+            parser.error("local-dev mode needs --allowed-dir (a real directory)")
+        allowed = args.allowed_dir.resolve()
     if (args.output.is_symlink() or args.modules.is_symlink()
             or args.output.resolve().parent != allowed
             or args.modules.resolve().parent != allowed):
-        parser.error("inventory files must remain inside the CI proof output")
+        parser.error("inventory files must remain inside the proof output")
     revisions = {name: os.environ[name.upper() + "_COMMIT"]
                  for name in ("incus", "raft", "cowsql")}
     report = create(args.modules.read_text(encoding="utf-8"),
-                    os.environ["INCUS_RELEASE"], revisions)
+                    os.environ["INCUS_RELEASE"], revisions, args.mode)
     with args.output.open("x", encoding="utf-8") as output:
         output.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
 

@@ -20,12 +20,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: POSIX shell syntax
         run: |
-          for script in unraid/scripts/*.sh unraid/tests/*.sh; do
+          for script in unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh; do
             sh -n "$script"
           done
       - name: ShellCheck
         run: |
-          shellcheck -s sh unraid/scripts/*.sh unraid/tests/*.sh
+          shellcheck -x -s sh unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh
           shellcheck -s bash unraid/plugin/src/emhttp/scripts/polyseatctl unraid/plugin/src/emhttp/event/*
       - name: Bash syntax of plugin scripts
         run: |
