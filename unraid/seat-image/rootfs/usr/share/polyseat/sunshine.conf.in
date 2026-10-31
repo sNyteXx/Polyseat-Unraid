@@ -1,0 +1,7 @@
+# Polyseat seat image - Sunshine configuration, written by polyseat-profile (edits are overwritten on a profile switch).
+# wlr capture is the only path that works in an unprivileged container (KMS capture needs cap_sys_admin).
+capture = wlr
+encoder = @ENCODER@
+# Web UI reachable from localhost only.
+origin_web_ui_allowed = pc
+log_path = /home/player/.config/sunshine/sunshine.log

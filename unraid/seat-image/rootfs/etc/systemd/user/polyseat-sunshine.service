@@ -1,0 +1,14 @@
+[Unit]
+Description=polyseat: Sunshine
+After=polyseat-sway.service
+BindsTo=polyseat-sway.service
+
+[Service]
+Type=simple
+Environment=SDL_JOYSTICK_DISABLE_UDEV=1
+# Waits for the Wayland session itself - see polyseat-sunshine-run.
+ExecStart=/usr/local/bin/polyseat-sunshine-run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+# Deliberately no [Install]: Sunshine starts only when explicitly started.
