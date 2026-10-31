@@ -1,0 +1,16 @@
+# Polyseat seat: minimal headless desktop. Outputs are virtual (WLR_BACKENDS=headless).
+xwayland disable
+output * resolution 1280x720
+output * bg #1d3557 solid_color
+font pango:DejaVu Sans Mono 10
+default_border pixel 2
+
+bar {
+    position top
+    colors {
+        background #0b132b
+        statusline #f1faee
+    }
+}
+
+exec foot

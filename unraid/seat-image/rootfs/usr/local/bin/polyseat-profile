@@ -1,0 +1,98 @@
+#!/bin/bash
+# polyseat-profile cpu|nvidia|status
+#
+# Switches the seat between the CPU profile (software rendering and encoding, the default) and the NVIDIA profile
+# (GLES2 + NVENC). It only writes user-unit drop-ins and sunshine.conf in the player's home, plus - for nvidia - the
+# two image-level files upstream's stepNvidiaUserspace adds (GBM backend symlink, glvnd EGL vendor manifest).
+# It never starts or stops anything; restart polyseat-sway/polyseat-sunshine afterwards.
+#
+# POLYSEAT_ROOT (default empty) prefixes every path, so the switch can be exercised against a temp directory.
+set -eu
+
+root=${POLYSEAT_ROOT:-}
+home=$root/home/player
+unitdir=$home/.config/systemd/user
+conf=$home/.config/sunshine/sunshine.conf
+marker=$home/.config/polyseat/profile
+template=$root/usr/share/polyseat/sunshine.conf.in
+gbm_link=$root/usr/lib/gbm/nvidia-drm_gbm.so
+gbm_target=../libnvidia-allocator.so.1
+glvnd=$root/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+
+glvnd_json='{
+    "file_format_version" : "1.0.0",
+    "ICD" : {
+        "library_path" : "libEGL_nvidia.so.0"
+    }
+}'
+
+usage() {
+  echo 'usage: polyseat-profile cpu|nvidia|status' >&2
+  exit 2
+}
+
+# Atomic write: stdin -> $1 (mode 0644), owned by the player when running as root.
+put() {
+  dir=$(dirname "$1")
+  mkdir -p "$dir"
+  tmp=$(mktemp "$dir/.polyseat.XXXXXX")
+  cat > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$1"
+}
+
+own() {
+  if [ "$(id -u)" = 0 ] && [ -z "${POLYSEAT_ROOT:-}" ]; then
+    chown -R 1000:1000 "$home/.config"
+  fi
+}
+
+dropin() { # nvidia|cpu
+  for unit in polyseat-sway polyseat-sunshine; do
+    if [ "$1" = nvidia ]; then
+      put "$unitdir/$unit.service.d/20-gpu.conf" <<'DROPIN'
+[Service]
+Environment=WLR_RENDERER=gles2
+Environment=GBM_BACKEND=nvidia-drm
+Environment=__GLX_VENDOR_LIBRARY_NAME=nvidia
+DROPIN
+    else
+      put "$unitdir/$unit.service.d/20-gpu.conf" <<'DROPIN'
+[Service]
+Environment=WLR_RENDERER=pixman
+DROPIN
+    fi
+  done
+}
+
+sunshine_conf() { # encoder
+  [ -r "$template" ] || { echo "missing $template" >&2; exit 1; }
+  sed "s/@ENCODER@/$1/" "$template" | put "$conf"
+}
+
+case "${1:-}" in
+  cpu)
+    dropin cpu
+    sunshine_conf software
+    # Remove only what the nvidia profile put there.
+    if [ -L "$gbm_link" ] && [ "$(readlink "$gbm_link")" = "$gbm_target" ]; then rm -f "$gbm_link"; fi
+    if [ -f "$glvnd" ] && [ "$(cat "$glvnd")" = "$glvnd_json" ]; then rm -f "$glvnd"; fi
+    printf 'cpu\n' | put "$marker"
+    own
+    ;;
+  nvidia)
+    dropin nvidia
+    sunshine_conf nvenc
+    # On the host the symlink belongs to nvidia-utils and the manifest to the driver; the container gets the
+    # libraries injected at runtime but neither of these (see upstream stepNvidiaUserspace).
+    mkdir -p "$root/usr/lib/gbm" "$root/usr/share/glvnd/egl_vendor.d"
+    ln -sf "$gbm_target" "$gbm_link"
+    printf '%s\n' "$glvnd_json" | put "$glvnd"
+    printf 'nvidia\n' | put "$marker"
+    own
+    ;;
+  status)
+    cat "$marker" 2>/dev/null || echo unset
+    ;;
+  *) usage ;;
+esac

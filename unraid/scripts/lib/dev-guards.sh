@@ -62,8 +62,19 @@ dev_load_pins() { # file
       INCUS_COMMIT | INCUS_TAG_OBJECT | RAFT_COMMIT | COWSQL_COMMIT | LXC_COMMIT | SQUASHFS_TOOLS_COMMIT | \
       SQUASHFS_TOOLS_TAG_OBJECT)
         printf '%s' "$val" | grep -Eq '^[0-9a-f]{40}$' || dev_die "$key must be a full lowercase 40-character SHA" ;;
-      GO_LINUX_AMD64_SHA256 | BUSYBOX_DEB_SHA256 | BUSYBOX_BINARY_SHA256)
+      GO_LINUX_AMD64_SHA256 | BUSYBOX_DEB_SHA256 | BUSYBOX_BINARY_SHA256 | SUNSHINE_PKG_SHA256)
         printf '%s' "$val" | grep -Eq '^[0-9a-f]{64}$' || dev_die "$key must be a 64-character SHA-256" ;;
+      SEAT_BASE_IMAGE)
+        printf '%s' "$val" | grep -Eq '^archlinux@sha256:[0-9a-f]{64}$' || dev_die 'SEAT_BASE_IMAGE must be the official archlinux image pinned by digest' ;;
+      SEAT_ARCHIVE_DATE)
+        printf '%s' "$val" | grep -Eq '^20[0-9]{2}/(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])$' || dev_die 'SEAT_ARCHIVE_DATE must be YYYY/MM/DD' ;;
+      SUNSHINE_PKG_VERSION)
+        printf '%s' "$val" | grep -Eq '^[0-9.]+-[0-9.]+$' || dev_die 'SUNSHINE_PKG_VERSION must look like 2026.914.233613-1.1' ;;
+      SUNSHINE_PKG_URL)
+        case "$val" in
+          https://github.com/superuser404notfound/Polyseat/releases/download/sunshine-*-x86_64.pkg.tar.zst) ;;
+          *) dev_die 'SUNSHINE_PKG_URL must be the Polyseat sunshine release asset' ;;
+        esac ;;
       BUILDER_BASE_IMAGE)
         printf '%s' "$val" | grep -Eq '^[a-z0-9./:_-]+@sha256:[0-9a-f]{64}$' || dev_die 'BUILDER_BASE_IMAGE must be pinned by digest' ;;
       INCUS_RELEASE | LXC_RELEASE | RAFT_RELEASE | COWSQL_RELEASE | GO_VERSION | BUSYBOX_VERSION | BUSYBOX_DEB_VERSION) ;;
