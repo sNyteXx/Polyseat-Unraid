@@ -55,6 +55,11 @@ T=600 inc image import /in/seat.tar.xz --alias polyseat-desktop >/dev/null
 T=600 inc init polyseat-desktop "$c" --storage default --config boot.autostart=false --config security.privileged=false \
   --config security.nesting=false >/dev/null
 inc config device add "$c" eth0 nic nictype=bridged "parent=$parent" "hwaddr=$mac" name=eth0 >/dev/null
+# Persistent Steam storage, as the controller mounts it (on Tower: /mnt/cache/polyseat/steam-seat on cache/polyseat),
+# owned by the seat's player (uid 1000 in the container = 1001000 on the host), mode 0700.
+st=/srv/polyseat-steam-seat
+mkdir -p "$st" && chown 1001000:1001000 "$st" && chmod 0700 "$st"
+inc config device add "$c" steam disk "source=$st" path=/home/player/.local/share/Steam >/dev/null
 inc image delete polyseat-desktop >/dev/null
 inc query "/1.0/instances/$c" > /out/instance-before-start.json
 pass 'seat image imported; instance with the controller NIC (bridged br0, fixed MAC)'
@@ -88,6 +93,10 @@ jq -r '.checks[] | "\(.status) \(.name): \(.detail)"' /out/selftest.json 2>/dev/
 [[ $rc == 0 ]] && jq -e '.verdict == "PASS"' /out/selftest.json >/dev/null && pass 'polyseat-selftest steam-cpu PASS' ||
   { inc stop "$c" --force >/dev/null 2>&1 || true; fail "polyseat-selftest steam-cpu failed (rc=$rc): $(jq -r .reason /out/selftest.json 2>/dev/null)"; }
 
+# Steam's own files must have landed on the host storage, not in the seat's rootfs.
+[[ -f $st/.polyseat-seat-runs && -e $st/steam.sh && $(stat -c %u "$st/steam.sh") == 1001000 ]] &&
+  pass "Steam's files are on the persistent storage ($(du -sh "$st" | cut -f1), owned by 1001000)" ||
+  fail "Steam's files are not on the persistent storage: $(find "$st" -mindepth 1 -maxdepth 1 -printf '%f ' | head -c 200)"
 T=60 inc stop "$c" --timeout 30 || T=30 inc stop "$c" --force
 after=$(members)
 # Errors of the NIC's start/stop (the daemon-start nftables warning about the refused test table is expected).

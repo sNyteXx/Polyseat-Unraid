@@ -53,6 +53,10 @@ finalize() {
   done
   useradd --create-home --uid 1000 --user-group --shell /bin/bash --groups "$groups" player
   [ "$(id -u player)" = 1000 ] && [ "$(id -g player)" = 1000 ]
+  # Steam's home (~/.local/share/Steam) is the persistent mount point for the Steam seat; it must exist with the
+  # player as owner, or Incus creates the missing parents as root and ~/.local/share becomes unwritable.
+  install -d -o player -g player -m 0755 /home/player/.local /home/player/.local/share
+  install -d -o player -g player -m 0700 /home/player/.local/share/Steam
   # Lingering by file: user@1000.service starts at boot without a login.
   install -d -m 0755 /var/lib/systemd/linger
   : > /var/lib/systemd/linger/player

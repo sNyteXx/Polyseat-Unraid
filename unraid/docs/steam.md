@@ -34,6 +34,18 @@ way and proves that it runs on Tower's GPU, up to its sign-in window. Nobody sig
   - The canary daemon's private `deny-tools` (on the exec-capable `/var/lib/polyseat-lxc`, self-tested; `/run` is noexec) now hold an `nft` that answers exactly `--terse --json -nn list ruleset` with an empty ruleset and refuses everything else.
   - A real nft would load `nf_tables` and create a test table at daemon start.
 
+## Persistent storage (owner, 2026-10-31: "on the cache")
+
+| | |
+|---|---|
+| Dataset | `cache/polyseat` on the ZFS cache pool, `quota=150G`, `recordsize=1M`, compression and atime inherited, mounted at `/mnt/cache/polyseat` |
+| Seat directory | `/mnt/cache/polyseat/steam-seat`, owner `1001000:1001000` (the seat's player, uid 1000 in the container), mode 0700 |
+| In the seat | that directory only, as `~/.local/share/Steam`: login, client and library survive a restart |
+| Unraid | outside `appdata`, so not in the owner's backup set (`backupssd/backup_unraid/cache/{appdata,cloud}`). Without a share config Unraid treats it as cache-only and does not export it, like `kernel-build` |
+| Controller | before start: the directory is exactly this owner and mode, on exactly `cache/polyseat` (`findmnt`), the dataset has a quota, at least 8 GiB free. Exactly one `disk` device. Uninstall never touches it |
+| Setup (one-time, 2026-10-31) | `zfs create -o quota=150G -o recordsize=1M cache/polyseat`; `install -d -o 1001000 -g 1001000 -m 0700 /mnt/cache/polyseat/steam-seat` |
+| Grow / remove | `zfs set quota=300G cache/polyseat` / `zfs destroy cache/polyseat` (removes everything, Steam login included) |
+
 ## Budget, measured
 
 The local rehearsal measured the non-reclaimable (anon + tmpfs) peak at 7.0 GB:
@@ -55,6 +67,5 @@ The originally proposed 6 GiB would OOM. 8 GiB leaves Tower about 10 GiB, and th
 ## Not yet
 
 - gamescope, Proton and Big Picture;
-- a persistent Steam library (RAM only by owner decision for now);
 - Moonlight pairing and input (M3);
 - the upstream daemon itself.

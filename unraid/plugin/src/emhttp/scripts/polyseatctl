@@ -79,6 +79,13 @@ STEAM_CPU_MAX="400000 100000"  # four CPUs' worth (the cpuset stays 24-27)
 STEAM_MEMORY_MAX=$((8 * 1024 * 1024 * 1024))
 STEAM_PIDS_MAX=4096
 STEAM_DATA_MAX_KB=$((8 * 1024 * 1024))
+# Steam's persistent storage (owner, 2026-10-31: "on the cache"): its own ZFS dataset with a quota, outside appdata
+# (so not in the owner's backup set); Unraid treats it as a cache-only, unexported share without any config. Only
+# this directory is mounted, as the player's ~/.local/share/Steam (login, client, library). Uninstall never touches it.
+STEAM_STORAGE_DATASET="cache/polyseat"
+STEAM_STORAGE_HOST="/mnt/cache/polyseat/steam-seat"
+STEAM_STORAGE_TARGET="/home/player/.local/share/Steam"
+STEAM_STORAGE_MIN_FREE_KB=$((8 * 1024 * 1024))
 # The driver's Vulkan manifest is not injected by libnvidia-container 1.20.1; upstream copies it from the host too.
 STEAM_VULKAN_ICD_SOURCES="/etc/vulkan/icd.d/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json"
 STEAM_SELFTEST_TIMEOUT=1080  # Steam waits up to 900 s for its update and window; the token allows at most 1800 s
@@ -1105,6 +1112,7 @@ canary_command_allowed() {
       "init $DESKTOP_ALIAS $STEAM_INSTANCE --storage default --config boot.autostart=false --config security.privileged=false --config security.nesting=false --config limits.cpu=4 --config limits.memory=8GiB --config limits.processes=4096 --config nvidia.runtime=true --config nvidia.driver.capabilities=$STEAM_CAPABILITIES" | \
       "config device add $STEAM_INSTANCE gpu gpu pci=$GPU_CANARY_PCI mode=0666" | \
       "config device add $STEAM_INSTANCE eth0 nic nictype=bridged parent=$STEAM_NIC_PARENT hwaddr=$STEAM_HWADDR name=eth0" | \
+      "config device add $STEAM_INSTANCE steam disk source=$STEAM_STORAGE_HOST path=$STEAM_STORAGE_TARGET" | \
       "file push -p --uid 0 --gid 0 --mode 0644 $RUN_DIR/steam-evidence/nvidia_icd.json $STEAM_INSTANCE/usr/share/vulkan/icd.d/nvidia_icd.json" | \
       "image delete $DESKTOP_ALIAS" | "start $STEAM_INSTANCE" | \
       "query /1.0/instances/$STEAM_INSTANCE/state" | \
@@ -1546,7 +1554,8 @@ canary_profile_guard() {
     --argjson steam "$([[ $CANARY_INSTANCE == "$STEAM_INSTANCE" ]] && echo true || echo false)" \
     --arg gpupci "$GPU_CANARY_PCI" \
     --arg caps "$([[ $CANARY_INSTANCE == "$STEAM_INSTANCE" ]] && echo "$STEAM_CAPABILITIES" || echo "$GPU_CAPABILITIES")" \
-    --arg nicparent "$STEAM_NIC_PARENT" --arg nicmac "$STEAM_HWADDR" '
+    --arg nicparent "$STEAM_NIC_PARENT" --arg nicmac "$STEAM_HWADDR" \
+    --arg ssrc "$STEAM_STORAGE_HOST" --arg stgt "$STEAM_STORAGE_TARGET" '
     def object: if type == "object" and .type == "sync" and .status_code == 200
       then .metadata else . end | if type == "object" then . else error("unexpected API object") end;
     def records: if type == "array" then . elif .type == "sync" and .status_code == 200
@@ -1572,7 +1581,8 @@ canary_profile_guard() {
     def instance_devices: type == "object" and (to_entries | all(.[];
       .key == "root" and .value == {type:"disk", path:"/", pool:"default"} or
       $gpu and .key == "gpu" and .value == {type:"gpu", pci:$gpupci, mode:"0666"} or
-      $steam and .key == "eth0" and .value == {type:"nic", nictype:"bridged", parent:$nicparent, hwaddr:$nicmac, name:"eth0"}));
+      $steam and .key == "eth0" and .value == {type:"nic", nictype:"bridged", parent:$nicparent, hwaddr:$nicmac, name:"eth0"} or
+      $steam and .key == "steam" and .value == {type:"disk", source:$ssrc, path:$stgt}));
     def project_cfg: type == "object" and (to_entries | all(.[];
       (.key as $k | ["features.images", "features.networks", "features.networks.zones",
         "features.profiles", "features.storage.buckets", "features.storage.volumes"] | index($k) != null)
@@ -2197,6 +2207,27 @@ steam_vulkan_icd() { # dir : validated copy of the host driver's Vulkan manifest
   (umask 077; jq . "$src" > "$1/nvidia_icd.json")
 }
 
+steam_storage_precheck() { # read-only: the persistent Steam directory, its dataset, quota and free space
+  local dir uid src quota avail
+  dir=$(host_path "$STEAM_STORAGE_HOST")
+  uid=$(cfg_get SUBID_START 1000000)
+  [[ $uid =~ ^[1-9][0-9]{5,9}$ ]] || { log error "steam: invalid SUBID_START '$uid'"; return 1; }
+  uid=$((uid + 1000))  # the seat's player (uid 1000) on the host
+  [[ -d $dir && ! -L $dir && ! -L $(dirname -- "$dir") ]] ||
+    { log error "steam: storage $STEAM_STORAGE_HOST is missing or a symlink"; return 1; }
+  [[ $(stat -c '%u %g %a' -- "$dir") == "$uid $uid 700" ]] ||
+    { log error "steam: $STEAM_STORAGE_HOST must belong to $uid:$uid with mode 0700"; return 1; }
+  sandbox && ! ci_real_system && return 0
+  src=$(findmnt -n -o SOURCE,FSTYPE --target "$dir" | tr -s ' ')
+  [[ $src == "$STEAM_STORAGE_DATASET zfs" ]] ||
+    { log error "steam: $STEAM_STORAGE_HOST is on '$src', not the $STEAM_STORAGE_DATASET dataset"; return 1; }
+  quota=$(zfs get -Hp -o value quota "$STEAM_STORAGE_DATASET" 2>/dev/null) || quota=''
+  [[ $quota =~ ^[1-9][0-9]*$ ]] || { log error "steam: $STEAM_STORAGE_DATASET has no quota"; return 1; }
+  avail=$(df -Pk -- "$dir" | awk 'NR == 2 {print $4}')
+  [[ $avail =~ ^[0-9]+$ ]] || avail=0
+  (( avail >= STEAM_STORAGE_MIN_FREE_KB )) || { log error "steam: only $avail KiB free on $STEAM_STORAGE_DATASET"; return 1; }
+}
+
 steam_lan_members() { # read-only: the parent bridge's ports, sorted (evidence)
   find "$(host_path "/sys/class/net/$STEAM_NIC_PARENT/brif")" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' '
 }
@@ -2221,11 +2252,13 @@ cmd_steam_smoke() (
     die $EX_BLOCKED "GPU is not available for a seat now; nothing was started"
   fi
   steam_lan_precheck || die $EX_BLOCKED "LAN bridge not usable for the seat; nothing was started"
+  steam_storage_precheck || die $EX_BLOCKED "persistent Steam storage not usable; nothing was started"
   local dir="$RUN_DIR/steam-evidence"
   [[ ! -e $dir && ! -L $dir ]] || die $EX_BLOCKED "steam evidence from an earlier run exists; collect it first"
   (umask 077; mkdir -- "$dir") || die $EX_BLOCKED "cannot create evidence directory"
   printf '%s\n' "${GPU_RES[@]}" > "$dir/gpu-preflight-before.txt"
   printf '%s\n' "$(steam_lan_members)" > "$dir/lan-members-before.txt"
+  df -Pk -- "$(host_path "$STEAM_STORAGE_HOST")" > "$dir/storage-before.txt" 2>&1 || true
   steam_vulkan_icd "$dir" || die $EX_BLOCKED "no valid NVIDIA Vulkan manifest on the host; nothing was started"
   canary_budget_select steam
   CANARY_OPERATION=4
@@ -2245,6 +2278,8 @@ cmd_steam_smoke() (
   run_incus config device add "$STEAM_INSTANCE" gpu gpu "pci=$GPU_CANARY_PCI" mode=0666 || exit $EX_HEALTH
   run_incus config device add "$STEAM_INSTANCE" eth0 nic nictype=bridged "parent=$STEAM_NIC_PARENT" \
     "hwaddr=$STEAM_HWADDR" name=eth0 || exit $EX_HEALTH
+  run_incus config device add "$STEAM_INSTANCE" steam disk "source=$STEAM_STORAGE_HOST" "path=$STEAM_STORAGE_TARGET" ||
+    exit $EX_HEALTH
   INCUS_CMD_TIMEOUT=60 run_incus image delete "$DESKTOP_ALIAS" || exit $EX_HEALTH
   canary_profile_guard && canary_budget_check || exit $EX_HEALTH
   gpu_guard_quick "$GPU_CANARY_PCI" || { log error "GPU ownership changed before start"; exit $EX_BLOCKED; }
@@ -2275,10 +2310,11 @@ cmd_steam_smoke() (
   trap - EXIT
   lxc_hook_collect "$dir"
   printf '%s\n' "$(steam_lan_members)" > "$dir/lan-members-after.txt"
+  df -Pk -- "$(host_path "$STEAM_STORAGE_HOST")" > "$dir/storage-after.txt" 2>&1 || true
   gpu_preflight_run "$GPU_CANARY_PCI" || true
   printf '%s\n' "${GPU_RES[@]}" > "$dir/gpu-preflight-after.txt"
   grep -q $'^PASS\tholder\t' "$dir/gpu-preflight-after.txt" || { log error "GPU not idle after teardown"; exit $EX_HEALTH; }
-  printf 'PASS: Steam canary (GPU by device access with compat32, LAN by a veth in %s for the test only, Steam self-updated to its sign-in window, GPU and veth released); nobody signed in, no persistence claim.\n' "$STEAM_NIC_PARENT"
+  printf 'PASS: Steam canary (GPU by device access with compat32, LAN by a veth in %s for the test only, Steam self-updated to its sign-in window on its persistent storage %s, GPU and veth released); nobody signed in.\n' "$STEAM_NIC_PARENT" "$STEAM_STORAGE_DATASET"
 )
 
 # --------------------------------------------------------- transaction ----

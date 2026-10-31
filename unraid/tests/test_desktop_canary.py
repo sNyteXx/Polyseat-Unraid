@@ -434,12 +434,14 @@ class SteamCanaryPolicyTests(unittest.TestCase):
             "--config nvidia.driver.capabilities=compute,utility,video,graphics,compat32,display")
     NIC = "config device add polyseat-steam-gpu eth0 nic nictype=bridged parent=br0 hwaddr=00:16:3e:50:53:01 name=eth0"
     ETH0 = {"type": "nic", "nictype": "bridged", "parent": "br0", "hwaddr": "00:16:3e:50:53:01", "name": "eth0"}
+    DISK = "config device add polyseat-steam-gpu steam disk source=/mnt/cache/polyseat/steam-seat path=/home/player/.local/share/Steam"
+    STEAM_DISK = {"type": "disk", "source": "/mnt/cache/polyseat/steam-seat", "path": "/home/player/.local/share/Steam"}
 
     def allowed(self, operation, command):
         return DesktopAllowListTests.allowed(self, operation, command)
 
     def test_steam_sequence_is_exact_and_only_for_steam_smoke(self):
-        for command in (self.INIT, self.NIC,
+        for command in (self.INIT, self.NIC, self.DISK,
                         "config device add polyseat-steam-gpu gpu gpu pci=0000:01:00.0 mode=0666",
                         "start polyseat-steam-gpu", "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest steam",
                         "stop polyseat-steam-gpu --timeout 30", "delete polyseat-steam-gpu"):
@@ -457,7 +459,11 @@ class SteamCanaryPolicyTests(unittest.TestCase):
                         self.INIT.replace(",compat32", ""), self.INIT.replace(",display", ""), self.INIT.replace(",display", ",display,all"), self.INIT.replace("security.nesting=false", "security.nesting=true"),
                         "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest steam-cpu",
                         "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest nvidia",
-                        "exec polyseat-steam-gpu -- /usr/bin/steam"):
+                        "exec polyseat-steam-gpu -- /usr/bin/steam",
+                        self.DISK.replace("/mnt/cache/polyseat/steam-seat", "/mnt/cache/appdata"),
+                        self.DISK.replace("/mnt/cache/polyseat/steam-seat", "/"),
+                        self.DISK.replace("path=/home/player/.local/share/Steam", "path=/etc"),
+                        self.DISK + " shift=true", self.DISK + " readonly=false recursive=true"):
             with self.subTest(command=command):
                 self.assertFalse(self.allowed(4, command))
 
@@ -470,7 +476,7 @@ class SteamCanaryPolicyTests(unittest.TestCase):
                       "volatile.eth0.host_name": "veth1a2b3c4d"})
         gpu = {"type": "gpu", "pci": "0000:01:00.0", "mode": "0666"}
         for d in (inst["devices"], inst["expanded_devices"]):
-            d.update(gpu=gpu, eth0=dict(self.ETH0))
+            d.update(gpu=gpu, eth0=dict(self.ETH0), steam=dict(self.STEAM_DISK))
         return inst
 
     def test_policy_guard_accepts_only_the_exact_steam_instance(self):
@@ -488,7 +494,11 @@ class SteamCanaryPolicyTests(unittest.TestCase):
                        lambda i: i["config"].update({"nvidia.driver.capabilities": "compute,utility,video,graphics"}),
                        lambda i: i["config"].update({"limits.memory": "2GiB"}),
                        lambda i: i["config"].update({"volatile.eth1.host_name": "veth0"}),
-                       lambda i: i["config"].update({"security.nesting": "true"})):
+                       lambda i: i["config"].update({"security.nesting": "true"}),
+                       lambda i: i["devices"]["steam"].update(source="/mnt/cache/appdata"),
+                       lambda i: i["devices"]["steam"].update(path="/root"),
+                       lambda i: i["devices"]["steam"].update(shift="true"),
+                       lambda i: i["devices"].update(data=dict(self.STEAM_DISK, path="/srv"))):
             bad = json.loads(json.dumps(inst))
             mutate(bad)
             with self.subTest(dev=bad["devices"], cfg=bad["config"]):
@@ -566,6 +576,41 @@ class SteamCanaryPolicyTests(unittest.TestCase):
                     ok.replace("--mode 0644", "--mode 4755"), "file pull polyseat-steam-gpu/etc/shadow /tmp/x"):
             with self.subTest(bad=bad):
                 self.assertFalse(self.allowed(4, bad))
+
+    def storage(self, uid=1001000, mode=0o700, symlink=False, missing=False):
+        root = Path(tempfile.mkdtemp(prefix="polyseat-storage-"))
+        self.addCleanup(shutil.rmtree, root)
+        target = root / "mnt/cache/polyseat/steam-seat"
+        target.parent.mkdir(parents=True)
+        if symlink:
+            (root / "elsewhere").mkdir(mode=0o700)
+            target.symlink_to(root / "elsewhere")
+        elif not missing:
+            target.mkdir(mode=mode)
+            target.chmod(mode)
+        # The fixture cannot chown without root: stat reports the uid/gid under test for the storage directory.
+        body = ('init_paths; real_stat=$(command -v stat); '
+                'stat() { if [[ ${4:-} == *steam-seat ]]; then echo "$UIDX $UIDX $("$real_stat" -c %a -- "$4")"; '
+                'else "$real_stat" "$@"; fi; }; steam_storage_precheck && echo STORAGE_OK')
+        return source_ctl(body, env={"PATH": "/usr/bin:/bin", "UIDX": str(uid), "POLYSEAT_ROOT": str(root)})
+
+    def test_storage_precheck_needs_the_players_private_directory(self):
+        self.assertIn("STORAGE_OK", self.storage().stdout)
+        self.assertNotIn("STORAGE_OK", self.storage(uid=0).stdout)        # root-owned: the player could not write
+        self.assertNotIn("STORAGE_OK", self.storage(uid=1000).stdout)     # host uid 1000 is not the seat's player
+        self.assertNotIn("STORAGE_OK", self.storage(mode=0o755).stdout)   # others could read the Steam login
+        self.assertNotIn("STORAGE_OK", self.storage(symlink=True).stdout)
+        self.assertNotIn("STORAGE_OK", self.storage(missing=True).stdout)
+
+    def test_storage_is_checked_before_start_and_never_removed(self):
+        text = CTL.read_text()
+        body = re.search(r"^cmd_steam_smoke\(\) \(\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
+        self.assertLess(body.index("steam_storage_precheck ||"), body.index("svc_start"))
+        pre = re.search(r"^steam_storage_precheck\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL).group(0)
+        for needle in ('[[ $src == "$STEAM_STORAGE_DATASET zfs" ]]', "zfs get -Hp -o value quota", "STEAM_STORAGE_MIN_FREE_KB"):
+            self.assertIn(needle, pre)
+        self.assertNotIn("STEAM_STORAGE_HOST", re.search(r"^remove_lxc_rootfs_mount\(\) \{.*?^\}", text,
+                                                           re.MULTILINE | re.DOTALL).group(0))
 
     def test_lan_precheck_needs_br0_as_a_bridge_and_a_free_mac(self):
         res = self.lan({"br0": (True, "aa:bb:cc:00:00:01", ["bond0", "vnet15"]), "bond0": (False, "aa:bb:cc:00:00:02", [])})

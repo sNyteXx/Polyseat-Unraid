@@ -46,7 +46,7 @@ CHECKS=$STATE/checks.jsonl
 ev_system_state=''; ev_failed_units=''; ev_outputs=''; ev_shot_sha=''; ev_shot_w=0; ev_shot_h=0; ev_colours=0
 ev_encoder_lines=''; ev_capture_lines=''; ev_sunshine_errors=''; ev_ifaces=''; ev_listeners=''; ev_nvidia=''
 ev_left_procs=''
-ev_lan=''; ev_vulkan=''; ev_glx64=''; ev_glx32=''; ev_steam_windows=''; ev_steam_log=''; ev_steam_gl=''; ev_steam_elf=''; ev_lib32=''
+ev_lan=''; ev_steam_storage=''; ev_vulkan=''; ev_glx64=''; ev_glx32=''; ev_steam_windows=''; ev_steam_log=''; ev_steam_gl=''; ev_steam_elf=''; ev_lib32=''
 profile_switched=0
 sway_started=0
 steam_started=0
@@ -142,6 +142,7 @@ finish() { # emits the JSON and exits; called once
     --arg nvidia "$ev_nvidia" --arg left "$ev_left_procs" \
     --arg lan "$ev_lan" --arg glx64 "$ev_glx64" --arg glx32 "$ev_glx32" --arg lib32 "$ev_lib32" --arg vk "$ev_vulkan" \
     --arg swin "$ev_steam_windows" --arg slog "$ev_steam_log" --arg sgl "$ev_steam_gl" --arg self "$ev_steam_elf" \
+    --arg sstore "$ev_steam_storage" \
     "{schema: \$schema, mode: \$mode, profile: \$profile, verdict: \$verdict, reason: \$reason, total_ms: \$total_ms,
       checks: \$checks,
       evidence: {
@@ -153,7 +154,7 @@ finish() { # emits the JSON and exits; called once
         nvidia_smi: (\$nvidia | $lines),
         lan: (\$lan | $lines),
         gl: {glx64: (\$glx64 | $lines), glx32: (\$glx32 | $lines), nvidia_lib32: (\$lib32 | $lines), vulkan: (\$vk | $lines)},
-        steam: {windows: (\$swin | $lines), log_tail: (\$slog | $lines), nvidia_gl_mapped: (\$sgl | $lines),
+        steam: {storage: \$sstore, windows: (\$swin | $lines), log_tail: (\$slog | $lines), nvidia_gl_mapped: (\$sgl | $lines),
           processes_elf: (\$self | $lines)},
         processes_left: (\$left | split(\";\") | map(select(length > 0)))
       }}" | tee "$STATE/result.json"
@@ -382,7 +383,19 @@ if [ "$STEAM" = 1 ]; then
     fi
   fi
 
-  # --- 6c. Steam: bootstrap, self-update over the LAN, then its sign-in window. Nobody signs in. ----------------------
+  # --- 6c. Steam's persistent storage: a separate mount the player can write; counts the seat runs on it. ------------
+  t=$(now)
+  sdir=$HOME_DIR/.local/share/Steam
+  # shellcheck disable=SC2016  # $1 expands in the player's shell
+  if mountpoint -q "$sdir" && as_player sh -c ': > "$1/.polyseat-write-test" && rm -f "$1/.polyseat-write-test"' x "$sdir"; then
+    runs=$(as_player sh -c 'date -u +%FT%TZ >> "$1/.polyseat-seat-runs" && wc -l < "$1/.polyseat-seat-runs"' x "$sdir")
+    ev_steam_storage="$(findmnt -n -o SOURCE,FSTYPE --target "$sdir" 2>/dev/null | tr -s ' ') free=$(df -h --output=avail "$sdir" | tail -n 1 | tr -d ' ') run=${runs:-?}"
+    check steam-storage pass "persistent mount: $ev_steam_storage" "$t"
+  else
+    check steam-storage fail "$sdir is not a separate, player-writable mount: $(findmnt -n -o SOURCE,FSTYPE --target "$sdir" 2>&1 | head -n 1)" "$t"; exit 1
+  fi
+
+  # --- 6d. Steam: bootstrap, self-update over the LAN, then its sign-in window. Nobody signs in. ----------------------
   t=$(now)
   steam_started=1
   if ! as_player timeout 40 systemd-run --user --quiet --collect --unit="$STEAM_UNIT" \
