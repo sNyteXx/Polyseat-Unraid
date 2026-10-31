@@ -44,6 +44,21 @@ CANARY_HEALTH_TIMEOUT=60  # fixed: identical in the CI rehearsal and on Tower, n
 # Incus 7.5.1 cmd/incusd/main_daemon.go `neededPrograms`: the daemon exits unless each one resolves on PATH.
 # The build fails if this list and the pinned source drift apart (unraid/scripts/lib/build-core.sh).
 INCUSD_REQUIRED_PROGRAMS="ip rsync setfattr tar unsquashfs xz"
+# M1 desktop canary: one signed seat image, one NIC-less unprivileged container, a fixed in-image self-test.
+# Under the canary envelope LXC sees no delegated controllers, so Incus silently skips the instance's limits.*;
+# the HARD limits are these outer-group values (still the four E-cores). Sized from the CI measurement:
+# the RAM-backed rootfs unpacked by incusd is charged to this group.
+SEAT_IMAGE_NAMESPACE="polyseat-unraid-seat-image"
+SEAT_IMAGE_MAX_BYTES=$((1024 * 1024 * 1024))
+DESKTOP_INSTANCE="polyseat-desktop-cpu"
+DESKTOP_ALIAS="polyseat-desktop"
+DESKTOP_SELFTEST="/usr/local/bin/polyseat-selftest"
+DESKTOP_CPU_MAX="200000 100000"  # two CPUs' worth
+DESKTOP_MEMORY_MAX=$((3 * 1024 * 1024 * 1024))
+DESKTOP_PIDS_MAX=2048
+DESKTOP_DATA_MAX_KB=$((3 * 1024 * 1024))
+DESKTOP_EVIDENCE_MAX_BYTES=$((8 * 1024 * 1024))
+CANARY_INSTANCE="polyseat-canary-cpu"
 CANARY_SIGN_IDENTITY="polyseat-unraid-canary-approver"
 CANARY_SIGN_NAMESPACE="polyseat-unraid-canary-approval-v1"
 
@@ -81,6 +96,10 @@ init_paths() {
   if ci_real_system; then SUBID_DIR=/etc; fi
   UNRAID_VERSION_FILE="$ROOT/etc/unraid-version"
   SCHEMA="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../schema.json"
+  SEAT_DIR="$RUN_DIR/seat-image"
+  SEAT_IMAGE="$SEAT_DIR/image"
+  SEAT_MANIFEST="$SEAT_DIR/manifest.json"
+  SEAT_EVIDENCE="$RUN_DIR/desktop-evidence"
   PIDFILE="$RUN_DIR/incusd.pid"
   LOCKFILE="$RUN_DIR/lock"
 }
@@ -231,7 +250,10 @@ canary_approval_for() { # command args... (root only, non-sandbox)
   now=$(date -u +%s)
   host_sha=$(canary_host_sha256) || die $EX_BLOCKED "cannot fingerprint canary host"
   jq -e --argjson now "$now" --arg host "$host_sha" --arg action "$action" '
-    (keys | sort) == ["actions", "archive_sha256", "expires_at", "host_sha256", "issued_at", "schema"] and
+    ((keys | sort) == ["actions", "archive_sha256", "expires_at", "host_sha256", "issued_at", "schema"] or
+     ((keys | sort) == ["actions", "archive_sha256", "expires_at", "host_sha256", "issued_at", "schema",
+        "seat_image_sha256"] and (.seat_image_sha256 | type == "string" and test("^[0-9a-f]{64}$")))) and
+    ((.actions | any(.[]; . == "seat-image-stage" or . == "desktop-smoke")) == has("seat_image_sha256")) and
     .schema == 1 and .host_sha256 == $host and
     (.archive_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
     (.issued_at | type == "number" and . == floor) and
@@ -241,6 +263,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
     (.actions | type == "array" and length <= 6 and length > 0 and
       (unique | length) == length and all(.[];
        . == "stage" or . == "activate" or . == "start" or . == "canary-smoke" or
+       . == "seat-image-stage" or . == "desktop-smoke" or
        . == "config-set" or . == "config-reset")) and
     (.actions | index($action) != null)' "$CANARY_APPROVAL" >/dev/null 2>&1 ||
     die $EX_BLOCKED "canary approval expired, wrong host, invalid scope or bad schema"
@@ -253,6 +276,20 @@ canary_approval_for() { # command args... (root only, non-sandbox)
     start | canary-smoke)
       read_pointer
       target=$PTR_CURRENT ;;
+    seat-image-stage | desktop-smoke)
+      # Both the runtime bundle AND the exact seat image bytes are bound by the owner's token.
+      local image_sha
+      read_pointer
+      target=$PTR_CURRENT
+      if [[ $action == seat-image-stage ]]; then
+        [[ -f ${1:-} && ! -L ${1:-} ]] || die $EX_BLOCKED "seat image unavailable"
+        image_sha=$(sha256sum -- "$1" | awk '{print $1}')
+      else
+        [[ -f $SEAT_IMAGE && ! -L $SEAT_IMAGE ]] || die $EX_BLOCKED "no staged seat image"
+        image_sha=$(sha256sum -- "$SEAT_IMAGE" | awk '{print $1}')
+      fi
+      [[ $image_sha == "$(jq -r .seat_image_sha256 "$CANARY_APPROVAL")" ]] ||
+        die $EX_BLOCKED "canary approval is bound to another seat image SHA-256" ;;
     config-set | config-reset)
       # The canary must never become an unattended boot service.
       if [[ $action == config-set ]]; then
@@ -960,7 +997,23 @@ canary_command_allowed() {
     'query /1.0/projects?recursion=1' | 'query /1.0/profiles?recursion=1' | \
     'query /1.0/instances?recursion=1' | 'query /1.0/storage-pools?recursion=1' | \
     'query /1.0/networks?recursion=1' | 'query /1.0/instances/polyseat-canary-cpu/state') return 0 ;;
+    "query /1.0/instances/$DESKTOP_INSTANCE/state") [[ $CANARY_OPERATION -ne 1 ]] && return 0 ;;
   esac
+  if [[ $CANARY_OPERATION -eq 2 ]]; then
+    case "$*" in
+      "storage create default dir source=$INCUS_DIR/storage-pools/default" | \
+      'profile device add default root disk path=/ pool=default' | \
+      "image import $SEAT_IMAGE --alias $DESKTOP_ALIAS" | \
+      "init $DESKTOP_ALIAS $DESKTOP_INSTANCE --storage default --config boot.autostart=false --config security.privileged=false --config security.nesting=false --config limits.cpu=2 --config limits.memory=2GiB --config limits.processes=1024" | \
+      "image delete $DESKTOP_ALIAS" | "start $DESKTOP_INSTANCE" | \
+      "query /1.0/instances/$DESKTOP_INSTANCE/state" | \
+      "exec $DESKTOP_INSTANCE -- $DESKTOP_SELFTEST desktop" | \
+      "exec $DESKTOP_INSTANCE -- /usr/bin/head -c $DESKTOP_EVIDENCE_MAX_BYTES /var/lib/polyseat-selftest/screenshot.png" | \
+      "stop $DESKTOP_INSTANCE --timeout 30" | "stop $DESKTOP_INSTANCE --force --timeout 5" | \
+      "delete $DESKTOP_INSTANCE") return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   [[ $CANARY_OPERATION -eq 1 ]] || return 1
   case "$*" in
     "storage create default dir source=$INCUS_DIR/storage-pools/default" | \
@@ -1040,9 +1093,25 @@ canary_cgroup_prepare() {
   fi
 }
 
+# Exactly two fixed budgets exist: the CPU canary's (defaults above) and the desktop canary's.
+canary_budget_select() { # cpu|desktop
+  case "$1" in
+    cpu) ;;
+    desktop)
+      CANARY_CPU_MAX=$DESKTOP_CPU_MAX CANARY_MEMORY_MAX=$DESKTOP_MEMORY_MAX
+      CANARY_PIDS_MAX=$DESKTOP_PIDS_MAX CANARY_DATA_MAX_KB=$DESKTOP_DATA_MAX_KB
+      CANARY_INSTANCE=$DESKTOP_INSTANCE ;;
+    *) return 1 ;;
+  esac
+}
+
 canary_cgroup_check() {
   [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
   [[ -d $CANARY_CGROUP && ! -L $CANARY_CGROUP ]] || return 1
+  # A read-only caller (health/status) in another process infers the running budget; any third tuple fails.
+  if [[ $CANARY_OPERATION -eq 0 && $(< "$CANARY_CGROUP/memory.max") == "$DESKTOP_MEMORY_MAX" ]]; then
+    canary_budget_select desktop
+  fi
   [[ $(< "$CANARY_CGROUP/cpuset.cpus") == "$CANARY_CPUSET" &&
      $(< "$CANARY_CGROUP/cpu.max") == "$CANARY_CPU_MAX" &&
      $(< "$CANARY_CGROUP/memory.max") == "$CANARY_MEMORY_MAX" &&
@@ -1298,7 +1367,8 @@ canary_profile_guard() {
   networks=$(INCUS_CMD_TIMEOUT=5 run_incus query '/1.0/networks?recursion=1') || return 1
   jq -en --argjson server "$server" --argjson projects "$projects" --argjson profiles "$profiles" \
     --argjson instances "$instances" --argjson pools "$pools" --argjson networks "$networks" \
-    --arg source "$INCUS_DIR/storage-pools/default" '
+    --arg source "$INCUS_DIR/storage-pools/default" --arg inst "$CANARY_INSTANCE" \
+    --argjson desktop "$([[ $CANARY_INSTANCE == "$DESKTOP_INSTANCE" ]] && echo true || echo false)" '
     def object: if type == "object" and .type == "sync" and .status_code == 200
       then .metadata else . end | if type == "object" then . else error("unexpected API object") end;
     def records: if type == "array" then . elif .type == "sync" and .status_code == 200
@@ -1313,7 +1383,9 @@ canary_profile_guard() {
         "volatile.apply_template", "volatile.cloud-init.instance-id"] | index($k) != null)
         and (.value|type == "string") or
       (.key == "boot.autostart" or .key == "security.privileged" or .key == "security.nesting")
-        and .value == "false"));
+        and .value == "false" or
+      $desktop and ((.key == "limits.cpu" and .value == "2") or (.key == "limits.memory" and .value == "2GiB") or
+        (.key == "limits.processes" and .value == "1024"))));
     def project_cfg: type == "object" and (to_entries | all(.[];
       (.key as $k | ["features.images", "features.networks", "features.networks.zones",
         "features.profiles", "features.storage.buckets", "features.storage.volumes"] | index($k) != null)
@@ -1331,7 +1403,7 @@ canary_profile_guard() {
       (.config | type == "object" and .source == $source and
         (to_entries|all(.[]; (.key == "source" or .key == "volatile.initial_source") and .value == $source))))) and
     ($is | length <= 1 and all(.[];
-      .type == "container" and .name == "polyseat-canary-cpu" and
+      .type == "container" and .name == $inst and
       (.profiles == ["default"]) and
       (.config // {} | safe_cfg) and
       (.expanded_config // {} | safe_cfg) and
@@ -1445,7 +1517,11 @@ svc_start() {
   local timeout i foreign slot_real active_sha deadline tool
   if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
     require_approval start
-    if [[ $CANARY_OPERATION -eq 1 ]]; then canary_approval_for canary-smoke; else canary_approval_for start; fi
+    case "$CANARY_OPERATION" in
+      1) canary_approval_for canary-smoke ;;
+      2) canary_approval_for desktop-smoke ;;
+      *) canary_approval_for start ;;
+    esac
     canary_host_pressure_check || { log error "canary: host memory/load outside approved safety window"; return 1; }
   fi
   [[ -L $CURRENT ]] || { log error "no active bundle"; return 1; }
@@ -1591,7 +1667,7 @@ canary_image_verify() {
 
 canary_instance_containment() {
   local state namespace_pid file pid found=""
-  state=$(run_incus query /1.0/instances/polyseat-canary-cpu/state) || return 1
+  state=$(run_incus query "/1.0/instances/$CANARY_INSTANCE/state") || return 1
   namespace_pid=$(jq -er '(.metadata // .).pid | select(type == "number" and . > 1 and . == floor)' <<< "$state") || return 1
   # The API returns a PID in the daemon namespace, not a host PID. Resolve it
   # using only processes in our bounded cgroup tree, then verify subordinate
@@ -1650,6 +1726,146 @@ cmd_canary_smoke() (
   svc_stop full || exit $EX_HEALTH
   trap - EXIT
   printf 'PASS: fresh CPU-only canary lifecycle; state retained, no persistence claim.\n'
+)
+
+# ---------------------------------------------------------- seat image ----
+# A seat image is NOT part of the flash-staged runtime bundle (too large for flash). It is verified like one:
+# a strict manifest signed by the release key under its own namespace (a bundle signature can never be
+# replayed as an image signature), the exact byte count and SHA-256, then copied into a root-private RAM
+# directory and hashed again. Only that copy is ever imported.
+validate_seat_manifest() { # manifest sha size
+  jq -e --arg sha "$2" --argjson size "$3" --argjson max "$SEAT_IMAGE_MAX_BYTES" \
+    --argjson unpacked "$((DESKTOP_DATA_MAX_KB * 1024))" --arg alias "$DESKTOP_ALIAS" --arg selftest "$DESKTOP_SELFTEST" '
+    (keys == ["alias", "created_at", "image_sha256", "image_size", "name", "profiles", "schema", "selftest",
+              "source_commit", "unpacked_bytes"]) and
+    .schema == 1 and .name == $alias and .alias == $alias and .selftest == $selftest and
+    .image_sha256 == $sha and .image_size == $size and $size > 0 and $size <= $max and
+    (.unpacked_bytes | type == "number" and . == floor and . > 0 and . < $unpacked) and
+    (.source_commit | type == "string" and test("^[0-9a-f]{40}$")) and
+    (.created_at | type == "number" and . == floor and . > 0) and
+    (.profiles | type == "array" and index("cpu") != null and all(.[]; . == "cpu" or . == "nvidia") and
+      (unique | length) == length)' "$1" >/dev/null 2>&1
+}
+
+verify_seat_signature() { # manifest sig
+  [[ -f $SIGNERS && ! -L $SIGNERS && -f $2 && ! -L $2 ]] || return 1
+  local -a revoke=()
+  if [[ -e $REVOKED || -L $REVOKED ]]; then
+    [[ -f $REVOKED && ! -L $REVOKED ]] || return 1
+    revoke=(-r "$REVOKED")
+  fi
+  ssh-keygen -Y verify -f "$SIGNERS" -I "$SIGN_IDENTITY" -n "$SEAT_IMAGE_NAMESPACE" "${revoke[@]}" \
+    -s "$2" < "$1" >/dev/null 2>&1
+}
+
+seat_image_verify_staged() { # : the staged copy still matches its signed manifest
+  local sha size
+  [[ -d $SEAT_DIR && ! -L $SEAT_DIR && $(stat -c '%u %a' -- "$SEAT_DIR") == '0 700' ]] || sandbox || return 1
+  [[ -f $SEAT_IMAGE && ! -L $SEAT_IMAGE && -f $SEAT_MANIFEST && ! -L $SEAT_MANIFEST &&
+     -f $SEAT_MANIFEST.sig && ! -L $SEAT_MANIFEST.sig ]] || return 1
+  size=$(stat -c %s -- "$SEAT_IMAGE") && sha=$(sha256sum -- "$SEAT_IMAGE" | awk '{print $1}') || return 1
+  verify_seat_signature "$SEAT_MANIFEST" "$SEAT_MANIFEST.sig" && validate_seat_manifest "$SEAT_MANIFEST" "$sha" "$size"
+}
+
+cmd_seat_image_stage() { # image manifest sig
+  local image=${1:-} manifest=${2:-} sig=${3:-} sha size avail tmp f
+  [[ $# -eq 3 ]] || die $EX_USAGE "seat-image-stage IMAGE MANIFEST SIG --approve"
+  require_approval seat-image-stage
+  require_no_journal
+  for f in "$image" "$manifest" "$sig"; do [[ -f $f && ! -L $f ]] || die $EX_VERIFY "missing or non-regular input: $f"; done
+  size=$(stat -c %s -- "$image") || die $EX_VERIFY "cannot stat seat image"
+  [[ $size -gt 0 && $size -le $SEAT_IMAGE_MAX_BYTES ]] || die $EX_VERIFY "seat image size outside limits"
+  sha=$(sha256sum -- "$image" | awk '{print $1}')
+  verify_seat_signature "$manifest" "$sig" || die $EX_VERIFY "seat image manifest signature invalid"
+  validate_seat_manifest "$manifest" "$sha" "$size" || die $EX_VERIFY "seat image manifest invalid or not bound to this image"
+  avail=$(awk '/^MemAvailable:/ { print $2 }' "$(host_path /proc/meminfo)" 2>/dev/null)
+  if ! sandbox; then
+    [[ $avail =~ ^[0-9]+$ && $avail -ge $((size / 1024 + CANARY_HOST_MIN_AVAILABLE_KB)) ]] ||
+      die $EX_SPACE "not enough available memory to stage the seat image in RAM"
+  fi
+  if [[ -e $SEAT_DIR || -L $SEAT_DIR ]]; then
+    [[ -d $SEAT_DIR && ! -L $SEAT_DIR ]] || die $EX_BLOCKED "unexpected seat image path"
+    [[ -z $(find "$SEAT_DIR" -mindepth 1 -maxdepth 1 -print -quit) ]] ||
+      die $EX_BLOCKED "a seat image is already staged; uninstall or inspect it first"
+  else
+    (umask 077; mkdir -- "$SEAT_DIR") || die $EX_BLOCKED "cannot create $SEAT_DIR"
+  fi
+  chmod 0700 -- "$SEAT_DIR"
+  tmp="$SEAT_DIR/.incoming"
+  if ! { cp -- "$image" "$tmp" && chmod 0600 -- "$tmp"; }; then rm -f -- "$tmp"; die $EX_SPACE "copy failed"; fi
+  [[ $(sha256sum -- "$tmp" | awk '{print $1}') == "$sha" ]] || { rm -f -- "$tmp"; die $EX_VERIFY "copy does not match"; }
+  if ! { cp -- "$manifest" "$SEAT_MANIFEST" && cp -- "$sig" "$SEAT_MANIFEST.sig" &&
+         chmod 0600 -- "$SEAT_MANIFEST" "$SEAT_MANIFEST.sig" && mv -f -- "$tmp" "$SEAT_IMAGE"; }; then
+    rm -f -- "$tmp" "$SEAT_MANIFEST" "$SEAT_MANIFEST.sig"
+    die $EX_SPACE "staging failed"
+  fi
+  seat_image_verify_staged || { rm -f -- "$SEAT_IMAGE" "$SEAT_MANIFEST" "$SEAT_MANIFEST.sig"; die $EX_VERIFY "staged seat image failed re-verification"; }
+  log info "seat image $sha staged in RAM ($size bytes)"
+  echo "$sha"
+}
+
+seat_image_remove_exact() {
+  rm -f -- "$SEAT_DIR/.incoming" "$SEAT_IMAGE" "$SEAT_MANIFEST" "$SEAT_MANIFEST.sig"
+  rmdir -- "$SEAT_DIR" 2>/dev/null || true
+}
+
+desktop_selftest() { # phase : run the signed image's fixed self-test, keep its bounded JSON and screenshot
+  local phase=$1 out png
+  out=$(INCUS_CMD_TIMEOUT=150 run_incus exec "$DESKTOP_INSTANCE" -- "$DESKTOP_SELFTEST" desktop | head -c 262144) || true
+  printf '%s\n' "$out" > "$SEAT_EVIDENCE/selftest-$phase.json"
+  jq -e '.verdict == "PASS"' <<< "$out" >/dev/null 2>&1 || { log error "desktop self-test ($phase) did not pass"; return 1; }
+  png="$SEAT_EVIDENCE/screenshot-$phase.png"
+  INCUS_CMD_TIMEOUT=30 run_incus exec "$DESKTOP_INSTANCE" -- /usr/bin/head -c "$DESKTOP_EVIDENCE_MAX_BYTES" \
+    /var/lib/polyseat-selftest/screenshot.png | head -c "$DESKTOP_EVIDENCE_MAX_BYTES" > "$png" || return 1
+  [[ $(head -c 8 -- "$png" | od -An -tx1 | tr -d ' \n') == 89504e470d0a1a0a ]] || { log error "screenshot is not a PNG"; return 1; }
+  log info "desktop self-test ($phase) PASS; screenshot $(sha256sum -- "$png" | awk '{print $1}')"
+}
+
+cmd_desktop_smoke() (
+  [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 0 ]] || die $EX_BLOCKED "desktop-smoke needs a canary build and takes no arguments"
+  require_approval desktop-smoke
+  require_no_journal
+  read_pointer
+  [[ -n $PTR_CURRENT && $(current_sha_from_link) == "$PTR_CURRENT" ]] || die $EX_BLOCKED "no active canary bundle"
+  { verify_bundle_files "$PTR_CURRENT" && verify_slot "$PTR_CURRENT"; } || die $EX_VERIFY "runtime bundle failed verification"
+  seat_image_verify_staged || die $EX_VERIFY "staged seat image failed verification"
+  [[ ! -e $SEAT_EVIDENCE && ! -L $SEAT_EVIDENCE ]] || die $EX_BLOCKED "desktop evidence from an earlier run exists; collect it first"
+  (umask 077; mkdir -- "$SEAT_EVIDENCE") || die $EX_BLOCKED "cannot create evidence directory"
+  canary_budget_select desktop
+  CANARY_OPERATION=2
+  trap 'rc=$?; if [[ $CANARY_RUN_OWNED -eq 1 ]]; then svc_stop full || rc=4; fi; exit "$rc"' EXIT
+  svc_start || exit $EX_HEALTH
+  canary_profile_guard || exit $EX_HEALTH
+  log info "desktop phase: storage"
+  run_incus storage create default dir "source=$INCUS_DIR/storage-pools/default" || exit $EX_HEALTH
+  run_incus profile device add default root disk path=/ pool=default || exit $EX_HEALTH
+  canary_profile_guard || exit $EX_HEALTH
+  log info "desktop phase: import"
+  seat_image_verify_staged || exit $EX_VERIFY
+  INCUS_CMD_TIMEOUT=300 run_incus image import "$SEAT_IMAGE" --alias "$DESKTOP_ALIAS" || exit $EX_HEALTH
+  INCUS_CMD_TIMEOUT=300 run_incus init "$DESKTOP_ALIAS" "$DESKTOP_INSTANCE" --storage default \
+    --config boot.autostart=false --config security.privileged=false --config security.nesting=false \
+    --config limits.cpu=2 --config limits.memory=2GiB --config limits.processes=1024 || exit $EX_HEALTH
+  # The dir pool holds a full copy; dropping the cached image frees its RAM before anything runs.
+  INCUS_CMD_TIMEOUT=60 run_incus image delete "$DESKTOP_ALIAS" || exit $EX_HEALTH
+  canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+  for phase in start restart; do
+    log info "desktop phase: $phase"
+    INCUS_CMD_TIMEOUT=60 run_incus start "$DESKTOP_INSTANCE" || exit $EX_HEALTH
+    canary_instance_containment && canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+    desktop_selftest "$phase" || exit $EX_HEALTH
+    canary_budget_check || exit $EX_HEALTH
+    log info "desktop phase: stop"
+    INCUS_CMD_TIMEOUT=45 run_incus stop "$DESKTOP_INSTANCE" --timeout 30 ||
+      INCUS_CMD_TIMEOUT=20 run_incus stop "$DESKTOP_INSTANCE" --force --timeout 5 || exit $EX_HEALTH
+  done
+  log info "desktop phase: delete"
+  INCUS_CMD_TIMEOUT=120 run_incus delete "$DESKTOP_INSTANCE" || exit $EX_HEALTH
+  canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+  log info "desktop phase: daemon-stop"
+  svc_stop full || exit $EX_HEALTH
+  trap - EXIT
+  printf 'PASS: CPU-only desktop canary (systemd, headless sway, screenshot, Sunshine software encoder); no NIC, no GPU, no persistence claim.\n'
 )
 
 # --------------------------------------------------------- transaction ----
@@ -1866,6 +2082,7 @@ cmd_uninstall() {
   subid_file_remove "$SUBID_DIR/subuid" || true
   subid_file_remove "$SUBID_DIR/subgid" || true
   rm -f -- "$PIDFILE"
+  seat_image_remove_exact
   rmdir -- "$RUN_DIR/client" 2>/dev/null || true
   rmdir -- "$SLOTS" "$RAM_DIR" 2>/dev/null || true
   rmdir -- "$BUNDLE_DIR" "$STATE_DIR" 2>/dev/null || true
@@ -2346,6 +2563,7 @@ usage: polyseatctl COMMAND [args]
  settings:   config-set KEY=VALUE... | config-reset
  service:    start | stop | restart | boot
  canary:     canary-smoke --approve (fixed local image; one-shot CPU-only run)
+             seat-image-stage IMAGE MANIFEST SIG --approve | desktop-smoke --approve (M1, NIC-less)
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
 EOF
@@ -2375,7 +2593,7 @@ main() {
     metrics) cmd_metrics; return ;;
     logs) cmd_logs "${args[@]}"; return ;;
     config-get) cmd_config_get; return ;;
-    stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke) ;;
+    stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke | seat-image-stage | desktop-smoke) ;;
     *) usage ;;
   esac
   require_mutation_allowed "$cmd" "${args[@]}"
@@ -2400,6 +2618,8 @@ main() {
     config-set) cmd_config_set "${args[@]}" ;;
     config-reset) cmd_config_reset ;;
     canary-smoke) cmd_canary_smoke "${args[@]}" ;;
+    seat-image-stage) cmd_seat_image_stage "${args[@]}" ;;
+    desktop-smoke) cmd_desktop_smoke "${args[@]}" ;;
     start)
       require_no_journal
       read_pointer

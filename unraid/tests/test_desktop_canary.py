@@ -1,0 +1,344 @@
+"""M1 desktop canary: token binding, fixed command list, policy guard and RAM staging.
+
+Disposable keys and /tmp sandboxes only; no Incus daemon, no cgroup and no host path is touched.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from unraid.tests.ctl_support import CTL, Sandbox
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+ROOT_DISK = {"type": "disk", "path": "/", "pool": "default"}
+COMMIT = "1" * 40
+
+
+def make_manifest(image: Path, out: Path, *, unpacked=1_500_000_000, commit=COMMIT, created="1790000000"):
+    env = dict(os.environ, SOURCE_DATE_EPOCH=created)
+    return subprocess.run([sys.executable, "-I", str(SCRIPTS / "make-seat-manifest.py"), "--image", str(image),
+                           "--unpacked-bytes", str(unpacked), "--source-commit", commit, "--out", str(out)],
+                          capture_output=True, text=True, env=env, check=False)
+
+
+def source_ctl(body: str, *args: str, env: dict | None = None):
+    script = "source <(sed '$d' \"$1\")\nshift\n" + body
+    return subprocess.run(["bash", "-c", script, "desktop-test", str(CTL), *args],
+                          env=env or {"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=False)
+
+
+class SeatManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="polyseat-seat-manifest-")
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.image = self.dir / "image.tar.xz"
+        self.image.write_bytes(b"seat-image-fixture" * 100)
+
+    def test_manifest_has_exactly_the_controller_keys(self):
+        res = make_manifest(self.image, self.dir / "m.json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        data = json.loads((self.dir / "m.json").read_text())
+        self.assertEqual(sorted(data), ["alias", "created_at", "image_sha256", "image_size", "name", "profiles",
+                                        "schema", "selftest", "source_commit", "unpacked_bytes"])
+        self.assertEqual(data["image_sha256"], hashlib.sha256(self.image.read_bytes()).hexdigest())
+
+    def test_refuses_oversized_unpack_bad_commit_and_overwrite(self):
+        self.assertNotEqual(make_manifest(self.image, self.dir / "a.json", unpacked=4 * 1024**3).returncode, 0)
+        self.assertNotEqual(make_manifest(self.image, self.dir / "b.json", commit="abc").returncode, 0)
+        (self.dir / "c.json").write_text("{}")
+        self.assertNotEqual(make_manifest(self.image, self.dir / "c.json").returncode, 0)
+
+
+class DesktopAllowListTests(unittest.TestCase):
+    def allowed(self, operation: int, command: str) -> bool:
+        body = r'''
+          POLYSEAT_RELEASE_GATE=canary
+          init_paths
+          INCUS_DIR=/var/lib/polyseat-unraid-canary/incus
+          CANARY_OPERATION=$1
+          eval "set -- $2"
+          canary_command_allowed "$@"
+        '''
+        return source_ctl(body, str(operation), command).returncode == 0
+
+    SEQUENCE = (
+        "storage create default dir source=/var/lib/polyseat-unraid-canary/incus/storage-pools/default",
+        "profile device add default root disk path=/ pool=default",
+        "image import /var/run/polyseat-unraid/seat-image/image --alias polyseat-desktop",
+        "init polyseat-desktop polyseat-desktop-cpu --storage default --config boot.autostart=false "
+        "--config security.privileged=false --config security.nesting=false --config limits.cpu=2 "
+        "--config limits.memory=2GiB --config limits.processes=1024",
+        "image delete polyseat-desktop",
+        "start polyseat-desktop-cpu",
+        "query /1.0/instances/polyseat-desktop-cpu/state",
+        "exec polyseat-desktop-cpu -- /usr/local/bin/polyseat-selftest desktop",
+        "exec polyseat-desktop-cpu -- /usr/bin/head -c 8388608 /var/lib/polyseat-selftest/screenshot.png",
+        "stop polyseat-desktop-cpu --timeout 30",
+        "stop polyseat-desktop-cpu --force --timeout 5",
+        "delete polyseat-desktop-cpu",
+    )
+
+    def test_exact_desktop_sequence_is_allowed_only_for_the_desktop_operation(self):
+        for command in self.SEQUENCE:
+            with self.subTest(command=command):
+                self.assertTrue(self.allowed(2, command))
+                if not command.startswith(("storage create", "profile device")):
+                    self.assertFalse(self.allowed(1, command))
+                    self.assertFalse(self.allowed(0, command) and "query" not in command)
+
+    def test_variations_are_refused(self):
+        for command in (
+            "exec polyseat-desktop-cpu -- /usr/local/bin/polyseat-selftest nvidia",
+            "exec polyseat-desktop-cpu -- /bin/bash",
+            "init polyseat-desktop polyseat-desktop-cpu --storage default --config boot.autostart=false "
+            "--config security.privileged=true --config security.nesting=false --config limits.cpu=2 "
+            "--config limits.memory=2GiB --config limits.processes=1024",
+            "config device add polyseat-desktop-cpu gpu gpu pci=0000:01:00.0",
+            "config device add polyseat-desktop-cpu eth0 nic nictype=bridged parent=br0",
+            "image import /tmp/other.tar.xz --alias polyseat-desktop",
+            "image import /var/lib/polyseat-unraid-canary/busybox.tar.gz --alias polyseat-canary-busybox",
+            "exec polyseat-canary-cpu -- /bin/busybox echo POLYSEAT_CANARY_OK",
+            "start polyseat-canary-cpu",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(self.allowed(2, command))
+
+
+class DesktopPolicyGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="polyseat-desktop-policy-")
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        cfg = {"image.os": "Archlinux", "volatile.uuid": "a", "boot.autostart": "false",
+               "security.privileged": "false", "security.nesting": "false",
+               "limits.cpu": "2", "limits.memory": "2GiB", "limits.processes": "1024"}
+        self.instance = {"type": "container", "name": "polyseat-desktop-cpu", "profiles": ["default"],
+                         "config": dict(cfg), "expanded_config": dict(cfg),
+                         "devices": {}, "expanded_devices": {"root": ROOT_DISK}}
+
+    def guard(self, instance, profile="desktop"):
+        data = {
+            "server": {"config": {}, "environment": {"server_clustered": False}},
+            "projects": [{"name": "default", "config": {}}],
+            "profiles": [{"name": "default", "config": {}, "devices": {"root": ROOT_DISK}}],
+            "instances": [instance],
+            "pools": [{"name": "default", "driver": "dir",
+                       "config": {"source": "/var/lib/polyseat-unraid-canary/incus/storage-pools/default"}}],
+            "networks": [{"name": "lo", "managed": False}],
+        }
+        for name, value in data.items():
+            (self.dir / f"{name}.json").write_text(json.dumps(value))
+        body = r'''
+          POLYSEAT_RELEASE_GATE=canary
+          INCUS_DIR=/var/lib/polyseat-unraid-canary/incus
+          canary_budget_select "$1"
+          run_incus() {
+            case "$2" in
+              '/1.0') jq . "$TEST_DIR/server.json" ;;
+              '/1.0/projects?recursion=1') jq . "$TEST_DIR/projects.json" ;;
+              '/1.0/profiles?recursion=1') jq . "$TEST_DIR/profiles.json" ;;
+              '/1.0/instances?recursion=1') jq . "$TEST_DIR/instances.json" ;;
+              '/1.0/storage-pools?recursion=1') jq . "$TEST_DIR/pools.json" ;;
+              '/1.0/networks?recursion=1') jq . "$TEST_DIR/networks.json" ;;
+              *) return 99 ;;
+            esac
+          }
+          canary_profile_guard
+        '''
+        return source_ctl(body, profile, env={"PATH": "/usr/bin:/bin", "TEST_DIR": str(self.dir)})
+
+    def test_fixed_desktop_instance_passes(self):
+        res = self.guard(self.instance)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_desktop_limits_are_exact_values_only(self):
+        for key, value in (("limits.memory", "64GiB"), ("limits.cpu", "28"), ("limits.processes", "0")):
+            with self.subTest(key=key):
+                bad = json.loads(json.dumps(self.instance))
+                bad["config"][key] = bad["expanded_config"][key] = value
+                self.assertNotEqual(self.guard(bad).returncode, 0)
+
+    def test_gpu_nic_and_raw_settings_are_refused(self):
+        for device in ({"type": "gpu", "pci": "0000:01:00.0"},
+                       {"type": "nic", "nictype": "bridged", "parent": "br0"},
+                       {"type": "unix-char", "source": "/dev/uinput"}):
+            with self.subTest(device=device["type"]):
+                bad = json.loads(json.dumps(self.instance))
+                bad["devices"]["extra"] = device
+                bad["expanded_devices"]["extra"] = device
+                self.assertNotEqual(self.guard(bad).returncode, 0)
+        for key, value in (("nvidia.runtime", "true"), ("raw.lxc", "lxc.apparmor.profile=unconfined"),
+                           ("security.privileged", "true")):
+            with self.subTest(key=key):
+                bad = json.loads(json.dumps(self.instance))
+                bad["config"][key] = bad["expanded_config"][key] = value
+                self.assertNotEqual(self.guard(bad).returncode, 0)
+
+    def test_cpu_canary_budget_cannot_host_the_desktop_instance_or_its_limits(self):
+        self.assertNotEqual(self.guard(self.instance, profile="cpu").returncode, 0)
+        busybox = json.loads(json.dumps(self.instance))
+        busybox["name"] = "polyseat-canary-cpu"
+        self.assertNotEqual(self.guard(busybox, profile="cpu").returncode, 0)
+
+    def test_budgets_are_two_fixed_tuples(self):
+        res = source_ctl('canary_budget_select desktop; echo "$CANARY_CPU_MAX|$CANARY_MEMORY_MAX|$CANARY_PIDS_MAX|'
+                         '$CANARY_DATA_MAX_KB|$CANARY_CPUSET|$CANARY_INSTANCE"; canary_budget_select gpu || echo refused')
+        self.assertEqual(res.stdout.splitlines(), ["200000 100000|3221225472|2048|3145728|24-27|polyseat-desktop-cpu",
+                                              "refused"])
+
+
+class DesktopApprovalTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="polyseat-desktop-approval-")
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.flash = self.dir / "boot/config/plugins/polyseat-unraid"
+        self.flash.mkdir(parents=True)
+        self.key = self.dir / "approver"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.key)], check=True)
+        public = self.key.with_suffix(".pub").read_text().split()
+        (self.flash / "canary_allowed_signers").write_text(
+            f'polyseat-unraid-canary-approver namespaces="polyseat-unraid-canary-approval-v1" {public[0]} {public[1]}\n')
+        self.bundle = "b" * 64
+        state = self.flash / "state"
+        state.mkdir()
+        (state / "pointer.json").write_text(json.dumps({"current": self.bundle, "previous": None}))
+        (state / "pointer.json").chmod(0o600)
+        self.image = self.dir / "seat.tar.xz"
+        self.image.write_bytes(b"desktop-image")
+        self.image_sha = hashlib.sha256(self.image.read_bytes()).hexdigest()
+        now = int(time.time())
+        self.token = {"schema": 1, "host_sha256": "c" * 64, "archive_sha256": self.bundle,
+                      "issued_at": now - 5, "expires_at": now + 900,
+                      "actions": ["seat-image-stage", "desktop-smoke"], "seat_image_sha256": self.image_sha}
+
+    def sign(self):
+        dest = self.flash / "canary-approval.json"
+        dest.write_text(json.dumps(self.token))
+        Path(str(dest) + ".sig").unlink(missing_ok=True)
+        subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-n", "polyseat-unraid-canary-approval-v1",
+                        "-f", str(self.key), str(dest)], check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        os.chmod(dest, 0o600)
+        os.chmod(Path(str(dest) + ".sig"), 0o600)
+
+    def check(self, *args):
+        body = r'''
+          POLYSEAT_ROOT="$1"; shift
+          POLYSEAT_RELEASE_GATE=canary
+          init_paths
+          canary_host_sha256() { printf '%s\n' 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'; }
+          canary_approval_for "$@"
+        '''
+        return source_ctl(body, str(self.dir), *map(str, args)).returncode
+
+    def stage_copy(self, data: bytes):
+        seat = self.dir / "var/run/polyseat-unraid/seat-image"
+        seat.mkdir(parents=True, exist_ok=True)
+        (seat / "image").write_bytes(data)
+
+    def test_stage_and_smoke_are_bound_to_bundle_and_image(self):
+        self.sign()
+        self.assertEqual(self.check("seat-image-stage", self.image), 0)
+        other = self.dir / "other.tar.xz"
+        other.write_bytes(b"something-else")
+        self.assertEqual(self.check("seat-image-stage", other), 2)
+        self.assertEqual(self.check("desktop-smoke"), 2)  # nothing staged yet
+        self.stage_copy(self.image.read_bytes())
+        self.assertEqual(self.check("desktop-smoke"), 0)
+        self.stage_copy(b"tampered")
+        self.assertEqual(self.check("desktop-smoke"), 2)
+
+    def test_desktop_actions_require_the_image_binding_and_vice_versa(self):
+        del self.token["seat_image_sha256"]
+        self.sign()
+        self.assertEqual(self.check("seat-image-stage", self.image), 2)
+        self.token["seat_image_sha256"] = self.image_sha
+        self.token["actions"] = ["stage", "activate", "canary-smoke"]
+        self.sign()
+        self.assertEqual(self.check("activate", self.bundle), 2)
+
+    def test_desktop_token_does_not_authorize_cpu_smoke_or_other_bundle(self):
+        self.sign()
+        self.assertEqual(self.check("canary-smoke"), 2)
+        (self.flash / "state/pointer.json").write_text(json.dumps({"current": "f" * 64, "previous": None}))
+        (self.flash / "state/pointer.json").chmod(0o600)
+        self.stage_copy(self.image.read_bytes())
+        self.assertEqual(self.check("desktop-smoke"), 2)
+
+
+class SeatImageStagingTests(unittest.TestCase):
+    def setUp(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        public = self.sb.key.with_suffix(".pub").read_text().split()
+        (self.sb.flash / "allowed_signers").write_text(
+            f'polyseat-unraid-release namespaces="polyseat-unraid-bundle,polyseat-unraid-seat-image" '
+            f'{public[0]} {public[1]}\n')
+        self.image = self.sb.work / "seat.tar.xz"
+        self.image.write_bytes(os.urandom(4096))
+        self.manifest = self.sb.work / "seat.manifest.json"
+        res = make_manifest(self.image, self.manifest)
+        assert res.returncode == 0, res.stderr
+
+    def sign(self, namespace="polyseat-unraid-seat-image"):
+        sig = Path(str(self.manifest) + ".sig")
+        sig.unlink(missing_ok=True)
+        subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", str(self.sb.key), "-n", namespace,
+                        str(self.manifest)], check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        return sig
+
+    def stage(self, sig):
+        return self.sb.ctl("seat-image-stage", self.image, self.manifest, sig, "--approve")
+
+    def test_valid_image_is_staged_privately_and_reverified(self):
+        res = self.stage(self.sign())
+        self.assertEqual(res.code, 0, res.text)
+        seat = self.sb.run_dir / "seat-image"
+        self.assertEqual(sorted(p.name for p in seat.iterdir()), ["image", "manifest.json", "manifest.json.sig"])
+        self.assertEqual((seat / "image").read_bytes(), self.image.read_bytes())
+        self.assertEqual(oct(seat.stat().st_mode & 0o777), "0o700")
+        self.assertEqual(oct((seat / "image").stat().st_mode & 0o777), "0o600")
+        self.assertEqual(self.stage(Path(str(self.manifest) + ".sig")).code, 2)  # never overwritten
+
+    def test_bundle_signature_cannot_be_replayed_for_an_image(self):
+        self.assertEqual(self.stage(self.sign("polyseat-unraid-bundle")).code, 5)
+        self.assertFalse((self.sb.run_dir / "seat-image/image").exists())
+
+    def test_manifest_must_bind_this_exact_image(self):
+        sig = self.sign()
+        self.image.write_bytes(os.urandom(4096))
+        self.assertEqual(self.stage(sig).code, 5)
+        data = json.loads(self.manifest.read_text())
+        data["extra"] = True
+        self.manifest.write_text(json.dumps(data))
+        self.assertEqual(self.stage(self.sign()).code, 5)
+
+    def test_uninstall_removes_the_staged_image_exactly_and_keeps_evidence(self):
+        self.assertEqual(self.stage(self.sign()).code, 0)
+        evidence = self.sb.run_dir / "desktop-evidence"
+        evidence.mkdir()
+        (evidence / "selftest-start.json").write_text("{}")
+        stray = self.sb.run_dir / "seat-image/unexpected"
+        stray.write_text("not ours")
+        res = self.sb.ctl("uninstall", "--approve")
+        self.assertEqual(res.code, 0, res.text)
+        self.assertFalse((self.sb.run_dir / "seat-image/image").exists())
+        self.assertTrue(stray.exists())  # unattributed files are kept, never deleted recursively
+        self.assertTrue((evidence / "selftest-start.json").exists())
+
+    def test_desktop_smoke_is_refused_outside_a_canary_build(self):
+        res = self.sb.ctl("desktop-smoke", "--approve")
+        self.assertEqual(res.code, 2, res.text)
+
+
+if __name__ == "__main__":
+    unittest.main()
