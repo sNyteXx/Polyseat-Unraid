@@ -154,7 +154,8 @@ for part in sys.argv[1].split(","):
     a,_,b=part.partition("-"); out+=range(int(a),int(b or a)+1)
 print("\n".join(map(str,out[:2])))' "$host_cpuset")
 [[ ${#cpus[@]} == 2 ]] || fail 'runner needs at least two CPUs'
-ci_cpuset="${cpus[0]},${cpus[1]}"
+# Written exactly as the kernel reads cpuset.cpus back (the controller compares the read-back verbatim).
+if (( cpus[1] == cpus[0] + 1 )); then ci_cpuset="${cpus[0]}-${cpus[1]}"; else ci_cpuset="${cpus[0]},${cpus[1]}"; fi
 
 fixture=$(mktemp -d /tmp/polyseat-ctl-desktop-XXXXXXXX)
 chmod 0711 "$fixture"

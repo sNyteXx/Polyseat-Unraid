@@ -1113,6 +1113,7 @@ canary_cgroup_prepare() {
   fi
   if ! canary_cgroup_check; then
     rmdir -- "$CANARY_CGROUP/daemon" "$CANARY_CGROUP" "$CANARY_WATCHDOG_CGROUP" 2>/dev/null || true
+    log error "canary: cgroup limits did not read back exactly as set; daemon not launched"
     return 1
   fi
 }
