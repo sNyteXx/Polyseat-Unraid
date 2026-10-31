@@ -10,6 +10,20 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.45.0
+
+**A shortcut to a game reaches Moonlight too.** Eden writes a desktop entry per
+game, and those showed up in the seat's grid while Moonlight's list, which comes
+from Steam, Lutris and `~/Applications`, never heard of them. An entry in
+`~/.local/share/applications` with `Game` in its categories is now a card with
+the entry's icon, unless it is hidden, its program is gone, or it starts a Steam
+or Lutris title that already has a card. The entry stays the one row in the grid.
+
+No seat needs building again, the cards appear within a minute of the daemon
+being updated. The scan was run against two real seats and found the right games
+with the whole path to the ROM, and the command is tested against a copy of the
+splitting Sunshine does, but no game has been started from Moonlight this way.
+
 ## 0.44.0
 
 **The on-screen keyboard is smaller, dark, and in the language of the seat.**
