@@ -54,7 +54,10 @@ METADATA = {MANIFEST, MANIFEST + ".sig", "SHA256SUMS"}
 SCOPES = {"host_approval": False, "gpu": False, "network": False, "host_services": False,
           "persistent_data_test": False, "data_dir": "/var/lib/polyseat-unraid-canary"}
 REHEARSAL_STEPS = {"signature-stage", "activate", "prestart-policy", "canary-smoke",
-                   "expiry-refusal", "supervisor-loss", "cleanup", "host-state-unchanged"}
+                   "expiry-refusal", "supervisor-loss", "cleanup", "host-state-unchanged",
+                   # run 2: the exact Tower order with a Tower-like PATH, run 1's failure reproduced on purpose,
+                   # refusal before any state when a program is missing, and a complete exec inventory.
+                   "missing-unsquashfs-reproduced", "missing-program-refusal", "tower-sequence", "exec-inventory"}
 
 
 def sha(data):

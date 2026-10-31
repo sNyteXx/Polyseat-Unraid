@@ -60,31 +60,41 @@ class CanaryE2EContractTests(unittest.TestCase):
         start = SCRIPT.index("for name, value in zip(")
         end = SCRIPT.index("sys.argv[2:]):", start)
         rendering = SCRIPT[start:end]
-        for name in ("CANARY_HOST_CPUSET", "CANARY_CPUSET", "CANARY_CGROUP", "CANARY_WATCHDOG_CGROUP"):
+        for name in ("CANARY_HOST_CPUSET", "CANARY_CPUSET", "CANARY_CGROUP", "CANARY_WATCHDOG_CGROUP", "SAFE_PATH"):
             self.assertIn(name, rendering)
         for name in ("CANARY_MEMORY_MAX", "CANARY_CPU_MAX", "CANARY_PIDS_MAX", "canary_host_sha256"):
             self.assertNotIn(name, rendering)
 
-    def test_fixture_renderer_changes_exactly_the_four_allowed_constants(self):
+    def test_fixture_renderer_changes_exactly_the_five_allowed_constants(self):
         code = SCRIPT.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
         original = ('POLYSEAT_RELEASE_GATE="canary"  # real gate\n'
+                    'SAFE_PATH="/usr/sbin:/usr/bin:/sbin:/bin"\n'
                     'CANARY_HOST_CPUSET="0-27"\nCANARY_CPUSET="24-27"\n'
                     'CANARY_CGROUP="/sys/fs/cgroup/polyseat-unraid-canary"\n'
                     'CANARY_WATCHDOG_CGROUP="/sys/fs/cgroup/polyseat-unraid-canary-watchdog"\n'
                     'CANARY_MEMORY_MAX=536870912\nCANARY_CPU_MAX="100000 1000000"\n'
                     'canary_approval_for() { real_signature_check; }\n')
+        tower = "/tmp/polyseat-canary-e2e-Ab3dE6gH/tower-path"
         with tempfile.TemporaryDirectory() as tmp:
             controller = Path(tmp) / "polyseatctl"
             controller.write_text(original)
             result = subprocess.run([sys.executable, "-", str(controller), "0-3", "0",
-                                     "/sys/fs/cgroup/ci-a", "/sys/fs/cgroup/ci-b"],
+                                     "/sys/fs/cgroup/ci-a", "/sys/fs/cgroup/ci-b", tower],
                                     input=code, text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             updated = controller.read_text()
             self.assertEqual(updated, original.replace('CANARY_HOST_CPUSET="0-27"', 'CANARY_HOST_CPUSET="0-3"')
                              .replace('CANARY_CPUSET="24-27"', 'CANARY_CPUSET="0"')
                              .replace('CANARY_CGROUP="/sys/fs/cgroup/polyseat-unraid-canary"', 'CANARY_CGROUP="/sys/fs/cgroup/ci-a"')
-                             .replace('CANARY_WATCHDOG_CGROUP="/sys/fs/cgroup/polyseat-unraid-canary-watchdog"', 'CANARY_WATCHDOG_CGROUP="/sys/fs/cgroup/ci-b"'))
+                             .replace('CANARY_WATCHDOG_CGROUP="/sys/fs/cgroup/polyseat-unraid-canary-watchdog"', 'CANARY_WATCHDOG_CGROUP="/sys/fs/cgroup/ci-b"')
+                             .replace('SAFE_PATH="/usr/sbin:/usr/bin:/sbin:/bin"', 'SAFE_PATH="' + tower + '"'))
+            # Anything but the private Tower-like directory is refused, and nothing is rewritten.
+            controller.write_text(original)
+            for bad in ("/usr/local/bin:/usr/bin", "/tmp/polyseat-canary-e2e-Ab3dE6gH/tower-path:/usr/bin", ""):
+                result = subprocess.run([sys.executable, "-", str(controller), "0-3", "0", "/a", "/b", bad],
+                                        input=code, text=True, capture_output=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0, bad)
+                self.assertEqual(controller.read_text(), original)
 
     def test_fixture_renderer_fails_closed_on_missing_constant(self):
         code = SCRIPT.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
@@ -92,7 +102,8 @@ class CanaryE2EContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             controller = Path(tmp) / "polyseatctl"
             controller.write_text(original)
-            result = subprocess.run([sys.executable, "-", str(controller), "0-3", "0", "/a", "/b"],
+            result = subprocess.run([sys.executable, "-", str(controller), "0-3", "0", "/a", "/b",
+                                     "/tmp/polyseat-canary-e2e-Ab3dE6gH/tower-path"],
                                     input=code, text=True, capture_output=True, timeout=5)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(controller.read_text(), original)
@@ -168,8 +179,21 @@ class CanaryE2EContractTests(unittest.TestCase):
                       "controller_file_sha256:$controller_file", 'platform:"disposable-linux"'):
             self.assertIn(field, SCRIPT)
         for name in ("signature-stage", "activate", "prestart-policy", "canary-smoke",
-                     "expiry-refusal", "cleanup", "host-state-unchanged"):
+                     "expiry-refusal", "cleanup", "host-state-unchanged", "missing-unsquashfs-reproduced",
+                     "missing-program-refusal", "tower-sequence", "exec-inventory"):
             self.assertIn("step " + name, SCRIPT)
+
+    def test_tower_parity_fixture_uses_tower_order_actions_path_and_reproduces_run_1(self):
+        tower = SCRIPT.split("fixture_prepare tower-sequence", 1)[1].split("fixture_finish", 1)[0]
+        self.assertIn("approval 600 '[\"stage\",\"activate\",\"canary-smoke\"]'", tower)
+        self.assertNotIn("ctl start", tower)
+        self.assertIn('exec: "unsquashfs": executable file not found in $PATH', tower)
+        self.assertIn("required daemon programs missing on PATH: rsync", tower)
+        self.assertIn("--seccomp-bpf", SCRIPT)
+        self.assertIn('env -i PATH="$tower_path"', SCRIPT.split("ctl() {", 1)[1].split("}", 1)[0])
+        self.assertIn("unraid/abi/unraid-7.3.3-x86_64.tools", SCRIPT)
+        for absent in ("unsquashfs", "mksquashfs", "nft", "python3"):
+            self.assertIn(absent, SCRIPT.split("for absent in", 1)[1].split(";", 1)[0])
         self.assertIn("not an Unraid test or production approval", SCRIPT)
 
 

@@ -19,7 +19,7 @@ fail() { printf 'CANARY E2E BLOCKED/FAILED: %s\n' "$*" >&2; exit 2; }
 [[ -d $GITHUB_WORKSPACE && ! -L $GITHUB_WORKSPACE &&
    -d $INCUS_PROOF_STAGE && ! -L $INCUS_PROOF_STAGE ]] || fail 'unsafe runner paths'
 for tool in bash python3 jq git ssh-keygen sha256sum tar findmnt mount umount mountpoint \
-            ip ss iptables-save ip6tables-save nft pgrep stat readlink timeout; do
+            ip ss iptables-save ip6tables-save nft pgrep stat readlink timeout strace; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing CI prerequisite: $tool"
 done
 [[ $(stat -f -c %T /sys/fs/cgroup) == cgroup2fs ]] || fail 'unified cgroup v2 required'
@@ -51,13 +51,35 @@ evidence="$proof/canary-e2e"
 mkdir -- "$evidence"
 steps_file="$evidence/steps.txt"
 touch "$steps_file"
+
+# Tower-like PATH: exactly the program names recorded read-only on the Unraid host, resolved to this
+# runner's binaries. Run 1 failed on Tower because the runner (unlike Unraid) provided unsquashfs.
+tower_tools="$GITHUB_WORKSPACE/unraid/abi/unraid-7.3.3-x86_64.tools"
+tower_path="$work/tower-path"
+[[ -f $tower_tools && ! -L $tower_tools ]] || fail 'recorded Tower tool inventory missing'
+mkdir -m 0755 -- "$tower_path"
+while IFS= read -r name; do
+  [[ -z $name || $name == \#* ]] && continue
+  [[ $name =~ ^(\[|[A-Za-z0-9][A-Za-z0-9._+-]*)$ ]] || fail "invalid Tower tool name: $name"
+  resolved=$( PATH=/usr/sbin:/usr/bin:/sbin:/bin; type -P -- "$name" ) || resolved=""
+  [[ -z $resolved ]] || ln -s -- "$resolved" "$tower_path/$name"
+done < "$tower_tools"
+for absent in unsquashfs mksquashfs nft python3; do
+  [[ ! -e $tower_path/$absent && ! -L $tower_path/$absent ]] || fail "Tower-like PATH provides $absent, which Unraid lacks"
+done
+for present in bash jq tar gzip xz sha256sum ssh-keygen flock timeout unshare setpriv setsid renice mount umount \
+               ip rsync setfattr newuidmap newgidmap ldconfig getconf logger du find awk sed; do
+  [[ -L $tower_path/$present ]] || fail "runner lacks a program that Tower has and the canary needs: $present"
+done
+printf 'tower_tools_sha256=%s\nlinked_programs=%s\n' "$(sha256sum "$tower_tools" | awk '{print $1}')" \
+  "$(find "$tower_path" -mindepth 1 | wc -l)" > "$evidence/tower-path.txt"
 declare -a fixture_roots=() fixture_data=() fixture_ctls=() fixture_groups=()
 fixture="" ctl_path="" flash="" data="" workload="" watchdog=""
 smoke_job="" controller_file_sha="" ci_controller_sha=""
 passed=0
 
 ctl() {
-  env -i PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C \
+  env -i PATH="$tower_path" LANG=C \
     POLYSEAT_ROOT="$fixture" POLYSEAT_CI_REAL_SYSTEM=1 CI=true GITHUB_ACTIONS=true \
     RUNNER_OS=Linux RUNNER_ENVIRONMENT=github-hosted "$ctl_path" "$@"
 }
@@ -250,7 +272,7 @@ fixture_prepare() {
   controller_file_sha=$original_sha
   # Explicit CI-only fixture rendering. No function, auth, namespace, quota or
   # timeout substitution is permitted. Production sources remain gate=closed.
-  python3 - "$ctl_path" "$host_cpuset" "$ci_cpuset" "$workload" "$watchdog" <<'PY'
+  python3 - "$ctl_path" "$host_cpuset" "$ci_cpuset" "$workload" "$watchdog" "$tower_path" <<'PY'
 from pathlib import Path
 import re
 import sys
@@ -258,8 +280,10 @@ path = Path(sys.argv[1])
 text = path.read_text()
 if len(re.findall(r'^POLYSEAT_RELEASE_GATE="canary"(?:\s+#.*)?$', text, re.M)) != 1:
     raise SystemExit('not the real canary package')
+if len(sys.argv) != 7 or not re.fullmatch(r'/tmp/polyseat-canary-e2e-[A-Za-z0-9]{8}/tower-path', sys.argv[6]):
+    raise SystemExit('CI SAFE_PATH must be the private Tower-like PATH directory')
 for name, value in zip(('CANARY_HOST_CPUSET', 'CANARY_CPUSET', 'CANARY_CGROUP',
-                        'CANARY_WATCHDOG_CGROUP'), sys.argv[2:]):
+                        'CANARY_WATCHDOG_CGROUP', 'SAFE_PATH'), sys.argv[2:]):
     text, count = re.subn(r'^' + name + r'="[^"\n]*"', name + '="' + value + '"', text, flags=re.M)
     if count != 1:
         raise SystemExit('CI constant missing/duplicated: ' + name)
@@ -267,25 +291,26 @@ path.write_text(text)
 PY
   ci_controller_sha=$(sha256sum "$ctl_path" | awk '{print $1}')
   jq -n --arg label "$label" --arg file "$ci_controller_sha" --arg cpus "$ci_cpuset" \
-    --arg host_cpus "$host_cpuset" --arg workload "$workload" --arg watchdog "$watchdog" \
+    --arg host_cpus "$host_cpuset" --arg workload "$workload" --arg watchdog "$watchdog" --arg safe "$tower_path" \
     '{label:$label,ci_controller_sha256:$file,overrides:{CANARY_CPUSET:$cpus,
-      CANARY_HOST_CPUSET:$host_cpus,CANARY_CGROUP:$workload,CANARY_WATCHDOG_CGROUP:$watchdog}}' \
+      CANARY_HOST_CPUSET:$host_cpus,CANARY_CGROUP:$workload,CANARY_WATCHDOG_CGROUP:$watchdog,SAFE_PATH:$safe}}' \
     > "$evidence/render-$label.json"
   printf 'version="7.3.3"\n' > "$fixture/etc/unraid-version"
-  printf 'SERVICE="disabled"\nDATA_DIR="/var/lib/polyseat-unraid-canary"\nACCEPT_NO_LSM="yes"\nHEALTH_TIMEOUT="90"\n' \
+  printf 'SERVICE="disabled"\nDATA_DIR="/var/lib/polyseat-unraid-canary"\nACCEPT_NO_LSM="yes"\n' \
     > "$flash/polyseat-unraid.cfg"
   printf 'polyseat-unraid-release namespaces="polyseat-unraid-bundle" %s\n' \
     "$(awk '{print $1,$2}' "$work/release-key.pub")" > "$flash/allowed_signers"
   printf 'polyseat-unraid-canary-approver namespaces="polyseat-unraid-canary-approval-v1" %s\n' \
     "$(awk '{print $1,$2}' "$work/approval-key.pub")" > "$flash/canary_allowed_signers"
 }
-approval() { # signed TTL seconds; this never signs a live-production host token
-  local ttl=$1 now
+approval() { # signed TTL seconds [actions JSON]; this never signs a live-production host token
+  local ttl=$1 actions=${2:-'["stage","activate","start","canary-smoke"]'} now
   [[ $ttl =~ ^[0-9]+$ && $ttl -gt 0 && $ttl -le 1800 ]] || fail 'invalid test TTL'
   now=$(date -u +%s)
   jq -n --arg host "$host_sha" --arg archive "$archive_sha" --argjson now "$now" --argjson ttl "$ttl" \
+    --argjson actions "$actions" \
     '{schema:1,host_sha256:$host,archive_sha256:$archive,issued_at:$now,expires_at:($now+$ttl),
-      actions:["stage","activate","start","canary-smoke"]}' > "$flash/canary-approval.json"
+      actions:$actions}' > "$flash/canary-approval.json"
   rm -f -- "$flash/canary-approval.json.sig"
   ssh-keygen -q -Y sign -f "$work/approval-key" -n polyseat-unraid-canary-approval-v1 "$flash/canary-approval.json"
   chmod 0600 "$flash/canary-approval.json" "$flash/canary-approval.json.sig"
@@ -465,6 +490,71 @@ printf 'PASS: guardian emptied workload before token expiry after supervisor-onl
 step supervisor-loss
 fixture_finish
 
+# Fourth fresh fixture: the exact Tower order (canary-smoke starts the daemon itself, no `start`), the Tower
+# token actions, the Tower-like PATH and a complete per-process exec inventory. It also reproduces the run-1
+# failure on purpose and proves the controller refuses a missing program before creating any state.
+traced() { # label ctl-args... ; strace stops only at exec/process creation (seccomp-bpf), so timing stays real
+  local label=$1
+  shift
+  mkdir -p "$evidence/exec-trace"
+  strace -ff -qq --seccomp-bpf -s 160 -e trace=execve,execveat,clone,clone3,fork,vfork -e signal=none \
+    -o "$evidence/exec-trace/$label" /usr/bin/env -i PATH="$tower_path" LANG=C \
+    POLYSEAT_ROOT="$fixture" POLYSEAT_CI_REAL_SYSTEM=1 CI=true GITHUB_ACTIONS=true \
+    RUNNER_OS=Linux RUNNER_ENVIRONMENT=github-hosted "$ctl_path" "$@"
+}
+fixture_prepare tower-sequence
+approval 600 '["stage","activate","canary-smoke"]'
+traced stage stage "$runtime_archive" "$work/runtime.manifest.json" "$work/runtime.manifest.json.sig" --approve
+traced activate activate "$archive_sha" --approve
+ctl verify
+slot="$fixture/usr/local/polyseat-unraid/slots/$archive_sha"
+[[ -x $slot/payload/tools/unsquashfs && ! -L $slot/payload/tools/unsquashfs && ! -e $tower_path/unsquashfs ]] ||
+  fail 'bundled unsquashfs missing, or the Tower-like PATH provides one'
+# Negative 1: run 1 on Tower, reproduced exactly — the real daemon without the bundled helper directory.
+neg_rc=0
+env -i PATH="$tower_path" HOME="$work" INCUS_DIR="$work/negative-incus" LANG=C \
+  timeout 20 "$slot/payload/bin/incusd" --group "" > "$evidence/negative-unsquashfs.txt" 2>&1 || neg_rc=$?
+[[ $neg_rc != 0 && $neg_rc != 124 ]] || fail "daemon without the bundled unsquashfs did not fail fast (rc=$neg_rc)"
+grep -Fq 'exec: "unsquashfs": executable file not found in $PATH' "$evidence/negative-unsquashfs.txt" ||
+  fail 'a missing unsquashfs did not reproduce the Tower failure'
+[[ ! -e $work/negative-incus ]] || fail 'the refused daemon start created state'
+step missing-unsquashfs-reproduced
+# Negative 2: a missing host program is refused before any one-shot state, cgroup or session exists.
+mv -- "$tower_path/rsync" "$work/rsync.hidden"
+refuse_rc=0
+ctl canary-smoke --approve > "$evidence/missing-program-refusal.txt" 2>&1 || refuse_rc=$?
+mv -- "$work/rsync.hidden" "$tower_path/rsync"
+[[ $refuse_rc != 0 ]] && grep -q 'required daemon programs missing on PATH: rsync' "$evidence/missing-program-refusal.txt" ||
+  fail 'a missing host program was not refused by the controller'
+[[ ! -e $data/incus && ! -e $data/one-shot.json && ! -e $fixture/var/run/polyseat-unraid/canary-session.json &&
+   ! -e $fixture/var/run/polyseat-unraid/deny-tools && ! -e $workload && ! -e $watchdog &&
+   ! -e /var/lib/polyseat-lxc ]] ||
+  fail 'the refused start left one-shot state, cgroups or a session behind'
+step missing-program-refusal
+# Positive: the exact Tower sequence with only the bundled unsquashfs available.
+traced canary-smoke canary-smoke --approve > "$evidence/tower-sequence-smoke.txt" 2>&1 ||
+  fail 'Tower-sequence canary-smoke failed (see tower-sequence-smoke.txt)'
+grep -q '^PASS: fresh CPU-only canary lifecycle' "$evidence/tower-sequence-smoke.txt" &&
+  [[ $(grep -c '^POLYSEAT_CANARY_OK$' "$evidence/tower-sequence-smoke.txt") == 2 ]] ||
+  fail 'Tower sequence did not complete both container execs'
+[[ ! -e $workload && ! -e $watchdog ]] || fail 'Tower sequence did not remove its own groups'
+step tower-sequence
+jq -r '.files[]' "$proof/busybox-image-provenance.json" > "$work/image-files.txt"
+for label in stage activate canary-smoke; do
+  lifecycle=()
+  [[ $label != canary-smoke ]] || lifecycle=(--require-lifecycle)
+  python3 "$GITHUB_WORKSPACE/unraid/scripts/exec-inventory.py" --trace-dir "$evidence/exec-trace" --prefix "$label" \
+    --tower-tools "$tower_tools" --tower-path "$tower_path" --fixture "$fixture" --controller "$ctl_path" \
+    --image-files "$work/image-files.txt" "${lifecycle[@]}" \
+    --output "$evidence/exec-inventory-$label.json" > "$evidence/exec-inventory-$label.txt" ||
+    fail "exec inventory found a program Unraid lacks or an incomplete trace ($label)"
+done
+tar -C "$evidence" -czf "$evidence/exec-trace.tar.gz" exec-trace
+find "$evidence/exec-trace" -type f -name '*.*' -delete
+rmdir -- "$evidence/exec-trace"
+step exec-inventory
+fixture_finish
+
 if pgrep -x incusd >/dev/null; then fail 'Incus daemon or helper survived teardown'; fi
 for group in "${fixture_groups[@]}"; do [[ ! -e $group ]] || fail 'a CI cgroup remains'; done
 step cleanup
@@ -479,10 +569,14 @@ jq -n --arg commit "$commit" --arg archive "$archive_sha" --arg controller "$con
   --rawfile steps "$steps_file" --slurpfile lifecycle "$evidence/render-lifecycle.json" \
   --slurpfile expiry "$evidence/render-expiry.json" \
   --slurpfile supervisor_loss "$evidence/render-supervisor-loss.json" \
+  --slurpfile tower_sequence "$evidence/render-tower-sequence.json" \
+  --slurpfile inventory "$evidence/exec-inventory-canary-smoke.json" \
   '{schema:1,commit:$commit,archive_sha256:$archive,controller_sha256:$controller,
     controller_file_sha256:$controller_file,image_sha256:$image,platform:"disposable-linux",
     status:"passed",steps:($steps|split("\n")|map(select(length>0))),
-    ci_renderings:[$lifecycle[0],$expiry[0],$supervisor_loss[0]],
+    ci_renderings:[$lifecycle[0],$expiry[0],$supervisor_loss[0],$tower_sequence[0]],
+    exec_inventory:($inventory[0] | {ok, processes, "tower-path", denied, bundle, container,
+      "host-absolute-known", "missing-everywhere-but-on-tower"}),
     caveat:"Real canary gate and lifecycle on disposable Linux; not an Unraid test or production approval"}' \
   > "$proof/canary-rehearsal.json"
 printf 'PASS: signed canary gate, real CPU-only lifecycle, namespace/cgroup containment, TTL, supervisor-loss fail-safe and host-state restoration; NOT Unraid approval.\n' \
