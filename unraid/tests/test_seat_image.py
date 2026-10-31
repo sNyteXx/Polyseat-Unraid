@@ -86,7 +86,13 @@ class Workflow(unittest.TestCase):
     def test_triggers_jobs_permissions_and_artifacts(self):
         self.assertRegex(self.text, r"(?m)^permissions:\n  contents: read\n")
         self.assertIn("workflow_dispatch:", self.text)
-        self.assertIn("branches: [wip/seat-image-desktop, wip/unraid-native-plugin]", self.text)
+        self.assertIn("branches: [wip/seat-image-desktop]", self.text)
+        # The WIP branch builds it once, through incus-feasibility.yml, for the desktop canary rehearsal.
+        self.assertRegex(self.text, r"(?m)^  workflow_call:\n")
+        caller = (Path(__file__).resolve().parents[2] / ".github/workflows/incus-feasibility.yml").read_text()
+        self.assertRegex(caller, r"(?m)^  seat-image:\n    if: github.ref == 'refs/heads/wip/unraid-native-plugin'\n"
+                                 r"    uses: \./\.github/workflows/seat-image\.yml\n")
+        self.assertRegex(caller, r"(?m)^  desktop-canary:\n.*\n    needs: \[build, seat-image\]\n")
         for path in ("unraid/seat-image/**", "unraid/scripts/ci-desktop-smoke.sh", "unraid/build-pins.env",
                      ".github/workflows/seat-image.yml"):
             self.assertIn(f"- '{path}'", self.text)

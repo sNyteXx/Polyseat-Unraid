@@ -2,8 +2,11 @@ name: WIP Polyseat desktop seat image (never deploy)
 
 on:
   workflow_dispatch:
+  # The WIP branch builds the image through incus-feasibility.yml (job seat-image) so the desktop canary
+  # rehearsal can use the very same artifact in the same run.
+  workflow_call:
   push:
-    branches: [wip/seat-image-desktop, wip/unraid-native-plugin]
+    branches: [wip/seat-image-desktop]
     paths:
       - 'unraid/seat-image/**'
       - 'unraid/scripts/ci-desktop-smoke.sh'

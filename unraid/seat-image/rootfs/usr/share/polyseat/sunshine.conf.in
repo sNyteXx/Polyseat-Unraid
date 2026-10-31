@@ -4,4 +4,6 @@ capture = wlr
 encoder = @ENCODER@
 # Web UI reachable from localhost only.
 origin_web_ui_allowed = pc
+# Never ask the router for port forwards; seats are LAN-only (unraid/docs/streaming-network.md).
+upnp = disabled
 log_path = /home/player/.config/sunshine/sunshine.log
