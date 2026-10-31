@@ -1,0 +1,90 @@
+name: WIP Polyseat desktop seat image (never deploy)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wip/seat-image-desktop, wip/unraid-native-plugin]
+    paths:
+      - 'unraid/seat-image/**'
+      - 'unraid/scripts/ci-desktop-smoke.sh'
+      - 'unraid/build-pins.env'
+      - '.github/workflows/seat-image.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  seat-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the pinned seat image (Docker, no network after the pinned package downloads)
+        run: sh unraid/seat-image/build-seat-image.sh
+        env:
+          SEAT_IMAGE_OUT: ${{ github.workspace }}/seat-image-out
+
+      - name: Image summary
+        run: |
+          jq '{image_sha256, image_size_bytes, unpacked_size_bytes, file_counts, base_image, archive_date, sunshine, package_count, build_commit}' \
+            seat-image-out/seat-image.json
+          sha256sum --check seat-image-out/polyseat-desktop.tar.xz.sha256
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-seat-image-NOT-FOR-UNRAID
+          path: seat-image-out/
+          retention-days: 7
+          if-no-files-found: error
+
+  desktop-smoke:
+    needs: seat-image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: polyseat-seat-image-NOT-FOR-UNRAID
+          path: seat-image-in
+
+      - name: Install a disposable Incus (apt, iteration only; the pinned 7.5.1 bundle replaces it later)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends incus uidmap jq xz-utils squashfs-tools
+          # Our script starts its own daemon with its own state directory: stop the packaged one.
+          sudo systemctl disable --now incus.service incus.socket incus-user.socket 2>/dev/null || true
+          sudo pkill -x incusd || true
+          incusd=$(dpkg -L incus | grep -E '/incusd$' | head -n 1)
+          test -x "$incusd"
+          echo "INCUSD_BIN=$incusd" >> "$GITHUB_ENV"
+          incus --version
+
+      - name: Desktop smoke on the disposable runner only
+        timeout-minutes: 15
+        run: |
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_OS="$RUNNER_OS" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            INCUSD_BIN="$INCUSD_BIN" INCUS_BIN="$(command -v incus)" \
+            SEAT_IMAGE="$GITHUB_WORKSPACE/seat-image-in/polyseat-desktop.tar.xz" \
+            SEAT_IMAGE_JSON="$GITHUB_WORKSPACE/seat-image-in/seat-image.json" \
+            OUT_DIR="$GITHUB_WORKSPACE/desktop-smoke-out" \
+            sh unraid/scripts/ci-desktop-smoke.sh
+
+      - name: Preserve smoke evidence even if the smoke failed
+        if: always()
+        run: |
+          mkdir -p desktop-smoke-out
+          cp seat-image-in/seat-image.json desktop-smoke-out/ 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" desktop-smoke-out
+          if [ -f desktop-smoke-out/measurements.json ]; then jq . desktop-smoke-out/measurements.json; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: polyseat-desktop-smoke-NOT-FOR-UNRAID
+          path: desktop-smoke-out/
+          retention-days: 7
+          if-no-files-found: warn
