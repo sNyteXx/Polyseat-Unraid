@@ -37,7 +37,7 @@ INPUT_FILES = (
     "unraid/scripts/ci-runtime-key.py",
     "unraid/scripts/ci-runtime-reuse.py",
 )
-INPUT_DIRS = ("unraid/abi",)
+INPUT_DIRS = ("unraid/abi", "unraid/patches")
 NON_RUNTIME_PIN_PREFIXES = ("SEAT_", "SUNSHINE_")
 RUNNER_ENV = ("ImageOS", "ImageVersion", "RUNNER_ARCH", "RUNNER_OS")
 

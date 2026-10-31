@@ -249,7 +249,26 @@ core_build_deps() { # prefix work [mirror_dir]
   build_unsquashfs "$deps_work/squashfs-tools" "$deps_prefix" ${deps_mirror:+"$deps_mirror/squashfs-tools.git"}
 }
 
+# Polyseat's source patches to the pinned Incus, each pinned by SHA-256 in build-pins.env and checked with
+# `git apply --check` first; any mismatch stops the build. Recorded next to the source as <src>.polyseat-patches.txt.
+#   host-veth-mac.patch: the host-side veth of a bridged NIC gets an fe: MAC (as libvirt's VM taps), so a bridge
+#   without an explicit address never adopts it (Tower run 9: br0 took a random veth MAC for the test's duration).
+core_apply_incus_patch() { # incus_src file sha256
+  path="$CORE_REPO/unraid/patches/incus/$2"
+  if [ ! -f "$path" ] || [ -L "$path" ]; then die "missing Incus patch $2"; fi
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$3" ] || die "Incus patch $2 does not match its pin"
+  git -C "$1" apply --check "$path" || die "Incus patch $2 does not apply to the pinned source"
+  git -C "$1" apply "$path" || die "Incus patch $2 failed"
+  printf '%s  %s\n' "$3" "$2" >> "$1.polyseat-patches.txt"
+}
+
+core_apply_incus_patches() { # incus_src
+  : > "$1.polyseat-patches.txt"
+  core_apply_incus_patch "$1" host-veth-mac.patch "${INCUS_PATCH_HOST_VETH_MAC_SHA256:?}"
+}
+
 core_build_incus() { # incus_src
+  core_apply_incus_patches "$1"
   python3 "$CORE_REPO/unraid/scripts/prepare-incus-deps.py" --source "$1" \
     --pins "$CORE_REPO/unraid/build-pins.env" --plan "$CORE_REPO/unraid/dependency-overrides.json" \
     --report "$1.polyseat-dependency-overrides.json"
@@ -288,6 +307,7 @@ core_package() { # incus_src prefix output
 
   # No-GPU, no-daemon execution smoke. Neither command initializes Incus, creates a bridge,
   # opens a service, or touches VMs.
+  cp "$src.polyseat-patches.txt" "$output/incus-source-patches.txt"
   "$GOBIN/incus" --version > "$output/incus-cli-version.txt"
   "$GOBIN/incusd" --version > "$output/incusd-cli-version.txt"
   version_without_v=${INCUS_RELEASE#v}
@@ -414,6 +434,7 @@ core_checksums() { # output
       dependency-overrides.json busybox-image-provenance.json \
       incus-cli-version.txt incusd-cli-version.txt incusd-needed-programs.txt \
       unsquashfs-elf-dynamic.txt unsquashfs-elf-versions.txt unsquashfs-version.txt lxc-nvidia-hook.sha256 \
+      incus-source-patches.txt \
       go-modules.txt SBOM-build-source-only.cdx.json SBOM-runtime.cdx.json NOTICE.txt > SHA256SUMS
     sha256sum --check SHA256SUMS
   )

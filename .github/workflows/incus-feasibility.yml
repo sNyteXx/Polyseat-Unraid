@@ -67,6 +67,7 @@ jobs:
       LXC_RELEASE: v6.0.6
       # Verbatim hooks/nvidia of that tag (bundled for nvidia.runtime); the build refuses any other bytes.
       LXC_NVIDIA_HOOK_SHA256: d4e1bcdccfc5c1b41714ebc9bc6c609a80e12232b88a1f21be6efce0c9b11d1d
+      INCUS_PATCH_HOST_VETH_MAC_SHA256: bffbfc72c7fdbb2326f1229212e1c633b44dde79ec31e50f308ab34a11004e6a
       # Signed squashfs-tools 4.7.5 tag: Incus requires unsquashfs, Unraid lacks it; bundled privately.
       SQUASHFS_TOOLS_COMMIT: 708c59ae80853b0845017c33b42e56061cc546cd
       SQUASHFS_TOOLS_RELEASE: 4.7.5

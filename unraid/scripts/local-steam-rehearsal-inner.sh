@@ -23,19 +23,25 @@ dnsmasq --interface="$parent" --bind-interfaces --except-interface=lo --dhcp-ran
   --dhcp-option=option:router,10.77.0.1 --dhcp-option=option:dns-server,10.77.0.1 --no-resolv \
   --server="${upstream:-1.1.1.1}" --pid-file=/run/dnsmasq.pid --log-dhcp --log-facility=/out/dnsmasq.log
 pass "fixture LAN: $parent 10.77.0.1/24, dnsmasq DHCP+DNS (upstream ${upstream:-1.1.1.1}), NAT"
+# Tower's uplink in br0 is bond0 with 9c:6b:00:1e:07:f8; a bridge without an explicit address takes the lowest port
+# MAC (Tower run 9: Incus' random host-veth MAC replaced it). The seat's veth must never change the bridge's MAC.
+uplink_mac=9c:6b:00:1e:07:f8
+ip link add uplink0 type dummy && ip link set uplink0 address "$uplink_mac" && ip link set uplink0 master "$parent" &&
+  ip link set uplink0 up
+[[ $(cat "/sys/class/net/$parent/address") == "$uplink_mac" ]] || fail "fixture: $parent did not take the uplink MAC"
 members() { find "/sys/class/net/$parent/brif" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' '; }
-before=$(members)
+before=$(members)  # uplink0
 
-# The controller's own deny-tools (its read-only nft stub included), first on the daemon's PATH as on Tower.
-run=/run/polyseat-rehearsal; mkdir -p "$run"
-# shellcheck disable=SC1090,SC2034  # the real controller function; RUN_DIR is read by it
-( source <(sed '$d' /in/emhttp/scripts/polyseatctl); RUN_DIR=$run; canary_deny_tools_prepare ) || fail 'controller deny-tools'
-pass "controller deny-tools: $(find "$run/deny-tools" -type f -printf '%f ' | tr -s ' ')"
+# The controller's own deny-tools (its read-only nft stub included, self-tested), first on the daemon's PATH as on Tower.
+deny=/var/lib/polyseat-lxc/deny-tools
+# shellcheck disable=SC1090  # the real controller function
+( source <(sed '$d' /in/emhttp/scripts/polyseatctl); canary_deny_tools_prepare ) || fail 'controller deny-tools'
+pass "controller deny-tools: $(find "$deny" -type f -printf '%f ' | tr -s ' ')"
 
 mkdir -p /sys/fs/cgroup/daemon
 INCUS_DIR=/var/lib/incus-test; export INCUS_DIR
 ( echo $BASHPID > /sys/fs/cgroup/daemon/cgroup.procs
-  exec env -i PATH="$run/deny-tools:$slot/payload/tools:/usr/sbin:/usr/bin:/sbin:/bin" HOME=/root LANG=C INCUS_DIR="$INCUS_DIR" \
+  exec env -i PATH="$deny:$slot/payload/tools:/usr/sbin:/usr/bin:/sbin:/bin" HOME=/root LANG=C INCUS_DIR="$INCUS_DIR" \
     INCUS_EXEC_PATH="$slot/payload/bin/incusd" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
     "$slot/payload/bin/incusd" --group "" --logfile /out/incusd.log ) > /out/incusd.out 2>&1 &
 inc() { env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root INCUS_DIR="$INCUS_DIR" timeout "${T:-120}" "$slot/payload/bin/incus" "$@"; }
@@ -62,6 +68,10 @@ jq -r '.config | to_entries[] | select(.key | startswith("volatile.eth0")) | .ke
   sort > /out/volatile-eth0-keys.txt
 pass "running; eth0 volatile keys: $(tr '\n' ' ' < /out/volatile-eth0-keys.txt)"
 pass "br0 members while running: $(members)"
+veth=$(jq -r '.config["volatile.eth0.host_name"]' /out/instance-running.json)
+[[ $(cat "/sys/class/net/$parent/address") == "$uplink_mac" ]] && [[ $(cat "/sys/class/net/$veth/address") == fe:* ]] &&
+  pass "bridge MAC unchanged ($uplink_mac); host veth $veth has $(cat "/sys/class/net/$veth/address")" ||
+  fail "bridge MAC $(cat "/sys/class/net/$parent/address") (want $uplink_mac), host veth MAC $(cat "/sys/class/net/$veth/address" 2>/dev/null)"
 # The controller's Vulkan-manifest push, same flags (neutral target: no NVIDIA driver here to point Vulkan at).
 printf '%s\n' '{"file_format_version": "1.0.1", "ICD": {"library_path": "libGLX_nvidia.so.0", "api_version": "1.4.329"}}' > /tmp/icd.json
 inc file push -p --uid 0 --gid 0 --mode 0644 /tmp/icd.json "$c/usr/share/polyseat-rehearsal/icd.d/nvidia_icd.json" &&

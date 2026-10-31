@@ -40,7 +40,8 @@ class KeyTests(unittest.TestCase):
         for rel in (*keymod.INPUT_FILES, "unraid/build-pins.env", "unraid/docs/acceptance.md"):
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(REPO / rel, self.repo / rel)
-        shutil.copytree(REPO / "unraid/abi", self.repo / "unraid/abi")
+        for rel in keymod.INPUT_DIRS:
+            shutil.copytree(REPO / rel, self.repo / rel)
 
     def key(self, env=None):
         return keymod.key_of(keymod.inputs(self.repo, env or RUNNER))
@@ -53,7 +54,7 @@ class KeyTests(unittest.TestCase):
 
     def test_every_runtime_input_changes_the_key(self):
         base = self.key()
-        for rel in (*keymod.INPUT_FILES, "unraid/abi/unraid-7.3.3-x86_64.sonames"):
+        for rel in (*keymod.INPUT_FILES, "unraid/abi/unraid-7.3.3-x86_64.sonames", "unraid/patches/incus/host-veth-mac.patch"):
             with self.subTest(rel=rel):
                 path = self.repo / rel
                 original = path.read_bytes()

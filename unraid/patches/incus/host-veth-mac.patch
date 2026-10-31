@@ -1,0 +1,33 @@
+--- a/internal/server/device/device_utils_network.go
++++ b/internal/server/device/device_utils_network.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"context"
++	"crypto/rand"
+ 	"errors"
+ 	"fmt"
+ 	"math"
+@@ -301,6 +302,22 @@
+ 		veth.Peer.Address = hwaddr
+ 	}
+ 
++	// Polyseat: give the host-side end a fixed fe: MAC, as libvirt does for VM taps. A Linux bridge whose address
++	// was never set explicitly takes the lowest MAC among its ports, so a random host-side MAC below the uplink's
++	// became the bridge's own MAC while the instance ran (Tower run 9, 2026-10-31). fe:... is never the lowest.
++	hostMAC := make(net.HardwareAddr, 6)
++	if len(veth.Peer.Address) == 6 {
++		copy(hostMAC, veth.Peer.Address)
++	} else {
++		_, err = rand.Read(hostMAC)
++		if err != nil {
++			return "", 0, fmt.Errorf("Failed generating the host-side MAC address: %w", err)
++		}
++	}
++
++	hostMAC[0] = 0xfe
++	veth.Address = hostMAC
++
+ 	// Set TX queue length on both ends.
+ 	if m["queue.tx.length"] != "" {
+ 		nicTXqlen, err := strconv.ParseUint(m["queue.tx.length"], 10, 32)
