@@ -14,6 +14,7 @@ fail() {
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || fail 'Linux x86_64 required'
 command -v docker >/dev/null 2>&1 || fail 'docker required'
 command -v python3 >/dev/null 2>&1 || fail 'python3 required'
+command -v xz >/dev/null 2>&1 || fail 'xz required'
 
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)

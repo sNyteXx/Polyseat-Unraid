@@ -2,7 +2,7 @@
 """Turn a flattened `docker export` stream into an Incus unified image tarball (metadata.yaml + rootfs/).
 
 Deterministic by construction: members keep the export's (sorted) order, mtimes are clamped to SOURCE_DATE_EPOCH,
-owners are numeric, only SCHILY.xattr pax records survive, xz settings are fixed. Docker's own mounts (/.dockerenv,
+owners are numeric, only SCHILY.xattr pax records survive, xz settings (fixed block size) are fixed. Docker's own mounts (/.dockerenv,
 hosts, hostname, resolv.conf) and device nodes are dropped. Standard library only.
 """
 from __future__ import annotations
@@ -11,8 +11,8 @@ import argparse
 import hashlib
 import io
 import json
-import lzma
 import re
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -62,12 +62,25 @@ def add_bytes(out: tarfile.TarFile, name: str, data: bytes, epoch: int, mode: in
     out.addfile(info, io.BytesIO(data))
 
 
+def compress(tar_path: Path, image: Path) -> dict:
+    """xz with fixed 32 MiB blocks: multi-threaded, yet the bytes do not depend on the thread count."""
+    digest = hashlib.sha256()
+    with image.open("wb") as raw:
+        proc = subprocess.Popen(["xz", "-c", "-6", "-T0", "--block-size=33554432", "--check=crc64", str(tar_path)],
+                                stdout=subprocess.PIPE)
+        while chunk := proc.stdout.read(1 << 20):
+            digest.update(chunk)
+            raw.write(chunk)
+        if proc.wait() != 0:
+            sys.exit("xz failed")
+    return {"sha256": digest.hexdigest(), "size_bytes": image.stat().st_size}
+
+
 def pack(export: Path, image: Path, epoch: int, archive_date: str, base: str, sunshine: str) -> dict:
     stats = {"files": 0, "dirs": 0, "symlinks": 0, "hardlinks": 0, "unpacked_bytes": 0, "dropped": []}
-    with export.open("rb") as src, image.open("wb") as raw:
-        sink = Sha256Writer(raw)
-        xz = lzma.LZMAFile(sink, "wb", format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64, preset=6)
-        with tarfile.open(fileobj=xz, mode="w", format=tarfile.PAX_FORMAT) as out, \
+    plain = image.with_suffix(".tmp")
+    with export.open("rb") as src, plain.open("wb") as raw:
+        with tarfile.open(fileobj=raw, mode="w", format=tarfile.PAX_FORMAT) as out, \
                 tarfile.open(fileobj=src, mode="r|") as tin:
             add_bytes(out, "metadata.yaml", metadata_yaml(epoch, archive_date, base, sunshine), epoch)
             root = tarfile.TarInfo("rootfs")
@@ -91,8 +104,11 @@ def pack(export: Path, image: Path, epoch: int, archive_date: str, base: str, su
                 else:
                     stats["dirs" if member.isdir() else "symlinks" if member.issym() else "hardlinks"] += 1
                     out.addfile(member)
-        xz.close()
-    return {"sha256": sink.digest.hexdigest(), "size_bytes": sink.size, **stats}
+    try:
+        packed = compress(plain, image)
+    finally:
+        plain.unlink(missing_ok=True)
+    return {**packed, **stats}
 
 
 def parse_pacman(text: str) -> list[dict]:
