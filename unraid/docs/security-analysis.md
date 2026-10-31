@@ -18,6 +18,24 @@ nothing is filtered out to make a report green. For a candidate, scan both
 shipped binaries (`bin/incusd` and `bin/incus`) and use `--cli-buildinfo` for the
 SBOM/OSV inventory union. An incusd-only inventory is explicitly labelled so.
 
+## Bundled `unsquashfs` (squashfs-tools 4.7.5, added after Tower run 1)
+
+| Item | Value |
+|---|---|
+| Why | Incus 7.5.1 `cmd/incusd/main_daemon.go` requires `unsquashfs` on PATH at daemon start and uses it to unpack squashfs images; Unraid 7.3.3 has no squashfs-tools (run 1 failed there) |
+| Source | `https://github.com/plougher/squashfs-tools`, annotated tag `4.7.5` object `1fdc2fe01d681438a04e2a137a9f51d829ba3358` → commit `708c59ae80853b0845017c33b42e56061cc546cd` (release 2026-03-01); the build checks tag type and peel |
+| License | GPL-2.0-or-later; `COPYING` ships as `payload/share/licenses/squashfs-tools/COPYING`; the corresponding source is the pinned upstream commit recorded in the SBOM |
+| Build | only the `unsquashfs` target, upstream default compressors (gzip, xz, lzo, lz4, zstd) + xattrs, legacy LZMA1 off; `-fstack-protector-strong -D_FORTIFY_SOURCE=2`, PIE, full RELRO; `-ffile-prefix-map`; stripped |
+| Linkage | NEEDED allowlist `libz.so.1 liblzma.so.5 liblzo2.so.2 liblz4.so.1 libzstd.so.1 libm.so.6 libc.so.6 (libpthread.so.0)`, all present on Tower and in the ABI baseline; no RUNPATH; payload ABI gate re-checks symbol versions |
+| Inventory | SBOM source component `pkg:github/plougher/squashfs-tools@708c59ae…` with tag object and license; OSV queries the pinned commit; the shipped file is hash-bound by the manifest and covered by the artifact signature |
+
+Canary exposure: the fixed BusyBox canary image is a unified **tarball**, so `unsquashfs` is not executed during the
+canary lifecycle; it is only found by Incus' startup lookup and executed once as `unsquashfs -version` during
+activation. In later real use it parses image files: historical unsquashfs path-traversal issues (for example
+CVE-2021-40153 and CVE-2021-41072, fixed in 4.5/4.5.1) show that this is attacker-facing parsing code for untrusted
+images. 4.7.5 contains those fixes; the current OSV result for the exact commit comes from CI and is triaged per run.
+This is not a claim that squashfs-tools or the host compression libraries are vulnerability-free.
+
 ## LOCAL-development overlay scan (2026-10-30)
 
 The fresh UbuntuDev reports in
@@ -217,8 +235,10 @@ transition (no tag → old pseudo-version; real annotated tag → 7.5.1; go.mod 
 - Disk-only profile and no VM/device/kernel-module configuration. Incus startup
   also probes storage drivers and can otherwise call `modprobe`, even without
   a container NIC or GPU. The canary drops module/raw-I/O capabilities and uses
-  private deny wrappers for module tools; it does not modify host tools or
-  unload modules. The real rehearsal must compare loaded modules.
+  private deny wrappers for module tools and for the host storage/VM tools Incus
+  would probe on Tower (`btrfs lvm zfs zpool qemu-system-x86_64`); it does not
+  modify host tools or unload modules. The real rehearsal compares loaded modules
+  and records every exec (`exec-inventory`).
 - No image registry access in the canary: the BusyBox image is imported from local files.
 - Bundle mechanism: exact file list, owner 0:0, no setuid, no symlinks and ABI/loader
   closure against the Unraid baseline. A signing mechanism is not evidence that

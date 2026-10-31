@@ -115,10 +115,33 @@ The controller and its matching `schema.json` may run from the verified package 
 without installing any WebUI or event hook. The minimum sequence is `stage ... --approve`,
 `activate SHA --approve`, `verify`, then `canary-smoke --approve`. A separate `start` is unnecessary:
 the fixed smoke action includes daemon startup and teardown. Activation already runs each native binary with
-`--version` under a 15-second command timeout; it is the first native execution and must be included in the approved
-action list even though it does not start a daemon. This short version probe is outside the daemon cgroup.
+`--version` under a 15-second command timeout (`incus`, `incusd` and the bundled `unsquashfs -version`); it is the
+first native execution and must be included in the approved action list even though it does not start a daemon.
+This short version probe is outside the daemon cgroup.
 Do not set `ACCEPT_NO_LSM=yes` on Tower merely because the Ubuntu CI fixture needs it; the normal fail-closed
 LSM default remains in effect and the live read-only preflight must confirm the actual target state.
+
+### Daemon helper programs (added after run 1)
+
+Incus 7.5.1 refuses to start unless `ip rsync setfattr tar unsquashfs xz` resolve on its PATH
+(`cmd/incusd/main_daemon.go`, `neededPrograms`). Unraid 7.3.3 ships all of them except `unsquashfs`.
+The bundle therefore carries exactly one pinned helper, `payload/tools/unsquashfs` (squashfs-tools 4.7.5, signed upstream
+tag, GPL-2.0-or-later; `payload/share/licenses/squashfs-tools/COPYING`). It links only compression libraries that
+Unraid provides and is covered by the same manifest hashes, ABI gate, SBOM, OSV lookup and artifact signature as Incus.
+Nothing is installed globally: only the daemon's own PATH is `deny-tools:<slot>/payload/tools:/usr/sbin:/usr/bin:/sbin:/bin`.
+Before any canary state exists the controller performs the same lookup with that PATH and, on the canary, requires
+the bundled copy; a host copy never stands in for the reviewed binary. The build fails if the controller list and
+the pinned Incus source drift apart.
+
+Incus probes every storage and VM driver at start. On Tower that would run the host's own `btrfs version` and
+`lvm version` and could reach `zfs`/`zpool`/`qemu-system-x86_64`, which the CI runner does not have. The daemon PATH
+therefore starts with private stubs (`CANARY_DENIED_TOOLS`: `modprobe insmod rmmod btrfs lvm zfs zpool
+qemu-system-x86_64`, exit 126), so those drivers report unsupported and no host storage/VM tool runs; the QEMU probe
+already stops at the denied `modprobe vhost_vsock`, so `/dev/vsock` is never opened. No stub shadows a program Incus
+requires (enforced by a test).
+
+The canary health timeout is a fixed 60 s (`CANARY_HEALTH_TIMEOUT`), identical in the CI rehearsal and on Tower and
+never read from user settings; the CI daemon became healthy after about 4 s.
 
 ## 6. Signing and approval are different
 
@@ -160,6 +183,24 @@ crash-consistent. GamingVM's raw passed-through NVMe and the raw CachyOS disk we
 Docker ZFS layer snapshots are not themselves a backup of application data. Restorability was not tested.
 This does not require backing up all array data merely to prepare a tiny test; it does require an honest risk decision.
 The canary never intentionally opens or modifies those VM disks.
+
+## 8a. Run 1 (2026-10-31) and what changed
+
+Run 1 (commit `76775f3`, CI 41189281490) staged, activated and verified on Tower and the native `--version` probes passed,
+but `canary-smoke` stopped fail-closed: `incusd` exited with `exec: "unsquashfs": executable file not found in $PATH`.
+Uninstall succeeded and the host diff showed only plugin-owned residue. The CI runner had installed squashfs-tools,
+so no rehearsal could see the gap. Changes for run 2:
+
+- bundled, pinned `unsquashfs` and the pre-state program check above;
+- the CI rehearsal runs with a Tower-like PATH built from the recorded Tower inventory
+  (`unraid/abi/unraid-7.3.3-x86_64.tools`), reproduces the run-1 failure on purpose, proves the controller refuses a
+  missing program before creating state, runs the exact Tower order (`canary-smoke` starts the daemon) and records a
+  complete per-process exec inventory that fails on any host program Unraid lacks;
+- `cgroup2-unraid` removes emptied top-level groups on its own; a group that is already gone after `cgroup.kill`
+  counts as removed (the kernel only removes empty groups), and a separate leak check fails if any bundled binary or
+  supervisor/witness/launcher process survives;
+- run-1 residue on Tower (four flash trust/token files, RAM evidence, the retry-blocking
+  `/var/lib/polyseat-unraid-canary`) is never removed automatically; the run-2 Go report lists its exact-path restoration.
 
 ## 9. Handoff / Go report
 
