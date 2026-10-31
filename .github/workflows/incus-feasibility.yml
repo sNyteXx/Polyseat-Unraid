@@ -15,6 +15,7 @@ on:
       - 'unraid/scripts/make-canary-image.py'
       - 'unraid/scripts/build-canary-package.py'
       - 'unraid/scripts/canary-artifacts.py'
+      - 'unraid/scripts/exec-inventory.py'
       - 'unraid/scripts/prepare-incus-deps.py'
       - 'unraid/scripts/*dependenc*'
       - 'unraid/dependency-overrides.json'
