@@ -897,6 +897,15 @@ short script that sets the cap and replaces itself with the game, rather
 than through an `env` line, because the launcher's way of starting an entry
 cannot carry the dollar sign in `LD_PRELOAD`.
 
+**It also runs the other way, for a shortcut no scan can see.** Eden writes a
+desktop entry per game, and nothing can be asked about those: the emulator is one
+AppImage and the game is an argument. So an entry in `~/.local/share/applications`
+with `Game` in its categories becomes a card in Moonlight, unless it is hidden or
+names a `steam://` or `lutris:` target, which the scans answer better, or its
+program is gone. The Exec line is translated rather than copied, because Sunshine
+expands `$` itself and Boost counts every double quote, so `\"` does not survive.
+No entry is generated for these, since the entry they came from is already there.
+
 **The pictures differ because the menus draw differently.** A client draws every
 entry as a portrait card, which is what the covers are for; that launcher draws
 a grid of square icons at a fixed size, and a cover put through it comes out as

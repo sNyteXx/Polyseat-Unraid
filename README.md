@@ -331,7 +331,8 @@ player types `flatpak install ...` in the seat, or somebody installs it into
 that seat from the web interface and watches the progress bar. **AppImages count
 too**, which matters because many emulators are published that way and no other:
 paste the address into the web interface, or drop the file in `~/Downloads`
-inside the seat, and it appears in both menus by itself.
+inside the seat, and it appears in both menus by itself. A shortcut an emulator
+writes for one game is picked up the same way.
 
 **A seat speaks the machine's language, uses its keyboard and keeps its time.**
 A plain Arch image has none of the three: systemd falls back to C.UTF-8, xkb to
