@@ -23,7 +23,10 @@ build is covered.
 
 A fresh full run snapshots `incus-build-proof` and the stage parts later steps use, **before** any rehearsal writes
 evidence; only if the whole job is green it seals the snapshot to its run id/attempt/commit and to the digest of its
-uploaded proof artifact, and saves it to the Actions cache under that key. A later run reuses it only if
+uploaded proof artifact, and saves it to the Actions cache as `polyseat-runtime-v1-<key>-<run id>-<attempt>`
+(same directory and path for restore and save: the path is part of the cache version). A later run restores the newest
+entry with the prefix `polyseat-runtime-v1-<key>-` (`cache-matched-key`), so an entry that is later refused (e.g. its
+proof artifact expired after 7 days) never blocks a newer one. It reuses it only if
 `ci-runtime-reuse.py verify` passes all of: key and inputs identical, every file and symlink identical to the
 sealed list (nothing extra/missing, symlinks stay inside), the proof's own `SHA256SUMS`, bundle named by its hash and
 named by its manifest, the producer run is a **completed, successful** `incus-feasibility.yml` run of this repository
@@ -59,4 +62,16 @@ Before (commit `e0cbf65`, run 41209744754): full lane 11:48 wall; `build` 629 s 
 GoBGP 19, CPU canary 114, controller E2E 199, upload 13); `desktop-canary` 73 s; `seat-image` 196 s (parallel);
 preflight 129 s **×2** (push + PR); upstream CI 118 s (PR). Every controller or hook change ran all of it.
 
-After: see the PR description / the measurement table appended below after the first runs.
+Measurement 1 (commit `5c3d0a5`, push, run 41214824348, cache miss as expected): full lane 12:09 wall, `build`
+638 s (source build 229, GoBGP 18, CPU canary 121, controller E2E 214); `desktop-canary` 86 s (L2 hook 14 s);
+snapshot sealed and saved (393 MB). Preflight push 172 s (`hook-l2` 6 s: no cache yet, skipped with a notice); the
+same-repo PR duplicate skipped (2 s).
+
+Measurement 2 (same commit, `workflow_dispatch`, run 41215993159): **no reuse** — `Cache not found` for the very key
+saved 4½ minutes earlier, then `Unable to reserve cache` on save. Cause: the save used `runtime-snapshot-new`, the
+restore `runtime-snapshot`; actions/cache puts the path into the cache version, so the entry could never match.
+Fail-closed (full rebuild, 731 s wall, green), but no saving. Fixed with one directory for snapshot/seal/save, the
+per-run key with prefix lookup above, and `WorkflowCacheTests` (mutation-checked: a differing save path or a
+missing `restore-keys` fails the suite).
+
+After the fix: see below.

@@ -222,5 +222,47 @@ class ReuseTests(unittest.TestCase):
         self.assertNotReusable("symlink leaves the snapshot")
 
 
+class WorkflowCacheTests(unittest.TestCase):
+    """actions/cache only finds an entry if restore and save use the same path (it is part of the cache version):
+    run 41215993159 missed the entry saved by 41214824348 because the save used another directory."""
+
+    WORKFLOWS = (".github/workflows/incus-feasibility.yml", ".github/workflows/unraid-preflight-lint.yml")
+    PATH = "${{ runner.temp }}/runtime-snapshot"
+    PREFIX = "polyseat-runtime-v1-${{ steps.key.outputs.key }}-"
+    KEY = PREFIX + "${{ github.run_id }}-${{ github.run_attempt }}"
+
+    @staticmethod
+    def cache_steps(text):
+        steps = []
+        for match in re.finditer(r"uses: actions/cache/(restore|save)@[0-9a-f]{40}[^\n]*\n\s+with:\n((?:\s{10}\S[^\n]*\n)+)", text):
+            fields = dict(line.strip().split(": ", 1) for line in match.group(2).splitlines())
+            steps.append((match.group(1), fields))
+        return steps
+
+    def test_restore_and_save_share_path_and_key_scheme(self):
+        kinds = []
+        for rel in self.WORKFLOWS:
+            text = (REPO / rel).read_text()
+            self.assertNotIn("runtime-snapshot-new", text, rel)
+            self.assertNotIn("cache-hit", text, rel)  # never 'true' with prefix lookups; use cache-matched-key
+            for kind, fields in self.cache_steps(text):
+                kinds.append((rel, kind))
+                with self.subTest(rel=rel, kind=kind):
+                    self.assertEqual(fields["path"], self.PATH)
+                    self.assertEqual(fields["key"], self.KEY)
+                    if kind == "restore":
+                        self.assertEqual(fields["restore-keys"], self.PREFIX)
+                        self.assertIn("MATCHED: ${{ steps.cache.outputs.cache-matched-key }}", text)
+                        self.assertIn('"polyseat-runtime-v1-$KEY-"*)', text)
+        self.assertEqual(sorted(kinds), sorted([(self.WORKFLOWS[0], "restore"), (self.WORKFLOWS[0], "save"),
+                                                (self.WORKFLOWS[1], "restore")]))
+
+    def test_snapshot_seal_and_save_use_one_directory(self):
+        text = (REPO / self.WORKFLOWS[0]).read_text()
+        self.assertIn('--out "$RUNNER_TEMP/runtime-snapshot" > /dev/null', text)
+        self.assertIn('seal --snapshot "$RUNNER_TEMP/runtime-snapshot" ', text)
+        self.assertIn('snap="$RUNNER_TEMP/runtime-snapshot"', text)
+
+
 if __name__ == "__main__":
     unittest.main()

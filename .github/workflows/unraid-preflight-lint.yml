@@ -90,18 +90,21 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/runtime-snapshot
-          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}
+          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: polyseat-runtime-v1-${{ steps.key.outputs.key }}-
 
       - name: Verify it (otherwise the full lane rehearses the hook)
         id: reuse
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+          KEY: ${{ steps.key.outputs.key }}
+          MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         run: |
           echo "ok=false" >> "$GITHUB_OUTPUT"
-          if [ "$CACHE_HIT" != true ]; then
-            echo "::notice::no cached runtime for this recipe; the hook rehearsal runs in the full lane"; exit 0
-          fi
+          case $MATCHED in
+            "polyseat-runtime-v1-$KEY-"*) echo "cache entry $MATCHED" ;;
+            *) echo "::notice::no cached runtime for this recipe; the hook rehearsal runs in the full lane"; exit 0 ;;
+          esac
           if python3 unraid/scripts/ci-runtime-reuse.py verify --snapshot "$RUNNER_TEMP/runtime-snapshot" \
                --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/verdict.json"; then
             echo "ok=true" >> "$GITHUB_OUTPUT"

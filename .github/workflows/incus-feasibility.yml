@@ -98,22 +98,31 @@ jobs:
           echo "key=$key" >> "$GITHUB_OUTPUT"
           echo "runtime key $key"
 
+      # Every green fresh build saves under its own run id, so a rejected entry can never block a newer one; the
+      # lookup takes the newest entry whose prefix is exactly this content key. Restore and save must use the same
+      # path (it is part of the cache version), see test_ci_runtime_reuse.WorkflowCacheTests.
       - name: Look up a cached build of exactly this recipe
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/runtime-snapshot
-          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}
+          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: polyseat-runtime-v1-${{ steps.key.outputs.key }}-
 
       - name: Verify the cached runtime before any reuse (any doubt means a full rebuild)
         id: reuse
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+          KEY: ${{ steps.key.outputs.key }}
+          MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
         run: |
           echo "reused=false" >> "$GITHUB_OUTPUT"
           snap="$RUNNER_TEMP/runtime-snapshot"
-          if [ "$CACHE_HIT" != true ]; then echo "cache miss: full build"; exit 0; fi
+          if [ -z "$MATCHED" ]; then echo "cache miss: full build"; rm -rf "$snap"; exit 0; fi
+          case $MATCHED in
+            "polyseat-runtime-v1-$KEY-"*) echo "cache entry $MATCHED" ;;
+            *) echo "::warning::cache entry $MATCHED is not of this recipe; full build"; rm -rf "$snap"; exit 0 ;;
+          esac
           if ! python3 unraid/scripts/ci-runtime-reuse.py verify --snapshot "$snap" \
                --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/reuse-verdict.json"; then
             echo "::warning::cached runtime not reusable: $(jq -r .reason "$RUNNER_TEMP/reuse-verdict.json"); full build"
@@ -167,7 +176,7 @@ jobs:
         if: steps.reuse.outputs.reused != 'true'
         run: |
           python3 unraid/scripts/ci-runtime-reuse.py snapshot --proof incus-build-proof \
-            --stage "$INCUS_PROOF_STAGE" --out "$RUNNER_TEMP/runtime-snapshot-new" > /dev/null
+            --stage "$INCUS_PROOF_STAGE" --out "$RUNNER_TEMP/runtime-snapshot" > /dev/null
           jq -n --arg run "$GITHUB_RUN_ID" '{schema:1, reused:false, built_in_run:($run|tonumber)}' \
             > incus-build-proof/runtime-provenance.json
 
@@ -296,7 +305,7 @@ jobs:
           ARTIFACT_ID: ${{ steps.proof.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ steps.proof.outputs.artifact-digest }}
         run: |
-          python3 unraid/scripts/ci-runtime-reuse.py seal --snapshot "$RUNNER_TEMP/runtime-snapshot-new" \
+          python3 unraid/scripts/ci-runtime-reuse.py seal --snapshot "$RUNNER_TEMP/runtime-snapshot" \
             --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --head-sha "$GITHUB_SHA" \
             --artifact-id "$ARTIFACT_ID" --artifact-digest "sha256:${ARTIFACT_DIGEST#sha256:}"
@@ -305,8 +314,8 @@ jobs:
         if: success() && steps.reuse.outputs.reused != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/runtime-snapshot-new
-          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}
+          path: ${{ runner.temp }}/runtime-snapshot
+          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   seat-image:
     if: github.ref == 'refs/heads/wip/unraid-native-plugin'
