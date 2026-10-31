@@ -68,7 +68,46 @@ root disk only, no NIC), then twice `start` → `exec polyseat-selftest desktop`
 `stop --timeout 60`, then `delete` and `image delete`. CI-only extra: `selftest nvidia` must fail cleanly. `INCUS_BIN`, `INCUSD_BIN`
 and `INCUS_DIR` parametrise the daemon; the iteration runs use Ubuntu's apt `incus`, the pinned 7.5.1 bundle replaces it later.
 
-RESULTS_PLACEHOLDER
+## Measured CI results
+
+Green run: <https://github.com/sNyteXx/Polyseat-Unraid/actions/runs/41199794061> (`seat-image` + `desktop-smoke`, Ubuntu 24.04 runner,
+apt Incus, Docker image build from the pins above). Artifacts: `polyseat-seat-image-NOT-FOR-UNRAID`, `polyseat-desktop-smoke-NOT-FOR-UNRAID`
+(screenshots, self-test JSON, Sunshine logs, `measurements.json`).
+
+| What | Value |
+| --- | --- |
+| image sha256 (that run) | `a52c26c6510127bc2720f3d59c9c92bbd1d4ffe3d311c7e715929ae286460bb2` |
+| compressed (`.tar.xz`) | 273,245,376 bytes (260.6 MiB) |
+| unpacked, file bytes in the tar | 1,227,792,336 bytes, 346 packages, 35,045 files |
+| rootfs as stored by the `dir` pool | 1,247,214,315 bytes apparent, 1,354,018,816 bytes allocated (budget this as RAM when the pool is tmpfs) |
+| container `memory.peak` (2 GiB limit) | 139,124,736 / 127,086,592 bytes (cycle 1 / 2: sway + foot + swaybar + pipewire + Sunshine, software x264) |
+| container `pids.peak` (1024 limit) | 42 / 42 |
+| container CPU time | 3.1 s / 3.6 s per cycle (boot + selftest) |
+| `incusd` scope `memory.peak` | 1,803,309,056 bytes - dominated by importing/unpacking the image, not steady state |
+| whole-runner used-memory delta peak | 268,226,560 bytes (`MemTotal - MemAvailable` sampled every second; includes incusd, lxc, container) |
+| graceful `incus stop` | 2 s / 0 s (no force) |
+| `systemctl is-system-running` | `running`, no failed units, both cycles |
+
+Self-test evidence (cycle 1): `HEADLESS-1 1280x720`, `grim` PNG 1280x720 with 198 distinct colours (a foot terminal and the swaybar; screenshot
+sha256 `3f43e506…11bb`), Sunshine log lines
+
+```
+Info: config: 'capture' = wlr
+Info: [wayland] Found interface: zwlr_screencopy_manager_v1(28) version 3
+Info: [wlgrab] Monitor 0 is HEADLESS-1: Headless output 1
+Info: Screencasting with Wayland's protocol
+Info: Trying encoder [software]
+Info: Found H.264 encoder: libx264 [software]
+```
+
+and listeners `tcp 0.0.0.0:{47984,47989,47990,48010}` in a netns whose only interface is `lo`. Run twice (start, selftest, graceful stop, start,
+selftest, graceful stop), then delete, and no process, bridge or cgroup is left. `selftest nvidia` fails cleanly:
+`nvidia-gpu: nvidia-smi not found in the seat: no NVIDIA userspace was injected, no GPU`.
+
+Known log noise from Sunshine in this container (not failures of the checks): `Gamepad ... disabled due to gamepads.virtualhid-not-available`
+(no `/dev/uinput`, deliberately not provided), `Failed to drop/gain CAP_SYS_ADMIN` (the package's file capability is not usable unprivileged;
+wlr capture does not need it), `Failed to create client: Daemon not running` (no avahi, so no mDNS announcement).
+
 
 ## What is NOT proven
 
