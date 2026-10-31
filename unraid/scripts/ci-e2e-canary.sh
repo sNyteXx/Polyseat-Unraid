@@ -515,6 +515,7 @@ neg_rc=0
 env -i PATH="$tower_path" HOME="$work" INCUS_DIR="$work/negative-incus" LANG=C \
   timeout 20 "$slot/payload/bin/incusd" --group "" > "$evidence/negative-unsquashfs.txt" 2>&1 || neg_rc=$?
 [[ $neg_rc != 0 && $neg_rc != 124 ]] || fail "daemon without the bundled unsquashfs did not fail fast (rc=$neg_rc)"
+# shellcheck disable=SC2016  # the literal Go error text contains "$PATH"
 grep -Fq 'exec: "unsquashfs": executable file not found in $PATH' "$evidence/negative-unsquashfs.txt" ||
   fail 'a missing unsquashfs did not reproduce the Tower failure'
 [[ ! -e $work/negative-incus ]] || fail 'the refused daemon start created state'
@@ -524,8 +525,10 @@ mv -- "$tower_path/rsync" "$work/rsync.hidden"
 refuse_rc=0
 ctl canary-smoke --approve > "$evidence/missing-program-refusal.txt" 2>&1 || refuse_rc=$?
 mv -- "$work/rsync.hidden" "$tower_path/rsync"
-[[ $refuse_rc != 0 ]] && grep -q 'required daemon programs missing on PATH: rsync' "$evidence/missing-program-refusal.txt" ||
+if [[ $refuse_rc == 0 ]] ||
+   ! grep -q 'required daemon programs missing on PATH: rsync' "$evidence/missing-program-refusal.txt"; then
   fail 'a missing host program was not refused by the controller'
+fi
 [[ ! -e $data/incus && ! -e $data/one-shot.json && ! -e $fixture/var/run/polyseat-unraid/canary-session.json &&
    ! -e $fixture/var/run/polyseat-unraid/deny-tools && ! -e $workload && ! -e $watchdog &&
    ! -e /var/lib/polyseat-lxc ]] ||
@@ -534,9 +537,10 @@ step missing-program-refusal
 # Positive: the exact Tower sequence with only the bundled unsquashfs available.
 traced canary-smoke canary-smoke --approve > "$evidence/tower-sequence-smoke.txt" 2>&1 ||
   fail 'Tower-sequence canary-smoke failed (see tower-sequence-smoke.txt)'
-grep -q '^PASS: fresh CPU-only canary lifecycle' "$evidence/tower-sequence-smoke.txt" &&
-  [[ $(grep -c '^POLYSEAT_CANARY_OK$' "$evidence/tower-sequence-smoke.txt") == 2 ]] ||
+if ! grep -q '^PASS: fresh CPU-only canary lifecycle' "$evidence/tower-sequence-smoke.txt" ||
+   [[ $(grep -c '^POLYSEAT_CANARY_OK$' "$evidence/tower-sequence-smoke.txt") != 2 ]]; then
   fail 'Tower sequence did not complete both container execs'
+fi
 [[ ! -e $workload && ! -e $watchdog ]] || fail 'Tower sequence did not remove its own groups'
 step tower-sequence
 jq -r '.files[]' "$proof/busybox-image-provenance.json" > "$work/image-files.txt"

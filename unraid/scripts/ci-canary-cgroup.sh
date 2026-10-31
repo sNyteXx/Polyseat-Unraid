@@ -16,6 +16,8 @@ ctl="$GITHUB_WORKSPACE/unraid/plugin/src/emhttp/scripts/polyseatctl"
 # shellcheck disable=SC1090
 source <(sed '$d' "$ctl")
 [[ $POLYSEAT_RELEASE_GATE == closed ]] || fail 'committed controller gate was changed'
+# The real path layout (SLOTS etc.), exactly as main() sets it; the teardown leak check needs it.
+init_paths
 POLYSEAT_RELEASE_GATE=canary
 CANARY_CGROUP="/sys/fs/cgroup/polyseat-unraid-canary-ci-$GITHUB_RUN_ID"
 # shellcheck disable=SC2034  # consumed by the sourced controller functions

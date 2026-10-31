@@ -199,9 +199,10 @@ build_unsquashfs() { # src prefix [mirror]
   # Upstream prints its version and exits 1 when no image is named; anything else is a broken build.
   sq_rc=0
   sq_version=$("$sq_prefix/tools/unsquashfs" -version 2>&1) || sq_rc=$?
-  { [ "$sq_rc" -eq 0 ] || [ "$sq_rc" -eq 1 ]; } &&
-    printf '%s\n' "$sq_version" | head -n 1 | grep -Fq "unsquashfs version $SQUASHFS_TOOLS_RELEASE (" ||
+  if [ "$sq_rc" -gt 1 ] ||
+     ! printf '%s\n' "$sq_version" | head -n 1 | grep -Fq "unsquashfs version $SQUASHFS_TOOLS_RELEASE ("; then
     die "unsquashfs did not report the pinned release (rc=$sq_rc)"
+  fi
   for lib in libz.so.1 liblzma.so.5 liblzo2.so.2 liblz4.so.1 libzstd.so.1; do
     printf '%s\n' "$sq_needed" | grep -qx "$lib" || die "unsquashfs lacks compressor library $lib"
   done
