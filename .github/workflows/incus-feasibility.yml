@@ -35,6 +35,10 @@ on:
       - 'unraid/scripts/ci-desktop-smoke.sh'
       - 'unraid/scripts/ci-e2e-desktop-canary.sh'
       - 'unraid/scripts/make-seat-manifest.py'
+      - 'unraid/scripts/local-hook-rehearsal*.sh'
+      - 'unraid/scripts/fetch-nvidia-cli-for-tests.sh'
+      - 'unraid/scripts/dev/hook-rehearsal.Dockerfile'
+      - 'unraid/plugin/src/emhttp/scripts/lxc-nvidia-hook'
       - '.github/workflows/seat-image.yml'
 
 permissions:
@@ -69,6 +73,8 @@ jobs:
       # Signed LXC v6.0.6 tag, immutable target commit (Incus 7.5 requires LXC >= 6.0.0).
       LXC_COMMIT: 2597434ae2472114c70ad2bdf4ae5580c9e22717
       LXC_RELEASE: v6.0.6
+      # Verbatim hooks/nvidia of that tag (bundled for nvidia.runtime); the build refuses any other bytes.
+      LXC_NVIDIA_HOOK_SHA256: d4e1bcdccfc5c1b41714ebc9bc6c609a80e12232b88a1f21be6efce0c9b11d1d
       # Signed squashfs-tools 4.7.5 tag: Incus requires unsquashfs, Unraid lacks it; bundled privately.
       SQUASHFS_TOOLS_COMMIT: 708c59ae80853b0845017c33b42e56061cc546cd
       SQUASHFS_TOOLS_RELEASE: 4.7.5
@@ -259,6 +265,15 @@ jobs:
             SEAT_IMAGE_DIR="$GITHUB_WORKSPACE/seat-image-in" \
             bash unraid/scripts/ci-e2e-desktop-canary.sh
 
+      - name: Level-2 LXC nvidia hook rehearsal (real incusd/LXC; stub and real nvidia-container-cli; no GPU)
+        timeout-minutes: 10
+        run: |
+          cli=$(sh unraid/scripts/fetch-nvidia-cli-for-tests.sh "$RUNNER_TEMP/nvidia-cli")
+          bundle="incus-build-proof/bundle/$(sed -n 's/^BUNDLE_SHA256=//p' incus-build-proof/bundle.env).tar.gz"
+          bash unraid/scripts/local-hook-rehearsal.sh "$bundle" "$GITHUB_WORKSPACE/hook-rehearsal" "$cli"
+          grep -q '^DONE$' hook-rehearsal/summary.txt
+          ! grep -q '^FAIL' hook-rehearsal/summary.txt
+
       - name: Preserve desktop canary evidence even if the rehearsal failed
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -268,5 +283,6 @@ jobs:
             incus-build-proof/desktop-canary-e2e/
             incus-build-proof/desktop-canary-e2e-result.txt
             incus-build-proof/desktop-canary-rehearsal.json
+            hook-rehearsal/
           retention-days: 14
           if-no-files-found: warn

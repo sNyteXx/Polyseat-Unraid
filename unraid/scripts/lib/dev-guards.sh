@@ -62,7 +62,7 @@ dev_load_pins() { # file
       INCUS_COMMIT | INCUS_TAG_OBJECT | RAFT_COMMIT | COWSQL_COMMIT | LXC_COMMIT | SQUASHFS_TOOLS_COMMIT | \
       SQUASHFS_TOOLS_TAG_OBJECT)
         printf '%s' "$val" | grep -Eq '^[0-9a-f]{40}$' || dev_die "$key must be a full lowercase 40-character SHA" ;;
-      GO_LINUX_AMD64_SHA256 | BUSYBOX_DEB_SHA256 | BUSYBOX_BINARY_SHA256 | SUNSHINE_PKG_SHA256)
+      GO_LINUX_AMD64_SHA256 | BUSYBOX_DEB_SHA256 | BUSYBOX_BINARY_SHA256 | SUNSHINE_PKG_SHA256 | LXC_NVIDIA_HOOK_SHA256)
         printf '%s' "$val" | grep -Eq '^[0-9a-f]{64}$' || dev_die "$key must be a 64-character SHA-256" ;;
       SEAT_BASE_IMAGE)
         printf '%s' "$val" | grep -Eq '^archlinux@sha256:[0-9a-f]{64}$' || dev_die 'SEAT_BASE_IMAGE must be the official archlinux image pinned by digest' ;;

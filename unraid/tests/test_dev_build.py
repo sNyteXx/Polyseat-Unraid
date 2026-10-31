@@ -108,7 +108,8 @@ class Pins(unittest.TestCase):
     def test_pins_match_the_ci_workflow_exactly(self):
         pins = dict(line.split("=", 1) for line in PINS.read_text().splitlines() if line and not line.startswith("#"))
         workflow = WORKFLOW.read_text()
-        for key in ("INCUS_COMMIT", "INCUS_RELEASE", "RAFT_COMMIT", "COWSQL_COMMIT", "LXC_COMMIT", "LXC_RELEASE"):
+        for key in ("INCUS_COMMIT", "INCUS_RELEASE", "RAFT_COMMIT", "COWSQL_COMMIT", "LXC_COMMIT", "LXC_RELEASE",
+                    "LXC_NVIDIA_HOOK_SHA256"):
             match = re.search(rf"^\s+{key}:\s*(\S+)\s*$", workflow, re.M)
             self.assertIsNotNone(match, key)
             self.assertEqual(match.group(1), pins[key], f"{key} drifted between the workflow and unraid/build-pins.env")

@@ -137,6 +137,8 @@ build_lxc() { # lxc_commit src prefix [mirror]
   # from the same pinned checkout; in an unprivileged container it never loads kernel
   # modules (--user --no-cgroups). Copied verbatim, never generated or patched.
   [ -f "$lxc_src/hooks/nvidia" ] || die 'pinned LXC source lacks hooks/nvidia'
+  [ "$(sha256sum "$lxc_src/hooks/nvidia" | cut -d' ' -f1)" = "${LXC_NVIDIA_HOOK_SHA256:?}" ] ||
+    die 'LXC hooks/nvidia differs from LXC_NVIDIA_HOOK_SHA256'
   mkdir -p "$lxc_prefix/share/polyseat-lxc/hooks" "$lxc_prefix/share/licenses/lxc"
   cp "$lxc_src/hooks/nvidia" "$lxc_prefix/share/polyseat-lxc/hooks/nvidia"
   cp "$lxc_src/LICENSE.LGPL2.1" "$lxc_prefix/share/licenses/lxc/LICENSE.LGPL2.1"

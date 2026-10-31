@@ -861,7 +861,12 @@ ensure_lxc_rootfs_mount() { # manifest
 }
 
 remove_lxc_rootfs_mount() {
-  rm -f -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks/nvidia")"
+  local f
+  for f in "hooks/nvidia" "hooks/nvidia.upstream" "hook-log/env.txt" "hook-log/hook.out" "hook-log/status" \
+           "hook-log/nvidia-container-cli.log"; do
+    rm -f -- "$(lxc_mount_real "$LXC_STATE_PARENT/$f")"
+  done
+  rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hook-log")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT")" 2>/dev/null || true
@@ -873,24 +878,47 @@ remove_lxc_rootfs_mount() {
 # from the verified slot into a 0755 chain on the exec-capable RAM root, re-hashed against the signed manifest
 # on every start, and checked as that uid. /run would not do: it is mounted noexec on Unraid.
 LXC_HOOK_DIR="$LXC_STATE_PARENT/hooks"
+LXC_HOOK_LOG_DIR="$LXC_STATE_PARENT/hook-log"
+# Ships with the controller (signed package); see the file for why it exists. It execs nvidia.upstream.
+LXC_HOOK_WRAPPER="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/lxc-nvidia-hook"
 
-lxc_hook_prepare() { # manifest slot : 0 = hook in place and executable by the container root uid
-  local manifest=$1 slot=$2 want dir file uid
-  want=$(jq -r '.files[] | select(.path == "payload/share/lxc/hooks/nvidia" and .mode == 493) | .sha256' "$manifest")
-  [[ $want =~ $SHA_RE ]] || return 1
-  dir=$(lxc_mount_real "$LXC_HOOK_DIR") file=$dir/nvidia
-  [[ ! -L $dir && ! -L $file ]] || { log error "refusing a symlinked LXC hook path"; return 1; }
-  (umask 022; mkdir -p -- "$dir") || return 1
-  chmod 0755 -- "$dir" || return 1
-  if ! [[ -f $file && $(sha256sum -- "$file" | awk '{print $1}') == "$want" ]]; then
-    { install -m 0755 -- "$slot/payload/share/lxc/hooks/nvidia" "$file.new" && mv -f -- "$file.new" "$file"; } || return 1
+lxc_hook_install() { # source target sha|"" : copy only if the target differs, then verify
+  local src=$1 dst=$2 want=$3
+  [[ -n $want ]] || want=$(sha256sum -- "$src" | awk '{print $1}')
+  [[ ! -L $dst ]] || return 1
+  if ! [[ -f $dst && $(sha256sum -- "$dst" | awk '{print $1}') == "$want" ]]; then
+    { install -m 0755 -- "$src" "$dst.new" && mv -f -- "$dst.new" "$dst"; } || return 1
   fi
-  [[ $(sha256sum -- "$file" | awk '{print $1}') == "$want" ]] || return 1
-  sandbox && ! ci_real_system && return 0
-  [[ $(stat -c '%u %a' -- "$file") == "0 755" ]] || return 1
+  [[ $(sha256sum -- "$dst" | awk '{print $1}') == "$want" ]]
+}
+
+lxc_hook_prepare() { # manifest slot : 0 = wrapper + verbatim hook in place, usable by the container root uid
+  local manifest=$1 slot=$2 want dir logdir uid
+  want=$(jq -r '.files[] | select(.path == "payload/share/lxc/hooks/nvidia" and .mode == 493) | .sha256' "$manifest")
+  [[ $want =~ $SHA_RE && -f $LXC_HOOK_WRAPPER && ! -L $LXC_HOOK_WRAPPER ]] || return 1
+  dir=$(lxc_mount_real "$LXC_HOOK_DIR") logdir=$(lxc_mount_real "$LXC_HOOK_LOG_DIR")
+  [[ ! -L $dir && ! -L $logdir ]] || { log error "refusing a symlinked LXC hook path"; return 1; }
+  (umask 022; mkdir -p -- "$dir") && chmod 0755 -- "$dir" || return 1
+  lxc_hook_install "$slot/payload/share/lxc/hooks/nvidia" "$dir/nvidia.upstream" "$want" || return 1
+  lxc_hook_install "$LXC_HOOK_WRAPPER" "$dir/nvidia" "" || return 1
   uid=$(cfg_get SUBID_START 1000000)
-  setpriv --reuid="$uid" --regid="$uid" --clear-groups -- test -x "$file" -a -r "$file" || {
-    log error "LXC nvidia hook not executable by the container root uid $uid"; return 1; }
+  (umask 077; mkdir -p -- "$logdir") || return 1
+  sandbox && ! ci_real_system && return 0
+  chown "$uid:$uid" -- "$logdir" && chmod 0700 -- "$logdir" || return 1
+  [[ $(stat -c '%u %a' -- "$dir/nvidia") == "0 755" && $(stat -c '%u %a' -- "$dir/nvidia.upstream") == "0 755" ]] || return 1
+  setpriv --reuid="$uid" --regid="$uid" --clear-groups -- test -x "$dir/nvidia" -a -x "$dir/nvidia.upstream" -a -w "$logdir" || {
+    log error "LXC nvidia hook or its log directory not usable by the container root uid $uid"; return 1; }
+}
+
+# Bounded copy of the hook's diagnostics (written by the wrapper) into an evidence directory.
+lxc_hook_collect() { # evidence-dir
+  local f logdir
+  logdir=$(lxc_mount_real "$LXC_HOOK_LOG_DIR")
+  [[ -d $1 && ! -L $1 && -d $logdir && ! -L $logdir ]] || return 0
+  for f in "env.txt" "hook.out" "status" "nvidia-container-cli.log"; do
+    [[ -f $logdir/$f && ! -L $logdir/$f ]] || continue
+    head -c 1048576 -- "$logdir/$f" > "$1/hook-$f" 2>/dev/null || true
+  done
 }
 
 # ---------------------------------------------------------- data dir ----
@@ -1906,10 +1934,24 @@ seat_image_remove_exact() {
 # full container rootfs in RAM. Best effort and bounded; the hard stop that follows does not depend on it.
 canary_failure_cleanup() { # instance
   svc_pid >/dev/null 2>&1 && canary_watchdog_check || return 0
+  canary_keep_diagnostics "$1"
   log warn "canary: failure path, removing test instance $1 before the hard stop"
   INCUS_CMD_TIMEOUT=20 run_incus stop "$1" --force --timeout 5 >/dev/null 2>&1 || true
   INCUS_CMD_TIMEOUT=90 run_incus delete "$1" >/dev/null 2>&1 || true
   INCUS_CMD_TIMEOUT=30 run_incus image delete "$DESKTOP_ALIAS" >/dev/null 2>&1 || true
+}
+
+# Copy the failed instance's LXC/hook logs (each capped at 1 MiB) into the run's evidence directory BEFORE the
+# instance is deleted. Regular files only; nothing outside the plugin's own Incus directory is read.
+canary_keep_diagnostics() { # instance
+  local dir=$SEAT_EVIDENCE f
+  [[ $1 == "$GPU_INSTANCE" ]] && dir="$RUN_DIR/gpu-evidence"
+  [[ -d $dir && ! -L $dir ]] || return 0
+  for f in "$INCUS_DIR/logs/$1/lxc.log" "$INCUS_DIR/logs/$1/forklxc.log"; do
+    [[ -f $f && ! -L $f ]] || continue
+    head -c 1048576 -- "$f" > "$dir/failed-$(basename -- "$f")" 2>/dev/null || true
+  done
+  lxc_hook_collect "$dir"
 }
 
 desktop_selftest() { # phase [instance profile evidence-dir] : the signed image's fixed self-test, bounded JSON + PNG
@@ -2036,6 +2078,7 @@ cmd_gpu_smoke() (
   log info "gpu phase: daemon-stop"
   svc_stop full || exit $EX_HEALTH
   trap - EXIT
+  lxc_hook_collect "$dir"
   gpu_preflight_run "$GPU_CANARY_PCI" || true
   printf '%s\n' "${GPU_RES[@]}" > "$dir/gpu-preflight-after.txt"
   grep -q $'^PASS\tholder\t' "$dir/gpu-preflight-after.txt" || { log error "GPU not idle after teardown"; exit $EX_HEALTH; }

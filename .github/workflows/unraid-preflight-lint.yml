@@ -21,24 +21,27 @@ jobs:
       - name: POSIX shell syntax
         run: |
           for script in unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh; do
-            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh) continue ;; esac
+            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh|unraid/scripts/local-hook-rehearsal.sh|unraid/scripts/local-hook-rehearsal-inner.sh) continue ;; esac
             sh -n "$script"
           done
           bash -n unraid/scripts/ci-canary-cgroup.sh
           bash -n unraid/scripts/ci-e2e-canary.sh
           bash -n unraid/scripts/ci-e2e-desktop-canary.sh
+          bash -n unraid/scripts/local-hook-rehearsal.sh unraid/scripts/local-hook-rehearsal-inner.sh
           sh -n unraid/seat-image/build-seat-image.sh
           sh -n unraid/seat-image/provision.sh
           bash -n unraid/seat-image/rootfs/usr/local/bin/polyseat-profile unraid/seat-image/rootfs/usr/local/bin/polyseat-selftest
       - name: ShellCheck
         run: |
           for script in unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh; do
-            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh) continue ;; esac
+            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh|unraid/scripts/local-hook-rehearsal.sh|unraid/scripts/local-hook-rehearsal-inner.sh) continue ;; esac
             shellcheck -x -s sh "$script"
           done
           shellcheck -s bash unraid/scripts/ci-canary-cgroup.sh
           shellcheck -s bash unraid/scripts/ci-e2e-canary.sh
           shellcheck -s bash unraid/scripts/ci-e2e-desktop-canary.sh
+          shellcheck -s bash unraid/scripts/local-hook-rehearsal.sh unraid/scripts/local-hook-rehearsal-inner.sh
+          shellcheck -s bash unraid/plugin/src/emhttp/scripts/lxc-nvidia-hook
           shellcheck -x -s sh unraid/seat-image/build-seat-image.sh unraid/seat-image/provision.sh unraid/seat-image/rootfs/usr/local/bin/polyseat-sunshine-run
           shellcheck -s bash unraid/seat-image/rootfs/usr/local/bin/polyseat-profile unraid/seat-image/rootfs/usr/local/bin/polyseat-selftest
           shellcheck -s bash unraid/plugin/src/emhttp/scripts/polyseatctl unraid/plugin/src/emhttp/event/*
