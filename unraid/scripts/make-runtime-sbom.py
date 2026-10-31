@@ -87,6 +87,9 @@ def build(manifest: dict, abi: dict, buildinfo: str, pins: dict, label: str, osv
             # GPL: the exact corresponding source is the pinned upstream commit; COPYING ships in the bundle.
             source_properties.append({"name": "polyseat:shipped-as", "value": "payload/tools/unsquashfs"})
             component["licenses"] = [{"license": {"id": "GPL-2.0-or-later"}}]
+        if name == "lxc" and any(entry["path"] == "payload/share/lxc/hooks/nvidia" for entry in manifest["files"]):
+            # Verbatim LGPL-2.1+ mount hook from the same pinned tag (used only with nvidia.runtime=true).
+            source_properties.append({"name": "polyseat:shipped-as", "value": "payload/share/lxc/hooks/nvidia"})
         add(component)
     add({"type": "library", "bom-ref": f"golang:stdlib@{pins['GO_VERSION']}", "name": "go-stdlib",
          "version": pins["GO_VERSION"], "purl": f"pkg:golang/stdlib@{pins['GO_VERSION']}"})
