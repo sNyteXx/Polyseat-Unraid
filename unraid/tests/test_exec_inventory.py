@@ -48,7 +48,7 @@ class ExecInventoryTests(unittest.TestCase):
         self.record(102, self.ok(f"{self.tower}/setsid"), self.ok(f"{self.tower}/env"),
                     self.ok(f"{self.tower}/setpriv"), self.ok(f"{self.tower}/unshare"),
                     "clone3({flags=CLONE_PARENT_SETTID}, 88) = 103")
-        self.record(103, self.ok(f"{self.tower}/bash"), self.enoent(f"{self.fixture}/var/run/polyseat-unraid/deny-tools/zfs"),
+        self.record(103, self.ok(f"{self.tower}/bash"), self.enoent("/var/lib/polyseat-lxc/deny-tools/zfs"),
                     self.enoent(f"{self.slot}/payload/tools/zfs"), self.enoent(f"{self.tower}/zfs"),
                     self.ok(f"{self.slot}/payload/bin/incusd"), "clone(child_stack=NULL, flags=CLONE) = 104")
         self.record(104, self.ok("/proc/self/exe"), self.ok("/sbin/init"), self.ok("/bin/busybox"))

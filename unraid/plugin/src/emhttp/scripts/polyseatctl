@@ -862,6 +862,7 @@ lsm_gate() { # manifest : returns 1 (and logs) if a deliberately unsupported LSM
 # liblxc has its rootfs mount point compiled in as an absolute path (manifest: lxc_rootfs_mount).
 # It must exist or no container can start. Only that exact directory and its plugin-owned parent are created.
 LXC_STATE_PARENT="/var/lib/polyseat-lxc"
+CANARY_DENY_DIR="$LXC_STATE_PARENT/deny-tools"
 
 lxc_mount_real() { # logical absolute path -> real path (sandbox-relative unless a CI job addresses the real system)
   if sandbox && ! ci_real_system; then printf '%s%s\n' "$ROOT" "$1"; else printf '%s\n' "$1"; fi
@@ -884,6 +885,8 @@ remove_lxc_rootfs_mount() {
   done
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hook-log")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks/cli")" 2>/dev/null || true
+  for f in $CANARY_DENIED_TOOLS nft; do rm -f -- "$(lxc_mount_real "$CANARY_DENY_DIR/$f")"; done
+  rmdir -- "$(lxc_mount_real "$CANARY_DENY_DIR")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT")" 2>/dev/null || true
@@ -1483,8 +1486,13 @@ canary_guardian_check() {
 # must not run Tower's own LVM, btrfs, ZFS or QEMU binaries at all (Tower has them; the CI runner does not).
 CANARY_DENIED_TOOLS="modprobe insmod rmmod btrfs lvm zfs zpool qemu-system-x86_64"
 
+# On the exec-capable RAM root next to the LXC hooks. /run is mounted noexec on Unraid, and Go's exec.LookPath
+# (eaccess X_OK) skips files there: until Tower run 9 the daemon never saw these stubs and could find the real
+# host tools behind them. The self-test below fails closed if they cannot run from where they are.
 canary_deny_tools_prepare() {
-  local tool dir="$RUN_DIR/deny-tools"
+  local tool out dir
+  dir=$(lxc_mount_real "$CANARY_DENY_DIR")
+  [[ -d $(lxc_mount_real "$LXC_STATE_PARENT") && ! -L $(lxc_mount_real "$LXC_STATE_PARENT") ]] || return 1
   [[ ! -e $dir && ! -L $dir ]] || return 1
   mkdir -m 0700 -- "$dir" || return 1
   for tool in $CANARY_DENIED_TOOLS; do
@@ -1509,6 +1517,8 @@ printf '%s\n' "canary: nftables changes are disabled" >&2
 exit 126
 NFT
   chmod 0700 -- "$dir/nft" || return 1
+  out=$("$dir/nft" --terse --json -nn list ruleset 2>/dev/null) || out=''
+  [[ $out == *'"polyseat-canary"'* ]] || { log error "canary: deny-tools cannot run from $dir (noexec mount?)"; return 1; }
 }
 
 # Incus is only allowed to operate one isolated, unprivileged disk-only
@@ -1624,7 +1634,7 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   # namespace and a private proc mount are essential to keep that root local.
   # Drop explicit kernel-module/raw-I/O privileges for the entire process tree.
   # shellcheck disable=SC2016  # launcher body must expand in its new namespaces
-  exec setsid env -i PATH="$RUN_DIR/deny-tools:$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
+  exec setsid env -i PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
     INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
     INCUS_LXC_HOOK="$(lxc_mount_real "$LXC_HOOK_DIR")" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
     setpriv --bounding-set=-sys_module,-sys_rawio \

@@ -593,9 +593,10 @@ class NftStubTests(unittest.TestCase):
     def tools(self):
         run = Path(tempfile.mkdtemp(prefix="polyseat-deny-"))
         self.addCleanup(shutil.rmtree, run)
-        res = source_ctl('RUN_DIR="$1"; canary_deny_tools_prepare && ls "$1/deny-tools"', str(run))
+        res = source_ctl('ROOT="$1"; mkdir -p "$1/var/lib/polyseat-lxc"; canary_deny_tools_prepare && '
+                         'ls "$1/var/lib/polyseat-lxc/deny-tools"', str(run))
         self.assertEqual(res.returncode, 0, res.stderr)
-        return run / "deny-tools", res.stdout.split()
+        return run / "var/lib/polyseat-lxc/deny-tools", res.stdout.split()
 
     def test_only_incus_ruleset_read_is_answered_with_an_empty_ruleset(self):
         tools, names = self.tools()

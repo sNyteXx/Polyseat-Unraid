@@ -71,7 +71,8 @@ def classify(args) -> dict:
     tools = load_tools(args.tower_tools)
     fixture = str(args.fixture).rstrip("/")
     ram = f"{fixture}/usr/local/polyseat-unraid/"
-    deny = f"{fixture}/var/run/polyseat-unraid/deny-tools/"
+    # The controller's deny-tools live next to the LXC hooks (real path in CI's real-system mode, as on Tower).
+    deny = ("/var/lib/polyseat-lxc/deny-tools/", f"{fixture}/var/lib/polyseat-lxc/deny-tools/")
     tower_path = str(args.tower_path).rstrip("/") + "/"
     image = {"/" + line.split("/", 1)[1] for line in args.image_files.read_text().splitlines()
              if line.startswith("rootfs/") and "/" in line}

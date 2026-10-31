@@ -118,20 +118,32 @@ class CanaryRuntimeTests(unittest.TestCase):
 
     def test_kernel_module_tools_always_refuse_and_existing_tool_dir_is_not_overwritten(self):
         result = self.shell(r'''
-          RUN_DIR="$1"
+          ROOT="$1"; mkdir -p "$1/var/lib/polyseat-lxc"
           canary_deny_tools_prepare || exit 10
+          d="$1/var/lib/polyseat-lxc/deny-tools"
           for tool in modprobe insmod rmmod btrfs lvm zfs zpool qemu-system-x86_64 nft; do
-            "$RUN_DIR/deny-tools/$tool" --help
+            "$d/$tool" --help
             [[ $? == 126 ]] || exit 11
           done
-          [[ $(ls "$RUN_DIR/deny-tools" | wc -l) == 9 ]] || exit 13
+          [[ $(ls "$d" | wc -l) == 9 ]] || exit 13
           canary_deny_tools_prepare && exit 12
           exit 0
         ''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        for path in (self.dir / "deny-tools").iterdir():
+        for path in (self.dir / "var/lib/polyseat-lxc/deny-tools").iterdir():
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
             self.assertNotIn("$@", path.read_text())
+
+    def test_deny_tools_fail_closed_on_a_noexec_location(self):
+        # Simulated noexec: a stub that cannot run makes the self-test refuse, nothing is left half-prepared.
+        result = self.shell(r'''
+          ROOT="$1"; mkdir -p "$1/var/lib/polyseat-lxc"
+          chmod() { if [[ ${3:-} == */nft ]]; then command chmod 0600 -- "$3"; else command chmod "$@"; fi; }
+          canary_deny_tools_prepare && exit 10
+          exit 0
+        ''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("deny-tools cannot run", result.stderr)
 
     def test_denied_tools_never_shadow_a_program_incus_requires(self):
         text = CTL.read_text()
@@ -355,8 +367,8 @@ class CanaryRuntimeTests(unittest.TestCase):
         self.assertLess(start.index('daemon_programs_check "$slot_real"'), start.index("canary_fresh_state_prepare"))
         self.assertIn('PATH="$slot_real/payload/tools:$SAFE_PATH"', start)
         launch = text.split("canary_launch() {", 1)[1].split("foreign_incusd()", 1)[0]
-        self.assertIn('PATH="$RUN_DIR/deny-tools:$slot_real/payload/tools:$SAFE_PATH"', launch)
-        self.assertNotIn('PATH="$RUN_DIR/deny-tools:$SAFE_PATH"', launch)
+        self.assertIn('PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$slot_real/payload/tools:$SAFE_PATH"', launch)
+        self.assertNotIn("$RUN_DIR/deny-tools", text)  # /run is noexec on Unraid: Go's LookPath skips it
 
     def test_required_program_list_is_extracted_exactly_like_the_build_gate(self):
         line = '\tneededPrograms := []string{"ip", "rsync", "setfattr", "tar", "unsquashfs", "xz"}\n'
@@ -461,7 +473,7 @@ class CanaryRuntimeTests(unittest.TestCase):
         launch = text.split("canary_launch() {", 1)[1].split("foreign_incusd()", 1)[0]
         for phrase in (
             '"$CANARY_CGROUP/daemon/cgroup.procs"',
-            'PATH="$RUN_DIR/deny-tools:$slot_real/payload/tools:$SAFE_PATH"',
+            'PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$slot_real/payload/tools:$SAFE_PATH"',
             "setpriv --bounding-set=-sys_module,-sys_rawio",
             "unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private",
             "read -r host_pid unused < /proc/self/stat",

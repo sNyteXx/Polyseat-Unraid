@@ -536,7 +536,7 @@ if [[ $refuse_rc == 0 ]] ||
   fail 'a missing host program was not refused by the controller'
 fi
 [[ ! -e $data/incus && ! -e $data/one-shot.json && ! -e $fixture/var/run/polyseat-unraid/canary-session.json &&
-   ! -e $fixture/var/run/polyseat-unraid/deny-tools && ! -e $workload && ! -e $watchdog &&
+   ! -e $workload && ! -e $watchdog &&
    ! -e /var/lib/polyseat-lxc ]] ||
   fail 'the refused start left one-shot state, cgroups or a session behind'
 step missing-program-refusal
