@@ -1,48 +1,40 @@
 name: WIP Incus pinned build proof (never deploy)
 
+# FULL lane (pinned runtime, rehearsals, seat image, desktop canary). It runs automatically only when an input of
+# the runtime build, the seat image or this workflow changes; controller/hook/test-script changes get the FAST lane
+# (unraid-preflight-lint.yml: lint, unit suite, LXC hook rehearsal on a verified runtime). Every Tower candidate is
+# qualified from a full run of its exact commit: `gh workflow run incus-feasibility.yml --ref wip/unraid-native-plugin`.
+# See unraid/docs/ci-pipeline.md.
 on:
   workflow_dispatch:
   push:
     branches: [wip/unraid-native-plugin]
     paths:
       - '.github/workflows/incus-feasibility.yml'
+      - '.github/workflows/seat-image.yml'
       - 'unraid/scripts/build-incus-artifact.sh'
-      - 'unraid/scripts/incus-cpu-smoke.sh'
-      - 'unraid/scripts/ci-e2e-controller.sh'
-      - 'unraid/scripts/ci-canary-cgroup.sh'
-      - 'unraid/scripts/ci-e2e-canary.sh'
-      - 'unraid/scripts/prepare-canary-image.sh'
-      - 'unraid/scripts/make-canary-image.py'
-      - 'unraid/scripts/build-canary-package.py'
-      - 'unraid/scripts/canary-artifacts.py'
-      - 'unraid/scripts/exec-inventory.py'
+      - 'unraid/scripts/lib/build-core.sh'
       - 'unraid/scripts/prepare-incus-deps.py'
-      - 'unraid/scripts/*dependenc*'
       - 'unraid/dependency-overrides.json'
       - 'unraid/scripts/check-bundle-abi.py'
       - 'unraid/scripts/make-runtime-bundle.py'
-      - 'unraid/scripts/make-test-report.sh'
       - 'unraid/scripts/make-runtime-sbom.py'
-      - 'unraid/scripts/osv-check.py'
-      - 'unraid/scripts/ci-govulncheck.sh'
-      - 'unraid/scripts/lib/build-core.sh'
-      - 'unraid/build-pins.env'
-      - 'unraid/scripts/build-plugin-package.sh'
-      - 'unraid/plugin/src/emhttp/scripts/polyseatctl'
-      - 'unraid/lab/**'
+      - 'unraid/scripts/make_proof_sbom.py'
+      - 'unraid/scripts/prepare-canary-image.sh'
+      - 'unraid/scripts/make-canary-image.py'
+      - 'unraid/scripts/ci-runtime-key.py'
+      - 'unraid/scripts/ci-runtime-reuse.py'
+      - 'unraid/lab/abi.py'
+      - 'unraid/lab/bundle.py'
+      - 'unraid/lab/__init__.py'
       - 'unraid/abi/**'
+      - 'unraid/build-pins.env'
       - 'unraid/seat-image/**'
       - 'unraid/scripts/ci-desktop-smoke.sh'
-      - 'unraid/scripts/ci-e2e-desktop-canary.sh'
-      - 'unraid/scripts/make-seat-manifest.py'
-      - 'unraid/scripts/local-hook-rehearsal*.sh'
-      - 'unraid/scripts/fetch-nvidia-cli-for-tests.sh'
-      - 'unraid/scripts/dev/hook-rehearsal.Dockerfile'
-      - 'unraid/plugin/src/emhttp/scripts/lxc-nvidia-hook'
-      - '.github/workflows/seat-image.yml'
 
 permissions:
   contents: read
+  actions: read  # read-only: the runtime reuse check looks up the producing run and its proof artifact
 
 jobs:
   canary-cgroup:
@@ -99,10 +91,67 @@ jobs:
           go-version: '1.26.10'
           cache: false
 
+      - name: Content-addressed key of the pinned runtime build
+        id: key
+        run: |
+          key=$(python3 unraid/scripts/ci-runtime-key.py --json-out "$RUNNER_TEMP/runtime-key.json")
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "runtime key $key"
+
+      - name: Look up a cached build of exactly this recipe
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/runtime-snapshot
+          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}
+
+      - name: Verify the cached runtime before any reuse (any doubt means a full rebuild)
+        id: reuse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          echo "reused=false" >> "$GITHUB_OUTPUT"
+          snap="$RUNNER_TEMP/runtime-snapshot"
+          if [ "$CACHE_HIT" != true ]; then echo "cache miss: full build"; exit 0; fi
+          if ! python3 unraid/scripts/ci-runtime-reuse.py verify --snapshot "$snap" \
+               --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/reuse-verdict.json"; then
+            echo "::warning::cached runtime not reusable: $(jq -r .reason "$RUNNER_TEMP/reuse-verdict.json"); full build"
+            rm -rf "$snap"; exit 0
+          fi
+          # Regression check of the verifier on this very snapshot: one flipped byte must be refused.
+          neg="$RUNNER_TEMP/runtime-snapshot-negative"; cp -a "$snap" "$neg"
+          f=$(ls "$neg"/proof/bundle/*.tar.gz); printf '\001' | dd of="$f" bs=1 seek=100 conv=notrunc status=none
+          if python3 unraid/scripts/ci-runtime-reuse.py verify --snapshot "$neg" \
+               --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" > /dev/null; then
+            echo "::error::the reuse verifier accepted a tampered snapshot"; exit 1
+          fi
+          rm -rf "$neg"
+          stage=$(mktemp -d "$RUNNER_TEMP/polyseat-incus-proof.XXXXXXXX"); rmdir "$stage"
+          python3 unraid/scripts/ci-runtime-reuse.py restore --snapshot "$snap" \
+            --proof-out "$GITHUB_WORKSPACE/incus-build-proof" --stage-out "$stage"
+          echo "INCUS_PROOF_STAGE=$stage" >> "$GITHUB_ENV"
+          # Checks that depend on files outside the key are re-run against the reused runtime.
+          ctl=$(sed -n 's/^INCUSD_REQUIRED_PROGRAMS="\(.*\)".*/\1/p' unraid/plugin/src/emhttp/scripts/polyseatctl)
+          [ "$(cat incus-build-proof/incusd-needed-programs.txt)" = "$ctl" ] ||
+            { echo "::error::controller INCUSD_REQUIRED_PROGRAMS differs from the reused runtime"; exit 1; }
+          python3 unraid/scripts/check-bundle-abi.py --payload incus-build-proof/payload \
+            --baseline unraid/abi/unraid-7.3.3-x86_64 --max-glibc 2.44 --json "$RUNNER_TEMP/abi-recheck.json" > /dev/null
+          jq -e '.ok == true' "$RUNNER_TEMP/abi-recheck.json" > /dev/null
+          jq --argjson v "$(cat "$RUNNER_TEMP/reuse-verdict.json")" --arg run "$GITHUB_RUN_ID" -n \
+            '{schema:1, reused:true, reused_in_run:($run|tonumber), key:$v.key, bundle_sha256:$v.bundle_sha256,
+              built_in:$v.producer, checks:["key+inputs","file list+hashes","SHA256SUMS","bundle identity",
+              "producer run success","producer artifact digest","tamper refusal","INCUSD_REQUIRED_PROGRAMS","ABI"]}' \
+            > incus-build-proof/runtime-provenance.json
+          echo "reused=true" >> "$GITHUB_OUTPUT"
+          echo "REUSED pinned runtime $(jq -r .bundle_sha256 "$RUNNER_TEMP/reuse-verdict.json") built in run $(jq -r .producer.run_id "$RUNNER_TEMP/reuse-verdict.json")"
+
       - name: Build pinned source and record binary dependencies
+        if: steps.reuse.outputs.reused != 'true'
         run: sh unraid/scripts/build-incus-artifact.sh
 
       - name: Recheck the pinned GoBGP malformed-input regression
+        if: steps.reuse.outputs.reused != 'true'
         timeout-minutes: 5
         run: |
           test -n "${INCUS_PROOF_STAGE:-}"
@@ -113,6 +162,14 @@ jobs:
             > "$GITHUB_WORKSPACE/incus-build-proof/gobgp-regression.jsonl"
           jq -se 'any(.[]; .Action == "pass" and .Test == "TestRecvMessageWithError_MalformedNextHop")' \
             "$GITHUB_WORKSPACE/incus-build-proof/gobgp-regression.jsonl"
+
+      - name: Snapshot the fresh runtime build (before any rehearsal writes evidence)
+        if: steps.reuse.outputs.reused != 'true'
+        run: |
+          python3 unraid/scripts/ci-runtime-reuse.py snapshot --proof incus-build-proof \
+            --stage "$INCUS_PROOF_STAGE" --out "$RUNNER_TEMP/runtime-snapshot-new" > /dev/null
+          jq -n --arg run "$GITHUB_RUN_ID" '{schema:1, reused:false, built_in_run:($run|tonumber)}' \
+            > incus-build-proof/runtime-provenance.json
 
       - name: Exact CPU-only canary lifecycle and hard stop on disposable runner
         timeout-minutes: 12
@@ -223,11 +280,33 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: proof
         with:
           name: incus-build-proof-NOT-FOR-UNRAID
           path: incus-build-proof/
           retention-days: 7
           if-no-files-found: error
+
+      # Only a fresh build whose whole job is green is offered for reuse. It is bound to this run and its proof
+      # artifact; a later run reuses it only after `ci-runtime-reuse.py verify` (including that this run concluded
+      # successfully), otherwise it builds again.
+      - name: Seal the fresh runtime snapshot to this green run and its proof artifact
+        if: success() && steps.reuse.outputs.reused != 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.proof.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.proof.outputs.artifact-digest }}
+        run: |
+          python3 unraid/scripts/ci-runtime-reuse.py seal --snapshot "$RUNNER_TEMP/runtime-snapshot-new" \
+            --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --head-sha "$GITHUB_SHA" \
+            --artifact-id "$ARTIFACT_ID" --artifact-digest "sha256:${ARTIFACT_DIGEST#sha256:}"
+
+      - name: Offer the sealed snapshot to later runs (content-addressed key)
+        if: success() && steps.reuse.outputs.reused != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/runtime-snapshot-new
+          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}
 
   seat-image:
     if: github.ref == 'refs/heads/wip/unraid-native-plugin'
@@ -274,6 +353,15 @@ jobs:
           grep -q '^DONE$' hook-rehearsal/summary.txt
           ! grep -q '^FAIL' hook-rehearsal/summary.txt
 
+      - name: Preserve the hook rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-hook-rehearsal-NOT-FOR-UNRAID
+          path: hook-rehearsal/
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Preserve desktop canary evidence even if the rehearsal failed
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -283,6 +371,5 @@ jobs:
             incus-build-proof/desktop-canary-e2e/
             incus-build-proof/desktop-canary-e2e-result.txt
             incus-build-proof/desktop-canary-rehearsal.json
-            hook-rehearsal/
           retention-days: 14
           if-no-files-found: warn

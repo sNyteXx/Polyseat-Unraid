@@ -26,7 +26,7 @@ cp "$proof/SBOM-build-source-only.cdx.json" "$proof/SBOM-runtime.cdx.json" "$out
 for optional in osv-report.json osv-report.txt SBOM-runtime-osv-triage.cdx.json govulncheck.txt govulncheck-cli.txt \
   incusd-go-buildinfo.txt incus-go-buildinfo.txt incusd-go-packages.txt incus-go-packages.txt \
   dependency-overrides.json busybox-image-provenance.json canary-rehearsal.json canary-e2e-result.txt \
-  gobgp-regression.jsonl; do
+  gobgp-regression.jsonl runtime-provenance.json; do
   if [ -f "$proof/$optional" ]; then cp "$proof/$optional" "$out/"; fi
 done
 if [ -f "$proof/canary-controller.txz" ]; then
