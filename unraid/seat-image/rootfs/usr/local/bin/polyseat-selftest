@@ -145,13 +145,20 @@ fi
 
 # --- 1. systemd -------------------------------------------------------------------------------------------------------
 t=$(now)
-timeout "$SYSTEM_WAIT" systemctl is-system-running --wait >/dev/null 2>&1
-ev_system_state=$(systemctl is-system-running 2>/dev/null)
+# Right after `incus start` PID 1 may not answer yet (empty state), then it reports initializing/starting: keep
+# polling until a final state or the deadline.
+deadline=$(( $(date +%s) + SYSTEM_WAIT ))
+ev_system_state=''
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  ev_system_state=$(systemctl is-system-running 2>/dev/null)
+  case "$ev_system_state" in running | degraded | stopping | offline | maintenance) break ;; esac
+  sleep 1
+done
 ev_failed_units=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}')
 case "$ev_system_state" in
   running) check system-running pass 'running' "$t" ;;
   degraded) check system-running pass "degraded (failed units: $(printf '%s' "$ev_failed_units" | tr '\n' ' '))" "$t" ;;
-  *) check system-running fail "state '$ev_system_state' after ${SYSTEM_WAIT}s" "$t"; exit 1 ;;
+  *) check system-running fail "state '${ev_system_state:-<no answer>}' after ${SYSTEM_WAIT}s; failed units: $(printf '%s' "$ev_failed_units" | tr '\n' ' ')" "$t"; exit 1 ;;
 esac
 
 # --- 2. user manager ------------------------------------------------------------------------------------------------

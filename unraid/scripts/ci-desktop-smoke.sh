@@ -111,10 +111,10 @@ printf '%s\n' 'Desktop smoke: starting Incus on a disposable runner only.'
 scope=polyseat-ci-incusd
 if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   (umask 022; exec systemd-run --scope --quiet --unit="$scope" -p MemoryAccounting=yes -p TasksAccounting=yes -- \
-    "$INCUSD_BIN" --debug --logfile "$OUT_DIR/incusd.log") &
+    "$INCUSD_BIN" --debug --logfile "$OUT_DIR/incusd.log" >/dev/null 2>&1) &
 else
   scope=
-  (umask 022; exec "$INCUSD_BIN" --debug --logfile "$OUT_DIR/incusd.log") &
+  (umask 022; exec "$INCUSD_BIN" --debug --logfile "$OUT_DIR/incusd.log" >/dev/null 2>&1) &
 fi
 daemon_pid=$!
 ready=false
