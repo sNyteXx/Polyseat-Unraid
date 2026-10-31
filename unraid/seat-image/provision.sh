@@ -27,6 +27,10 @@ packages() {
 }
 
 finalize() {
+  # COPY keeps the checkout's file modes (umask dependent); pin them.
+  chown root:root /etc/systemd/user/polyseat-*.service /etc/sway/config /usr/share/polyseat/sunshine.conf.in /usr/local/bin/polyseat-*
+  chmod 0644 /etc/systemd/user/polyseat-*.service /etc/sway/config /usr/share/polyseat/sunshine.conf.in
+  chmod 0755 /usr/local/bin/polyseat-*
   # The seat user: uid/gid 1000, supplementary groups only where they exist.
   groups=''
   for g in video input audio render; do
