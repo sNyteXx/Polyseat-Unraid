@@ -311,7 +311,7 @@ class DenylistTests(unittest.TestCase):
                             if reviewed_canary_namespace_line(function, line, launch_body):
                                 continue
                             # `command -v` inspects availability; it does not run mount.
-                            if function == "svc_start" and line.strip() == "command -v unshare setpriv mount umount setsid >/dev/null || return 1":
+                            if function == "svc_start" and line.strip() == 'for tool in unshare setpriv mount umount setsid renice; do command -v "$tool" >/dev/null || return 1; done':
                                 continue
                         # The controller may *read* or log about these; it may not run them.
                         self.assertRegex(line, r"(log |echo |printf |die |#|\".*\"|'.*')",

@@ -246,6 +246,58 @@ class CanaryRuntimeTests(unittest.TestCase):
         ''')
         self.assertNotEqual(result.returncode, 0)
 
+    def test_budget_tolerates_vanishing_entries_but_requires_a_numeric_total(self):
+        data = self.dir / "data"
+        logs = self.dir / "logs"
+        data.mkdir()
+        logs.mkdir()
+        # GNU du exits 1 when an entry disappears mid-walk but still prints the total.
+        vanished = self.shell(r"""
+          DATA_REAL="$1/data" LOG_DIR="$1/logs" CANARY_DATA_MAX_KB=262144
+          du() { printf '8\t%s\n' "$DATA_REAL"; printf 'du: cannot access x\n' >&2; return 1; }
+          canary_budget_check
+        """)
+        self.assertEqual(vanished.returncode, 0, vanished.stderr)
+        for fake in ("du() { return 1; }", "du() { printf 'x\\t%s\\n' \"$DATA_REAL\"; }",
+                     "du() { printf '262145\\t%s\\n' \"$DATA_REAL\"; return 1; }"):
+            with self.subTest(fake=fake):
+                result = self.shell('DATA_REAL="$1/data" LOG_DIR="$1/logs" CANARY_DATA_MAX_KB=262144\n'
+                                    + fake + "\ncanary_budget_check")
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_real_du_race_is_not_a_budget_failure(self):
+        data = self.dir / "data"
+        (data / "churn").mkdir(parents=True)
+        (self.dir / "logs").mkdir()
+        result = self.shell(r"""
+          DATA_REAL="$1/data" LOG_DIR="$1/logs" CANARY_DATA_MAX_KB=262144
+          ( for ((round = 0; round < 400; round++)); do
+              for i in 1 2 3 4 5 6 7 8; do : > "$DATA_REAL/churn/f$i"; done
+              for i in 1 2 3 4 5 6 7 8; do rm -f -- "$DATA_REAL/churn/f$i"; done
+            done ) &
+          churn=$!
+          failures=0
+          for ((n = 0; n < 150; n++)); do canary_budget_check || failures=$((failures + 1)); done
+          wait "$churn"
+          exit "$failures"
+        """)
+        self.assertEqual(result.returncode, 0, "budget check failed while files vanished")
+
+    def test_canary_tool_and_topology_checks_precede_one_shot_state(self):
+        text = CTL.read_text()
+        code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+        self.assertNotRegex(code, r"command -v [A-Za-z][^ \"]* [A-Za-z]",
+                            "`command -v a b` succeeds if any one name exists")
+        start = text.split("svc_start() {", 1)[1].split("svc_stop() {", 1)[0]
+        for earlier in ('for tool in unshare setpriv mount umount setsid renice; do command -v "$tool"',
+                        "canary_cgroup_precheck || return 1"):
+            self.assertLess(start.index(earlier), start.index("canary_fresh_state_prepare"))
+            self.assertLess(start.index(earlier), start.index("canary_deny_tools_prepare"))
+        precheck = text.split("canary_cgroup_precheck() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotRegex(precheck, r"\bmkdir\b|\brmdir\b|>\s*\"?\$|\bprintf\b[^\n]*>")
+        prepare = text.split("canary_cgroup_prepare() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(prepare.index("canary_cgroup_precheck || return 1"), prepare.index('mkdir -- "$CANARY_CGROUP"'))
+
     def test_launcher_and_supervisor_ordering_contract(self):
         text = CTL.read_text()
         start = text.split("svc_start() {", 1)[1].split("svc_stop() {", 1)[0]

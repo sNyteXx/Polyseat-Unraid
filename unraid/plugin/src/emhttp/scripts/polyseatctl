@@ -947,7 +947,7 @@ canary_command_allowed() {
 # A canary package is NOT built by the regular package job. Even if a future,
 # separately approved renderer enables it, fail closed until all safeguards
 # are valid. Never enable controllers or change shared cgroups here.
-canary_cgroup_prepare() {
+canary_cgroup_precheck() { # read-only: before any canary state exists, and again right before the groups
   local controller available enabled parent_cpus parent_mems
   [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
   [[ -z $(cfg_get DATA_DIR '') || $(cfg_get DATA_DIR '') == "$CANARY_DATA_DIR" ]] || {
@@ -971,6 +971,14 @@ canary_cgroup_prepare() {
   [[ $parent_cpus == "$CANARY_HOST_CPUSET" && $parent_mems =~ ^[0-9]+([,-][0-9]+)*$ ]] || {
     log error "canary: unexpected CPU or NUMA topology: refusing fixed E-core assignment"; return 1;
   }
+}
+
+canary_cgroup_prepare() {
+  local parent_mems
+  [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
+  canary_cgroup_precheck || return 1
+  parent_mems=$(< /sys/fs/cgroup/cpuset.mems.effective)
+  [[ $parent_mems =~ ^[0-9]+([,-][0-9]+)*$ ]] || return 1
   mkdir -- "$CANARY_CGROUP" || return 1
   if ! mkdir -- "$CANARY_WATCHDOG_CGROUP"; then rmdir -- "$CANARY_CGROUP"; return 1; fi
   if ! {
@@ -1056,7 +1064,9 @@ canary_process_starttime() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
 
 canary_budget_check() {
   local kb bytes=0 file size
-  kb=$(du -skx -- "$DATA_REAL" 2>/dev/null | awk '{print $1}') || return 1
+  # du exits non-zero when an entry vanishes mid-walk (Incus removes files during
+  # stop/delete) but still prints the total; only a missing/non-numeric total fails.
+  kb=$( { du -skx -- "$DATA_REAL" 2>/dev/null || true; } | awk 'NR == 1 {print $1}')
   [[ $kb =~ ^[0-9]+$ && $kb -le $CANARY_DATA_MAX_KB ]] || return 1
   for file in "$LOG_DIR/incusd.log" "$LOG_DIR/incusd.out" "$LOG_DIR/$PLUGIN.log" "$LOG_DIR/$PLUGIN.log.1"; do
     [[ ! -e $file && ! -L $file ]] && continue
@@ -1369,7 +1379,7 @@ foreign_incusd() {
 }
 
 svc_start() {
-  local timeout i foreign slot_real active_sha deadline
+  local timeout i foreign slot_real active_sha deadline tool
   if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
     require_approval start
     if [[ $CANARY_OPERATION -eq 1 ]]; then canary_approval_for canary-smoke; else canary_approval_for start; fi
@@ -1392,7 +1402,10 @@ svc_start() {
   foreign=$(foreign_incusd)
   [[ -z $foreign ]] || { log error "another incusd process exists (pid ${foreign// /,}); refusing to start"; return 1; }
   if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
-    command -v unshare setpriv mount umount setsid >/dev/null || return 1
+    # One name per lookup: `command -v a b` succeeds if any one of them exists.
+    for tool in unshare setpriv mount umount setsid renice; do command -v "$tool" >/dev/null || return 1; done
+    # Read-only topology checks first, so a mismatch leaves no one-shot state behind.
+    canary_cgroup_precheck || return 1
     canary_fresh_state_prepare "$active_sha" || return 1
     canary_deny_tools_prepare || return 1
     [[ -d $LOG_DIR && ! -L $LOG_DIR && $(stat -c %u -- "$LOG_DIR") == 0 ]] || return 1
@@ -2013,15 +2026,15 @@ cmd_health() {
 }
 
 cmd_preflight() {
-  local kernel ok=1
+  local kernel ok=1 tool
   kernel=$(uname -r | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
   chk() { if "$@"; then echo "PASS: $DESC"; else echo "FAIL: $DESC"; ok=0; fi; }
   DESC="kernel $kernel >= 6.12"; chk version_ge "$kernel" 6.12
   DESC="cgroup v2 unified hierarchy"; chk test "$(fs_type /sys/fs/cgroup)" = cgroup2fs
   DESC="user namespaces enabled"; chk test "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)" -gt 0
   DESC="/dev/net/tun present"; chk test -c /dev/net/tun
-  DESC="newuidmap/newgidmap present"; chk command -v newuidmap newgidmap
-  DESC="jq, tar, ssh-keygen present"; chk command -v jq tar ssh-keygen
+  # One name per lookup: `command -v a b` succeeds if any one of them exists.
+  for tool in newuidmap newgidmap jq tar ssh-keygen; do DESC="$tool present"; chk command -v "$tool"; done
   if [[ -s /etc/subuid ]]; then echo "INFO: /etc/subuid has entries"; else echo "INFO: /etc/subuid empty (plugin would add a managed block at service start)"; fi
   lsm_active apparmor && echo "INFO: AppArmor is active (the bundled liblxc has none: start is refused unless ACCEPT_NO_LSM=yes)"
   lsm_active selinux && echo "INFO: SELinux is active (the bundled liblxc has none: start is refused unless ACCEPT_NO_LSM=yes)"
