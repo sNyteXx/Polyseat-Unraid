@@ -35,7 +35,7 @@ before=$(members)  # uplink0
 # The controller's own deny-tools (its read-only nft stub included, self-tested), first on the daemon's PATH as on Tower.
 deny=/var/lib/polyseat-lxc/deny-tools
 # shellcheck disable=SC1090  # the real controller function
-( source <(sed '$d' /in/emhttp/scripts/polyseatctl); canary_deny_tools_prepare ) || fail 'controller deny-tools'
+( source <(sed '$d' /in/emhttp/scripts/polyseatctl); init_paths; canary_deny_tools_prepare ) || fail 'controller deny-tools'
 pass "controller deny-tools: $(find "$deny" -type f -printf '%f ' | tr -s ' ')"
 
 mkdir -p /sys/fs/cgroup/daemon
