@@ -53,7 +53,9 @@ export INCUS_SKIP_INSTANCE_TYPES=true
 # On this disposable runner AppArmor is active, so tell Incus explicitly; CI-only, the
 # controller path (ci-e2e-controller.sh) exercises the fail-closed LSM gate instead.
 export INCUS_SECURITY_APPARMOR=false
-export PATH="$bin:$PATH"
+# Incus needs unsquashfs at start; use the pinned bundled build, never a host package (Unraid has none).
+[ -x "$INCUS_PROOF_STAGE/prefix/tools/unsquashfs" ] || fail 'pinned bundled unsquashfs missing'
+export PATH="$bin:$INCUS_PROOF_STAGE/prefix/tools:$PATH"
 umask 077
 mkdir -p "$INCUS_CONF"
 

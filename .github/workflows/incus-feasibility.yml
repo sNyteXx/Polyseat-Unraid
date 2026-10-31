@@ -63,6 +63,10 @@ jobs:
       # Signed LXC v6.0.6 tag, immutable target commit (Incus 7.5 requires LXC >= 6.0.0).
       LXC_COMMIT: 2597434ae2472114c70ad2bdf4ae5580c9e22717
       LXC_RELEASE: v6.0.6
+      # Signed squashfs-tools 4.7.5 tag: Incus requires unsquashfs, Unraid lacks it; bundled privately.
+      SQUASHFS_TOOLS_COMMIT: 708c59ae80853b0845017c33b42e56061cc546cd
+      SQUASHFS_TOOLS_RELEASE: 4.7.5
+      SQUASHFS_TOOLS_TAG_OBJECT: 1fdc2fe01d681438a04e2a137a9f51d829ba3358
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -73,9 +77,9 @@ jobs:
             autoconf automake autoconf-archive libtool libtool-bin \
             build-essential binutils git pkg-config libsqlite3-dev libacl1-dev \
             libcap-dev libseccomp-dev libudev-dev libuv1-dev \
-            liblz4-dev libzstd-dev libbtrfs-dev libdevmapper-dev \
+            liblz4-dev libzstd-dev zlib1g-dev liblzma-dev liblzo2-dev libbtrfs-dev libdevmapper-dev \
             meson ninja-build patchelf protobuf-compiler \
-            rsync attr squashfs-tools xz-utils iproute2 uidmap jq \
+            rsync attr xz-utils iproute2 uidmap jq strace \
             busybox-static
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

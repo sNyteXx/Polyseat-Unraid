@@ -40,6 +40,10 @@ CANARY_DATA_MAX_KB=262144  # monitored abort threshold, NOT a filesystem quota
 CANARY_LOG_MAX_BYTES=16777216  # likewise, one-second monitoring may overshoot
 CANARY_HOST_MIN_AVAILABLE_KB=4194304
 CANARY_HOST_MAX_LOAD=14
+CANARY_HEALTH_TIMEOUT=60  # fixed: identical in the CI rehearsal and on Tower, never read from user settings
+# Incus 7.5.1 cmd/incusd/main_daemon.go `neededPrograms`: the daemon exits unless each one resolves on PATH.
+# The build fails if this list and the pinned source drift apart (unraid/scripts/lib/build-core.sh).
+INCUSD_REQUIRED_PROGRAMS="ip rsync setfattr tar unsquashfs xz"
 CANARY_SIGN_IDENTITY="polyseat-unraid-canary-approver"
 CANARY_SIGN_NAMESPACE="polyseat-unraid-canary-approval-v1"
 
@@ -675,13 +679,24 @@ run_clean() { # command... : minimal environment, bounded runtime
 }
 
 smoke_slot() { # sha: new binaries must execute and report the manifest's version
-  local sha=$1 slot want out
+  local sha=$1 slot want out rc
   slot=$(slot_dir "$sha")
   want=$(jq -r .incus_version "$(bundle_manifest "$sha")")
   for bin in incus incusd; do
     out=$(run_clean "$slot/payload/bin/$bin" --version 2>&1) || return 1
     [[ $out == *"$want"* ]] || return 1
   done
+  if jq -e '.files | any(.[]; .path == "payload/tools/unsquashfs" and .mode == 493)' \
+      "$(bundle_manifest "$sha")" >/dev/null 2>&1; then
+    rc=0
+    out=$(run_clean "$slot/payload/tools/unsquashfs" -version 2>&1) || rc=$?
+    # Upstream prints its version and exits 1 when no image is named. A loader/ABI failure (127), a timeout
+    # (124) or a crash (>128) is a failed probe, and so is any other first line.
+    [[ ($rc == 0 || $rc == 1) && ${out%%$'\n'*} == "unsquashfs version "* ]] || return 1
+  elif [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+    log error "canary: bundle lacks the pinned payload/tools/unsquashfs that Incus requires"
+    return 1
+  fi
 }
 
 switch_current() { # sha ("" removes the link)
@@ -893,6 +908,22 @@ validate_data_dir() { # [candidate logical path]
 }
 
 # ------------------------------------------------------------ service ----
+# Same lookup the daemon performs at start, with the PATH it will get (bundled helpers first). Runs before any
+# canary state exists, so a host that lacks a program fails closed without leaving a retry-blocking workspace.
+daemon_programs_check() { # resolved slot
+  local slot_real=$1 program missing=""
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+    # Never fall back to a host squashfs-tools: Unraid has none and only the signed bundle was reviewed.
+    [[ -f $slot_real/payload/tools/unsquashfs && ! -L $slot_real/payload/tools/unsquashfs &&
+       -x $slot_real/payload/tools/unsquashfs ]] || { log error "canary: bundled unsquashfs missing"; return 1; }
+  fi
+  for program in $INCUSD_REQUIRED_PROGRAMS; do
+    ( PATH="$slot_real/payload/tools:$SAFE_PATH"; hash -r; command -v "$program" >/dev/null 2>&1 ) ||
+      missing+=" $program"
+  done
+  [[ -z $missing ]] || { log error "required daemon programs missing on PATH:$missing"; return 1; }
+}
+
 svc_pid() {
   local pid cmd
   [[ -f $PIDFILE && ! -L $PIDFILE ]] || return 1
@@ -1031,16 +1062,42 @@ canary_cgroup_remove() { # one exact plugin-owned cgroup and its descendants
   [[ $group == "$CANARY_CGROUP" || $group == "$CANARY_WATCHDOG_CGROUP" ]] || return 1
   [[ ! -e $group ]] && return 0
   [[ -d $group && ! -L $group && $(fs_type "$group") == cgroup2fs ]] || return 1
-  printf '1\n' > "$group/cgroup.kill" || return 1
+  printf '1\n' > "$group/cgroup.kill" || [[ ! -e $group ]] || return 1
   for ((i = 0; i < 50; i++)); do
+    # Unraid's cgroup2-unraid daemon rmdirs empty top-level groups by itself. The kernel removes a cgroup
+    # only without tasks and children, so a vanished group is a completed removal, not a hidden leak;
+    # canary_leak_check still looks for any surviving canary process afterwards.
+    [[ -e $group ]] || return 0
     # cgroupfs cannot contain symlinks or user files. Remove empty *directories*
     # only, below this owned boundary; never recursively delete data files.
     while IFS= read -r -d '' child; do rmdir -- "$child" 2>/dev/null || true; done \
-      < <(find "$group" -xdev -depth -mindepth 1 -type d -print0)
+      < <(find "$group" -xdev -depth -mindepth 1 -type d -print0 2>/dev/null)
     rmdir -- "$group" 2>/dev/null && return 0
     sleep 0.1
   done
-  return 1
+  [[ ! -e $group ]]
+}
+
+# After both groups are gone no canary code may run anywhere: neither a bundled binary (incusd, its forks,
+# the incus CLI) nor the supervisor/witness/launcher shells, which are recognised by their exact argv0.
+canary_leak_check() {
+  local proc pid exe found="" element
+  local -a argv
+  [[ $SLOTS == /*/slots ]] || { log error "canary: leak check without a valid slot root"; return 1; }
+  for proc in /proc/[0-9]*; do
+    pid=${proc#/proc/}
+    [[ $pid == "$$" || $pid == "$BASHPID" ]] && continue
+    exe=$(readlink -- "$proc/exe" 2>/dev/null) || exe=""
+    exe=${exe% (deleted)}
+    if [[ -n $exe && $exe == "$SLOTS"/* ]]; then found+=" $pid"; continue; fi
+    mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
+    for element in "${argv[@]}"; do
+      case "$element" in
+        canary-watchdog | canary-guardian | polyseat-canary-launch) found+=" $pid"; break ;;
+      esac
+    done
+  done
+  [[ -z $found ]] || { log error "canary: processes survived cgroup removal:$found"; return 1; }
 }
 
 canary_cgroup_stop() {
@@ -1050,6 +1107,7 @@ canary_cgroup_stop() {
   # database is needed for this emergency path, including after token expiry.
   canary_cgroup_remove "$CANARY_CGROUP" || rc=1
   [[ $rc -ne 0 ]] || canary_cgroup_remove "$CANARY_WATCHDOG_CGROUP" || rc=1
+  [[ $rc -ne 0 ]] || canary_leak_check || rc=1
   [[ $rc -eq 0 ]] || log error "canary: owned cgroup could not be emptied and removed"
   return "$rc"
 }
@@ -1206,15 +1264,20 @@ canary_guardian_check() {
     $(< "/proc/$pid/cgroup") == "0::/${CANARY_CGROUP##*/}/daemon" ]]
 }
 
+# Module tools, plus the host storage/virtualisation tools that Incus only probes for other storage or VM
+# drivers (btrfs/lvm "version", zfs/zpool, qemu). The CPU-only canary uses the dir driver alone, so its daemon
+# must not run Tower's own LVM, btrfs, ZFS or QEMU binaries at all (Tower has them; the CI runner does not).
+CANARY_DENIED_TOOLS="modprobe insmod rmmod btrfs lvm zfs zpool qemu-system-x86_64"
+
 canary_deny_tools_prepare() {
   local tool dir="$RUN_DIR/deny-tools"
   [[ ! -e $dir && ! -L $dir ]] || return 1
   mkdir -m 0700 -- "$dir" || return 1
-  for tool in 'modprobe' 'insmod' 'rmmod'; do
+  for tool in $CANARY_DENIED_TOOLS; do
     # Fixed, root-private commands in OUR PATH. Never touch host /sbin tools.
     # CAP_SYS_MODULE alone would not block modprobe configuration install hooks.
     printf '%s\n' '#!/bin/sh' \
-      'printf "%s\n" "canary: kernel module tools are disabled" >&2' 'exit 126' > "$dir/$tool" || return 1
+      'printf "%s\n" "canary: host module, storage and VM tools are disabled" >&2' 'exit 126' > "$dir/$tool" || return 1
     chmod 0700 -- "$dir/$tool" || return 1
   done
 }
@@ -1315,7 +1378,7 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   # namespace and a private proc mount are essential to keep that root local.
   # Drop explicit kernel-module/raw-I/O privileges for the entire process tree.
   # shellcheck disable=SC2016  # launcher body must expand in its new namespaces
-  exec setsid env -i PATH="$RUN_DIR/deny-tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
+  exec setsid env -i PATH="$RUN_DIR/deny-tools:$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
     INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
     INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
     setpriv --bounding-set=-sys_module,-sys_rawio \
@@ -1389,6 +1452,8 @@ svc_start() {
   slot_real=$(readlink -f -- "$CURRENT") || return 1
   active_sha=$(current_sha_from_link) || { log error "active bundle link is not a slot"; return 1; }
   lsm_gate "$(bundle_manifest "$active_sha")" || return 1
+  # Stub-daemon sandboxes have no real incusd; real hosts and the real CI system always check, before any write.
+  if ! sandbox || ci_real_system; then daemon_programs_check "$slot_real" || return 1; fi
   ensure_lxc_rootfs_mount "$(bundle_manifest "$active_sha")" || return 1
   validate_data_dir || return 1
   if svc_pid >/dev/null; then
@@ -1435,15 +1500,19 @@ svc_start() {
       exit 1
     fi
     # shellcheck disable=SC2016  # $$ and $@ must expand in the child shell
-    exec setsid env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
+    exec setsid env -i PATH="$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
       INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
       INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
       bash -c 'echo $$ > "$1"; shift; exec "$@"' polyseat-launch "$PIDFILE" \
       "$slot_real/payload/bin/incusd" --group "" --logfile "$LOG_DIR/incusd.log" \
       > "$LOG_DIR/incusd.out" 2>&1 < /dev/null 9>&-
   ) &
-  timeout=$(cfg_get HEALTH_TIMEOUT 60)
-  [[ $timeout =~ ^[0-9]+$ ]] || timeout=60
+  if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
+    timeout=$CANARY_HEALTH_TIMEOUT
+  else
+    timeout=$(cfg_get HEALTH_TIMEOUT 60)
+    [[ $timeout =~ ^[0-9]+$ ]] || timeout=60
+  fi
   deadline=$(( $(canary_monotonic_seconds) + timeout ))
   if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then CANARY_HEALTH_DEADLINE=$deadline; fi
   for ((i = 0; i < timeout * 2; i++)); do

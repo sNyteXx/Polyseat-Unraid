@@ -59,13 +59,16 @@ dev_load_pins() { # file
     key=${line%%=*}
     val=${line#*=}
     case "$key" in
-      INCUS_COMMIT | INCUS_TAG_OBJECT | RAFT_COMMIT | COWSQL_COMMIT | LXC_COMMIT)
+      INCUS_COMMIT | INCUS_TAG_OBJECT | RAFT_COMMIT | COWSQL_COMMIT | LXC_COMMIT | SQUASHFS_TOOLS_COMMIT | \
+      SQUASHFS_TOOLS_TAG_OBJECT)
         printf '%s' "$val" | grep -Eq '^[0-9a-f]{40}$' || dev_die "$key must be a full lowercase 40-character SHA" ;;
       GO_LINUX_AMD64_SHA256 | BUSYBOX_DEB_SHA256 | BUSYBOX_BINARY_SHA256)
         printf '%s' "$val" | grep -Eq '^[0-9a-f]{64}$' || dev_die "$key must be a 64-character SHA-256" ;;
       BUILDER_BASE_IMAGE)
         printf '%s' "$val" | grep -Eq '^[a-z0-9./:_-]+@sha256:[0-9a-f]{64}$' || dev_die 'BUILDER_BASE_IMAGE must be pinned by digest' ;;
       INCUS_RELEASE | LXC_RELEASE | RAFT_RELEASE | COWSQL_RELEASE | GO_VERSION | BUSYBOX_VERSION | BUSYBOX_DEB_VERSION) ;;
+      SQUASHFS_TOOLS_RELEASE)
+        printf '%s' "$val" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || dev_die 'SQUASHFS_TOOLS_RELEASE must be a plain release number' ;;
       BUSYBOX_DEB_URL)
         case "$val" in
           https://security.ubuntu.com/ubuntu/pool/main/b/busybox/busybox-static_*_amd64.deb) ;;
@@ -79,7 +82,8 @@ dev_load_pins() { # file
   done < "$1"
   for need in INCUS_COMMIT INCUS_RELEASE INCUS_TAG_OBJECT RAFT_COMMIT COWSQL_COMMIT LXC_COMMIT LXC_RELEASE GO_VERSION \
               GO_LINUX_AMD64_SHA256 BUILDER_BASE_IMAGE BUSYBOX_VERSION BUSYBOX_DEB_VERSION BUSYBOX_DEB_URL \
-              BUSYBOX_DEB_SHA256 BUSYBOX_BINARY_SHA256; do
+              BUSYBOX_DEB_SHA256 BUSYBOX_BINARY_SHA256 SQUASHFS_TOOLS_COMMIT SQUASHFS_TOOLS_RELEASE \
+              SQUASHFS_TOOLS_TAG_OBJECT; do
     eval "[ -n \"\${$need:-}\" ]" || dev_die "pin missing: $need"
   done
 }
@@ -87,7 +91,7 @@ dev_load_pins() { # file
 # The deps cache is keyed by everything that can change the result; a different pin, core script,
 # toolchain image or flag set can never reuse another entry.
 dev_cache_key() { # core_script_sha256 builder_image_id
-  printf '%s\n' "$RAFT_COMMIT" "$COWSQL_COMMIT" "$LXC_COMMIT" "$GO_VERSION" "$BUILDER_BASE_IMAGE" "$1" "$2" |
+  printf '%s\n' "$RAFT_COMMIT" "$COWSQL_COMMIT" "$LXC_COMMIT" "$SQUASHFS_TOOLS_COMMIT" "$GO_VERSION" "$BUILDER_BASE_IMAGE" "$1" "$2" |
     sha256sum | cut -c1-24
 }
 

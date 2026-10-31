@@ -22,6 +22,7 @@ COMMIT_REPOS = {
     "LXC_COMMIT": "https://github.com/lxc/lxc",
     "RAFT_COMMIT": "https://github.com/cowsql/raft",
     "COWSQL_COMMIT": "https://github.com/cowsql/cowsql",
+    "SQUASHFS_TOOLS_COMMIT": "https://github.com/plougher/squashfs-tools",
 }
 MODULE = re.compile(r"^(\S+)\s+(v\S+)(?:\s+=>.*)?$")
 

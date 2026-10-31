@@ -63,7 +63,13 @@ def build(manifest: dict, abi: dict, buildinfo: str, pins: dict, label: str, osv
             ("incus", "lxc/incus", "INCUS_COMMIT", pins["INCUS_RELEASE"]),
             ("lxc", "lxc/lxc", "LXC_COMMIT", pins["LXC_RELEASE"]),
             ("raft", "cowsql/raft", "RAFT_COMMIT", pins.get("RAFT_RELEASE", "unknown")),
-            ("cowsql", "cowsql/cowsql", "COWSQL_COMMIT", pins.get("COWSQL_RELEASE", "unknown"))):
+            ("cowsql", "cowsql/cowsql", "COWSQL_COMMIT", pins.get("COWSQL_RELEASE", "unknown")),
+            ("squashfs-tools", "plougher/squashfs-tools", "SQUASHFS_TOOLS_COMMIT",
+             pins.get("SQUASHFS_TOOLS_RELEASE", "unknown"))):
+        if pin_key == "SQUASHFS_TOOLS_COMMIT" and pin_key not in pins:
+            if any(entry["path"] == "payload/tools/unsquashfs" for entry in manifest["files"]):
+                raise ValueError("bundled unsquashfs is present without pinned source evidence")
+            continue
         commit = pins[pin_key]
         source_ref = f"git:{repo}@{commit}"
         # Match the explicit labels emitted by osv-check.py; a source finding
@@ -72,9 +78,16 @@ def build(manifest: dict, abi: dict, buildinfo: str, pins: dict, label: str, osv
         source_properties = [{"name": "polyseat:source-pin", "value": commit}]
         if name == "incus" and "INCUS_TAG_OBJECT" in pins:
             source_properties.append({"name": "polyseat:official-tag-object", "value": pins["INCUS_TAG_OBJECT"]})
-        add({"type": "library" if name != "incus" else "application", "bom-ref": source_ref, "name": name,
-             "version": version, "purl": f"pkg:github/{repo}@{commit}",
-             "properties": source_properties})
+        component = {"type": "library" if name not in ("incus", "squashfs-tools") else "application",
+                     "bom-ref": source_ref, "name": name, "version": version, "purl": f"pkg:github/{repo}@{commit}",
+                     "properties": source_properties}
+        if name == "squashfs-tools":
+            if "SQUASHFS_TOOLS_TAG_OBJECT" in pins:
+                source_properties.append({"name": "polyseat:official-tag-object", "value": pins["SQUASHFS_TOOLS_TAG_OBJECT"]})
+            # GPL: the exact corresponding source is the pinned upstream commit; COPYING ships in the bundle.
+            source_properties.append({"name": "polyseat:shipped-as", "value": "payload/tools/unsquashfs"})
+            component["licenses"] = [{"license": {"id": "GPL-2.0-or-later"}}]
+        add(component)
     add({"type": "library", "bom-ref": f"golang:stdlib@{pins['GO_VERSION']}", "name": "go-stdlib",
          "version": pins["GO_VERSION"], "purl": f"pkg:golang/stdlib@{pins['GO_VERSION']}"})
     if any(entry["path"] == "payload/share/canary/busybox.tar.gz" for entry in manifest["files"]):

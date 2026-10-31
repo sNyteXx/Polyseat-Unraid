@@ -12,6 +12,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       autoconf automake autoconf-archive libtool libtool-bin build-essential binutils git pkg-config \
       libsqlite3-dev libacl1-dev libcap-dev libseccomp-dev libudev-dev libuv1-dev liblz4-dev libzstd-dev \
+      zlib1g-dev liblzma-dev liblzo2-dev \
       libbtrfs-dev libdevmapper-dev meson ninja-build patchelf protobuf-compiler python3 file curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \

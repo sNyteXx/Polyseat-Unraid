@@ -39,11 +39,19 @@ checkout_pinned() { # url sha destination [mirror]
   # metadata, making fixed Incus vulnerabilities look unfixed. Restore only the
   # exact official annotated tag object, not a mutable or invented version label.
   release_tag=
+  tag_object=
   if [ "$remote_url" = https://github.com/lxc/incus.git ]; then
     core_check_pins "${INCUS_TAG_OBJECT:?official Incus tag object pin required}"
     printf '%s\n' "$INCUS_RELEASE" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || die 'invalid Incus release tag'
     [ "$commit" = "$INCUS_COMMIT" ] || die 'Incus checkout does not match the build pin'
     release_tag=$INCUS_RELEASE
+    tag_object=$INCUS_TAG_OBJECT
+  elif [ "$remote_url" = https://github.com/plougher/squashfs-tools.git ]; then
+    core_check_pins "${SQUASHFS_TOOLS_TAG_OBJECT:?official squashfs-tools tag object pin required}"
+    printf '%s\n' "$SQUASHFS_TOOLS_RELEASE" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || die 'invalid squashfs-tools release'
+    [ "$commit" = "$SQUASHFS_TOOLS_COMMIT" ] || die 'squashfs-tools checkout does not match the build pin'
+    release_tag=$SQUASHFS_TOOLS_RELEASE
+    tag_object=$SQUASHFS_TOOLS_TAG_OBJECT
   fi
   if [ -n "$mirror" ]; then
     [ -d "$mirror" ] || git init -q --bare "$mirror"
@@ -54,11 +62,11 @@ checkout_pinned() { # url sha destination [mirror]
     # Keep the pinned commit reachable (survives gc) and fetchable by SHA from this local mirror only.
     git -C "$mirror" update-ref "refs/pins/$commit" "$commit"
     if [ -n "$release_tag" ]; then
-      if ! git -C "$mirror" cat-file -e "$INCUS_TAG_OBJECT^{tag}" 2>/dev/null; then
-        git -C "$mirror" fetch -q --depth 1 "$remote_url" "$INCUS_TAG_OBJECT"
+      if ! git -C "$mirror" cat-file -e "$tag_object^{tag}" 2>/dev/null; then
+        git -C "$mirror" fetch -q --depth 1 "$remote_url" "$tag_object"
       fi
-      [ "$(git -C "$mirror" rev-parse "$INCUS_TAG_OBJECT^{}")" = "$commit" ] || die 'Incus tag targets a different commit'
-      git -C "$mirror" update-ref "refs/tags/$release_tag" "$INCUS_TAG_OBJECT"
+      [ "$(git -C "$mirror" rev-parse "$tag_object^{}")" = "$commit" ] || die 'release tag targets a different commit'
+      git -C "$mirror" update-ref "refs/tags/$release_tag" "$tag_object"
     fi
     git -C "$mirror" config uploadpack.allowAnySHA1InWant true
     remote_url=$mirror
@@ -70,10 +78,10 @@ checkout_pinned() { # url sha destination [mirror]
   actual=$(git -C "$destination" rev-parse HEAD)
   [ "$actual" = "$commit" ] || die 'downloaded source does not match pinned SHA'
   if [ -n "$release_tag" ]; then
-    git -C "$destination" fetch -q --depth 1 origin "$INCUS_TAG_OBJECT"
-    [ "$(git -C "$destination" cat-file -t "$INCUS_TAG_OBJECT")" = tag ] || die 'Incus release is not the pinned annotated tag'
-    [ "$(git -C "$destination" rev-parse "$INCUS_TAG_OBJECT^{}")" = "$commit" ] || die 'Incus release tag does not peel to the pinned source'
-    git -C "$destination" update-ref "refs/tags/$release_tag" "$INCUS_TAG_OBJECT"
+    git -C "$destination" fetch -q --depth 1 origin "$tag_object"
+    [ "$(git -C "$destination" cat-file -t "$tag_object")" = tag ] || die 'release is not the pinned annotated tag'
+    [ "$(git -C "$destination" rev-parse "$tag_object^{}")" = "$commit" ] || die 'release tag does not peel to the pinned source'
+    git -C "$destination" update-ref "refs/tags/$release_tag" "$tag_object"
   fi
 }
 
@@ -158,7 +166,49 @@ build_lxc() { # lxc_commit src prefix [mirror]
     "$(printf '%s' "$lxc_needed" | tr '\n' ' ')" "$lxc_glibc_max"
 }
 
-# raft, cowsql and liblxc into $1 (prefix), sources below $2 (work dir).
+# Incus 7.5.1 refuses to start unless `unsquashfs` is on PATH (cmd/incusd/main_daemon.go neededPrograms) and
+# uses it to unpack squashfs images. Unraid ships no squashfs-tools, so only `unsquashfs` from the signed upstream
+# tag is built and later shipped as payload/tools/unsquashfs. It links only compression libraries that Unraid
+# itself provides (verified again by the payload ABI gate) and carries no RUNPATH, so nothing is preloaded.
+build_unsquashfs() { # src prefix [mirror]
+  sq_src=$1
+  sq_prefix=$2
+  checkout_pinned https://github.com/plougher/squashfs-tools.git "$SQUASHFS_TOOLS_COMMIT" "$sq_src" ${3:+"$3"}
+  # Upstream default compressor set (gzip, xz, lzo, lz4, zstd) plus xattrs; legacy LZMA1 stays disabled.
+  make -C "$sq_src/squashfs-tools" -j"$CORE_JOBS" unsquashfs \
+    GZIP_SUPPORT=1 XZ_SUPPORT=1 LZO_SUPPORT=1 LZ4_SUPPORT=1 ZSTD_SUPPORT=1 \
+    LZMA_XZ_SUPPORT=0 LZMA_SUPPORT=0 XATTR_SUPPORT=1 \
+    EXTRA_CFLAGS="-g0 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -ffile-prefix-map=$sq_src=squashfs-tools" \
+    EXTRA_LDFLAGS="-pie -Wl,-z,relro,-z,now"
+  sq_bin="$sq_src/squashfs-tools/unsquashfs"
+  [ -x "$sq_bin" ] || die 'unsquashfs was not built'
+  mkdir -p "$sq_prefix/tools" "$sq_prefix/share/licenses/squashfs-tools"
+  cp "$sq_bin" "$sq_prefix/tools/unsquashfs"
+  strip --strip-unneeded "$sq_prefix/tools/unsquashfs"
+  cp "$sq_src/COPYING" "$sq_prefix/share/licenses/squashfs-tools/COPYING"
+  if readelf -W -d "$sq_prefix/tools/unsquashfs" | grep -qE '\((RUNPATH|RPATH)\)'; then
+    die 'unsquashfs must not carry a RUNPATH/RPATH'
+  fi
+  sq_needed=$(readelf -W -d "$sq_prefix/tools/unsquashfs" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+  for lib in $sq_needed; do
+    case "$lib" in
+      libz.so.1|liblzma.so.5|liblzo2.so.2|liblz4.so.1|libzstd.so.1|libm.so.6|libc.so.6|libpthread.so.0) ;;
+      *) die "unsquashfs has an unexpected dependency: $lib" ;;
+    esac
+  done
+  # Upstream prints its version and exits 1 when no image is named; anything else is a broken build.
+  sq_rc=0
+  sq_version=$("$sq_prefix/tools/unsquashfs" -version 2>&1) || sq_rc=$?
+  { [ "$sq_rc" -eq 0 ] || [ "$sq_rc" -eq 1 ]; } &&
+    printf '%s\n' "$sq_version" | head -n 1 | grep -Fq "unsquashfs version $SQUASHFS_TOOLS_RELEASE (" ||
+    die "unsquashfs did not report the pinned release (rc=$sq_rc)"
+  for lib in libz.so.1 liblzma.so.5 liblzo2.so.2 liblz4.so.1 libzstd.so.1; do
+    printf '%s\n' "$sq_needed" | grep -qx "$lib" || die "unsquashfs lacks compressor library $lib"
+  done
+  printf 'unsquashfs: NEEDED=%s\n' "$(printf '%s' "$sq_needed" | tr '\n' ' ')"
+}
+
+# raft, cowsql, liblxc and unsquashfs into $1 (prefix), sources below $2 (work dir).
 core_build_deps() { # prefix work [mirror_dir]
   deps_prefix=$1
   deps_work=$2
@@ -184,6 +234,7 @@ core_build_deps() { # prefix work [mirror_dir]
   # Incus 7.5 requires LXC >= 6.0.0 (Ubuntu's packaged 5.0.x would not be representative).
   # shellcheck disable=SC2153  # LXC_COMMIT is a caller-supplied pin, not a misspelling of lxc_commit
   build_lxc "$LXC_COMMIT" "$deps_work/lxc" "$deps_prefix" ${deps_mirror:+"$deps_mirror/lxc.git"}
+  build_unsquashfs "$deps_work/squashfs-tools" "$deps_prefix" ${deps_mirror:+"$deps_mirror/squashfs-tools.git"}
 }
 
 core_build_incus() { # incus_src
@@ -233,6 +284,15 @@ core_package() { # incus_src prefix output
   grep -Fq "$version_without_v" "$output/incusd-cli-version.txt" ||
     die 'Incus daemon binary did not report the selected source version'
 
+  # The daemon refuses to start unless every program in Incus' own startup list resolves on PATH. The
+  # controller checks the same list before it creates any state; both lists must stay identical.
+  sed -n 's/^[[:space:]]*neededPrograms := \[\]string{\(.*\)}$/\1/p' "$src/cmd/incusd/main_daemon.go" |
+    tr -d '",' > "$output/incusd-needed-programs.txt"
+  [ "$(wc -l < "$output/incusd-needed-programs.txt")" -eq 1 ] || die 'Incus startup program list not found exactly once'
+  ctl_programs=$(sed -n 's/^INCUSD_REQUIRED_PROGRAMS="\(.*\)".*/\1/p' "$CORE_REPO/unraid/plugin/src/emhttp/scripts/polyseatctl")
+  [ "$(cat "$output/incusd-needed-programs.txt")" = "$ctl_programs" ] ||
+    die "controller INCUSD_REQUIRED_PROGRAMS ($ctl_programs) differs from Incus neededPrograms"
+
   # Source inventory ONLY: it is not a complete runtime SBOM or vulnerability audit.
   (
     cd "$src" || exit 1
@@ -271,6 +331,17 @@ core_package() { # incus_src prefix output
   patchelf --set-rpath "$origin/../lib" "$payload/bin/incusd"
   chmod 0755 "$payload/bin/incus" "$payload/bin/incusd"
   chmod 0644 "$payload/lib/"*
+  # Private helper programs for the daemon only (prepended to the daemon's PATH by the controller).
+  mkdir -p "$payload/tools" "$payload/share/licenses/squashfs-tools"
+  [ -x "$prefix/tools/unsquashfs" ] || die 'missing bundled unsquashfs'
+  cp "$prefix/tools/unsquashfs" "$payload/tools/unsquashfs"
+  cp "$prefix/share/licenses/squashfs-tools/COPYING" "$payload/share/licenses/squashfs-tools/COPYING"
+  chmod 0755 "$payload/tools/unsquashfs"
+  chmod 0644 "$payload/share/licenses/squashfs-tools/COPYING"
+  readelf -W -d "$payload/tools/unsquashfs" > "$output/unsquashfs-elf-dynamic.txt"
+  readelf -W --version-info "$payload/tools/unsquashfs" > "$output/unsquashfs-elf-versions.txt"
+  "$payload/tools/unsquashfs" -version > "$output/unsquashfs-version.txt" 2>&1 || [ "$?" -eq 1 ] ||
+    die 'bundled unsquashfs failed its version probe'
 
   # Fully offline, static CPU-only canary image; exact official .deb and binary
   # hashes are pinned, no Ubuntu package is installed on the build or target host.
@@ -307,6 +378,8 @@ core_package() { # incus_src prefix output
     printf 'RAFT_COMMIT=%s\n' "$RAFT_COMMIT"
     printf 'COWSQL_COMMIT=%s\n' "$COWSQL_COMMIT"
     printf 'LXC_COMMIT=%s\n' "$LXC_COMMIT"
+    printf 'SQUASHFS_TOOLS_COMMIT=%s\n' "$SQUASHFS_TOOLS_COMMIT"
+    printf 'SQUASHFS_TOOLS_RELEASE=%s\n' "$SQUASHFS_TOOLS_RELEASE"
     printf 'GO_VERSION=%s\n' "$(go version)"
     printf 'BUILD_HOST=%s\n' "$(uname -sm)"
   } > "$output/build-info.txt"
@@ -318,7 +391,8 @@ core_checksums() { # output
     sha256sum -- bin/* bundle/* abi-report.json bundle.env build-info.txt *-ldd.txt *-elf-dynamic.txt \
       *-elf-versions.txt incusd-go-buildinfo.txt incus-go-buildinfo.txt incusd-go-packages.txt incus-go-packages.txt \
       dependency-overrides.json busybox-image-provenance.json \
-      incus-cli-version.txt incusd-cli-version.txt \
+      incus-cli-version.txt incusd-cli-version.txt incusd-needed-programs.txt \
+      unsquashfs-elf-dynamic.txt unsquashfs-elf-versions.txt unsquashfs-version.txt \
       go-modules.txt SBOM-build-source-only.cdx.json SBOM-runtime.cdx.json NOTICE.txt > SHA256SUMS
     sha256sum --check SHA256SUMS
   )

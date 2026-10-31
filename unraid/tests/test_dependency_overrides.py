@@ -180,7 +180,11 @@ class DependencyPlan(unittest.TestCase):
 
     def test_core_enforces_correct_metadata_and_copies_provenance(self):
         core = (ROOT / "unraid/scripts/lib/build-core.sh").read_text()
-        self.assertIn('"$INCUS_TAG_OBJECT^{}"', core)
+        # Incus and squashfs-tools are only accepted from their pinned annotated tag objects, peeled and checked.
+        self.assertIn("tag_object=$INCUS_TAG_OBJECT", core)
+        self.assertIn("tag_object=$SQUASHFS_TOOLS_TAG_OBJECT", core)
+        self.assertIn('"$tag_object^{}"', core)
+        self.assertIn("release is not the pinned annotated tag", core)
         self.assertIn('wanted="$INCUS_RELEASE+dirty"', core)
         self.assertIn("vcs.modified=true", core)
         self.assertIn("incusd-go-packages.txt", core)

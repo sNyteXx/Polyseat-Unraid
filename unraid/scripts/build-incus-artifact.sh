@@ -23,6 +23,9 @@ fi
 : "${COWSQL_COMMIT:?cowsql SHA required}"
 : "${LXC_COMMIT:?LXC SHA required}"
 : "${INCUS_RELEASE:?Release label required}"
+: "${SQUASHFS_TOOLS_COMMIT:?squashfs-tools SHA required}"
+: "${SQUASHFS_TOOLS_RELEASE:?squashfs-tools release required}"
+: "${SQUASHFS_TOOLS_TAG_OBJECT:?squashfs-tools tag object required}"
 
 case "$GITHUB_WORKSPACE:$RUNNER_TEMP" in
   /*:/*) ;;
@@ -31,7 +34,7 @@ esac
 
 # shellcheck source=unraid/scripts/lib/build-core.sh
 . "$GITHUB_WORKSPACE/unraid/scripts/lib/build-core.sh"
-core_check_pins "$INCUS_COMMIT" "$RAFT_COMMIT" "$COWSQL_COMMIT" "$LXC_COMMIT"
+core_check_pins "$INCUS_COMMIT" "$RAFT_COMMIT" "$COWSQL_COMMIT" "$LXC_COMMIT" "$SQUASHFS_TOOLS_COMMIT" "$SQUASHFS_TOOLS_TAG_OBJECT"
 
 build_root=$(mktemp -d "$RUNNER_TEMP/polyseat-incus-proof.XXXXXXXX") ||
   die 'could not create isolated build directory'

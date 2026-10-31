@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import re
 import subprocess
 import tempfile
 import time
@@ -12,6 +13,8 @@ import unittest
 from pathlib import Path
 
 from unraid.tests.ctl_support import CTL, Sandbox
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class CanaryRuntimeTests(unittest.TestCase):
@@ -117,10 +120,11 @@ class CanaryRuntimeTests(unittest.TestCase):
         result = self.shell(r'''
           RUN_DIR="$1"
           canary_deny_tools_prepare || exit 10
-          for tool in modprobe insmod rmmod; do
+          for tool in modprobe insmod rmmod btrfs lvm zfs zpool qemu-system-x86_64; do
             "$RUN_DIR/deny-tools/$tool" --help
             [[ $? == 126 ]] || exit 11
           done
+          [[ $(ls "$RUN_DIR/deny-tools" | wc -l) == 8 ]] || exit 13
           canary_deny_tools_prepare && exit 12
           exit 0
         ''')
@@ -129,10 +133,17 @@ class CanaryRuntimeTests(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
             self.assertNotIn("$@", path.read_text())
 
+    def test_denied_tools_never_shadow_a_program_incus_requires(self):
+        text = CTL.read_text()
+        denied = set(re.search(r'^CANARY_DENIED_TOOLS="([^"]*)"', text, re.M).group(1).split())
+        required = set(re.search(r'^INCUSD_REQUIRED_PROGRAMS="([^"]*)"', text, re.M).group(1).split())
+        self.assertFalse(denied & required, "a deny stub would satisfy Incus' startup check with a fake program")
+        self.assertTrue({"modprobe", "insmod", "rmmod", "btrfs", "lvm", "zfs", "zpool", "qemu-system-x86_64"} <= denied)
+
     def test_emergency_stop_uses_no_api_and_stops_workload_before_supervisor(self):
         result = self.shell(r'''
           POLYSEAT_RELEASE_GATE=canary
-          RUN_DIR="$1" PIDFILE="$1/pid"
+          RUN_DIR="$1" PIDFILE="$1/pid" SLOTS="$1/ram/slots"
           canary_cgroup_remove() { printf '%s\n' "$1"; }
           svc_pid() { exit 88; }
           run_incus() { exit 99; }
@@ -298,6 +309,149 @@ class CanaryRuntimeTests(unittest.TestCase):
         prepare = text.split("canary_cgroup_prepare() {", 1)[1].split("\n}\n", 1)[0]
         self.assertLess(prepare.index("canary_cgroup_precheck || return 1"), prepare.index('mkdir -- "$CANARY_CGROUP"'))
 
+    # ---- run-2 fixes: daemon programs, cgroup2-unraid teardown, leak check, health timeout ----
+    def fake_programs(self, names, where):
+        where.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            tool = where / name
+            tool.write_text("#!/bin/sh\nexit 0\n")
+            tool.chmod(0o755)
+
+    def programs_check(self, gate):
+        return self.shell(r"""
+          POLYSEAT_RELEASE_GATE=""" + gate + r"""
+          SAFE_PATH="$1/host"
+          daemon_programs_check "$1/slot"
+        """)
+
+    def test_daemon_programs_check_requires_the_bundled_unsquashfs_for_canary(self):
+        self.fake_programs(["ip", "rsync", "setfattr", "tar", "xz"], self.dir / "host")
+        (self.dir / "slot/payload/tools").mkdir(parents=True)
+        missing = self.programs_check("canary")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("bundled unsquashfs missing", missing.stderr)
+        # A host copy must not stand in for the reviewed bundle on the canary.
+        self.fake_programs(["unsquashfs"], self.dir / "host")
+        self.assertNotEqual(self.programs_check("canary").returncode, 0)
+        self.fake_programs(["unsquashfs"], self.dir / "slot/payload/tools")
+        self.assertEqual(self.programs_check("canary").returncode, 0)
+
+    def test_daemon_programs_check_reports_each_missing_host_program(self):
+        self.fake_programs(["ip", "setfattr", "tar", "xz"], self.dir / "host")
+        self.fake_programs(["unsquashfs"], self.dir / "slot/payload/tools")
+        result = self.programs_check("canary")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("required daemon programs missing on PATH: rsync", result.stderr)
+        # The exact Tower failure of run 1: nothing provides unsquashfs at all.
+        (self.dir / "slot/payload/tools/unsquashfs").unlink()
+        self.fake_programs(["rsync"], self.dir / "host")
+        self.assertIn("missing on PATH: unsquashfs", self.programs_check("test-host").stderr)
+        self.fake_programs(["unsquashfs"], self.dir / "host")
+        self.assertEqual(self.programs_check("test-host").returncode, 0)
+
+    def test_program_check_precedes_one_shot_state_and_daemon_path_prefers_bundle(self):
+        text = CTL.read_text()
+        start = text.split("svc_start() {", 1)[1].split("svc_stop() {", 1)[0]
+        self.assertLess(start.index('daemon_programs_check "$slot_real"'), start.index("canary_fresh_state_prepare"))
+        self.assertIn('PATH="$slot_real/payload/tools:$SAFE_PATH"', start)
+        launch = text.split("canary_launch() {", 1)[1].split("foreign_incusd()", 1)[0]
+        self.assertIn('PATH="$RUN_DIR/deny-tools:$slot_real/payload/tools:$SAFE_PATH"', launch)
+        self.assertNotIn('PATH="$RUN_DIR/deny-tools:$SAFE_PATH"', launch)
+
+    def test_required_program_list_is_extracted_exactly_like_the_build_gate(self):
+        line = '\tneededPrograms := []string{"ip", "rsync", "setfattr", "tar", "unsquashfs", "xz"}\n'
+        source = self.dir / "main_daemon.go"
+        source.write_text("package main\n" + line)
+        extracted = subprocess.run(
+            ["sh", "-c", "sed -n 's/^[[:space:]]*neededPrograms := \\[\\]string{\\(.*\\)}$/\\1/p' \"$1\" | tr -d '\",'",
+             "x", str(source)], capture_output=True, text=True, check=True).stdout.strip()
+        controller = re.search(r'^INCUSD_REQUIRED_PROGRAMS="([^"]*)"', CTL.read_text(), re.M).group(1)
+        self.assertEqual(extracted, controller)
+        build = (ROOT / "unraid/scripts/lib/build-core.sh").read_text()
+        self.assertIn("neededPrograms := \\[\\]string{", build)
+        self.assertIn("differs from Incus neededPrograms", build)
+
+    def remove_group(self, background="", sleep_stub=""):
+        group = self.dir / "cg"
+        group.mkdir()
+        (group / "cgroup.kill").write_text("")  # a regular file keeps rmdir busy, like live tasks would
+        return self.shell(r"""
+          POLYSEAT_RELEASE_GATE=canary CANARY_CGROUP="$1/cg" CANARY_WATCHDOG_CGROUP="$1/wd"
+          fs_type() { echo cgroup2fs; }
+          """ + sleep_stub + r"""
+          """ + background + r"""
+          canary_cgroup_remove "$CANARY_CGROUP"
+        """)
+
+    def test_group_removed_by_cgroup2_unraid_is_a_completed_removal(self):
+        result = self.remove_group(background=r'( sleep 0.3; rm -f -- "$1/cg/cgroup.kill"; rmdir -- "$1/cg" ) &')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("No such file", result.stderr)
+
+    def test_group_that_never_empties_still_fails(self):
+        result = self.remove_group(sleep_stub="sleep() { :; }")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.dir / "cg").exists())
+
+    def test_leak_check_finds_surviving_supervisor_and_bundled_binaries(self):
+        slots = self.dir / "ram/slots/abc"
+        slots.mkdir(parents=True)
+        # Named "sleep" so that multi-call coreutils builds still behave as sleep.
+        sleeper = slots / "sleep"
+        sleeper.write_bytes(Path("/bin/sleep").read_bytes())
+        sleeper.chmod(0o755)
+        clean = self.shell('SLOTS="$1/ram/slots"; canary_leak_check')
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        # The trailing ':' stops bash from exec-replacing itself, so argv0 stays visible.
+        for argv in ([str(sleeper), "30"], ["bash", "-c", "sleep 30; :", "canary-guardian"]):
+            with self.subTest(argv=argv[0]):
+                leak = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.addCleanup(leak.kill)
+                time.sleep(0.2)
+                self.assertIsNone(leak.poll(), "the simulated leak must really be running")
+                result = self.shell('SLOTS="$1/ram/slots"; canary_leak_check')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(str(leak.pid), result.stderr)
+                leak.kill()
+                leak.wait()
+        self.assertNotEqual(self.shell('SLOTS=""; canary_leak_check').returncode, 0)
+
+    def test_canary_health_timeout_is_fixed_and_not_user_tunable(self):
+        text = CTL.read_text()
+        self.assertRegex(text, r"(?m)^CANARY_HEALTH_TIMEOUT=60\b")
+        start = text.split("svc_start() {", 1)[1].split("svc_stop() {", 1)[0]
+        canary_branch = start.split('timeout=$CANARY_HEALTH_TIMEOUT', 1)
+        self.assertEqual(len(canary_branch), 2)
+        self.assertIn("if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then\n    timeout=$CANARY_HEALTH_TIMEOUT", start)
+        ci = (ROOT / "unraid/scripts/ci-e2e-canary.sh").read_text()
+        self.assertNotIn("HEALTH_TIMEOUT", ci, "the rehearsal must run with the same health timeout as Tower")
+
+    def test_activation_probes_the_bundled_unsquashfs(self):
+        sha = "a" * 64
+        slot = self.dir / "ram/slots" / sha
+        for path, body in (("payload/bin/incus", "echo 7.5.1"), ("payload/bin/incusd", "echo 7.5.1"),
+                           # Like upstream: the version first, then exit 1 because no image was named.
+                           ("payload/tools/unsquashfs", "echo 'unsquashfs version 4.7.5 (2026/03/01)'; exit 1")):
+            target = slot / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("#!/bin/sh\n" + body + "\n")
+            target.chmod(0o755)
+        (self.dir / "bundles").mkdir()
+        manifest = {"incus_version": "7.5.1", "files": [{"path": "payload/tools/unsquashfs", "mode": 493}]}
+        (self.dir / f"bundles/{sha}.manifest.json").write_text(json.dumps(manifest))
+        script = r"""
+          POLYSEAT_RELEASE_GATE=$2 SLOTS="$1/ram/slots" BUNDLE_DIR="$1/bundles" RUN_DIR="$1" SAFE_PATH=/usr/bin:/bin
+          smoke_slot """ + sha
+        self.assertEqual(self.shell(script, "canary").returncode, 0)
+        for broken in ("exit 3", "echo 'unsquashfs version 4.7.5'; exit 127", "echo 'error while loading'; exit 1",
+                       "echo 'unsquashfs version 4.7.5'; kill -SEGV $$"):
+            with self.subTest(broken=broken):
+                (slot / "payload/tools/unsquashfs").write_text("#!/bin/sh\n" + broken + "\n")
+                self.assertNotEqual(self.shell(script, "canary").returncode, 0)
+        (self.dir / f"bundles/{sha}.manifest.json").write_text(json.dumps({"incus_version": "7.5.1", "files": []}))
+        self.assertNotEqual(self.shell(script, "canary").returncode, 0, "canary bundles must ship unsquashfs")
+        self.assertEqual(self.shell(script, "test-host").returncode, 0)
+
     def test_launcher_and_supervisor_ordering_contract(self):
         text = CTL.read_text()
         start = text.split("svc_start() {", 1)[1].split("svc_stop() {", 1)[0]
@@ -307,7 +461,7 @@ class CanaryRuntimeTests(unittest.TestCase):
         launch = text.split("canary_launch() {", 1)[1].split("foreign_incusd()", 1)[0]
         for phrase in (
             '"$CANARY_CGROUP/daemon/cgroup.procs"',
-            'PATH="$RUN_DIR/deny-tools:$SAFE_PATH"',
+            'PATH="$RUN_DIR/deny-tools:$slot_real/payload/tools:$SAFE_PATH"',
             "setpriv --bounding-set=-sys_module,-sys_rawio",
             "unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private",
             "read -r host_pid unused < /proc/self/stat",
