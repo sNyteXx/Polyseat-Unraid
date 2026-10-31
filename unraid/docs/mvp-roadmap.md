@@ -45,7 +45,7 @@ Legend: ✅ implemented and proven on Tower · 🟢 implemented, proven on dispo
 | Step | Proves | Where first | Tower write? |
 |---|---|---|---|
 | M0 | CPU-only BusyBox lifecycle | done (run 2) | done |
-| **M1** | Real Polyseat desktop (systemd, headless sway, grim screenshot, Sunshine software-encoder init) in one unprivileged, NIC-less container on the Unraid kernel; start/stop/restart/delete; host diff | disposable CI runner, then Tower | yes: RAM-only, GO needed |
+| **M1** (run 3 failed closed at staging, see [tower-run3-desktop.md](tower-run3-desktop.md)) | Real Polyseat desktop (systemd, headless sway, grim screenshot, Sunshine software-encoder init) in one unprivileged, NIC-less container on the Unraid kernel; start/stop/restart/delete; host diff | disposable CI runner, then Tower | yes: RAM-only, GO needed |
 | **M2** | Same container with the RTX 5070 Ti by **device access** (`gpu pci=0000:01:00.0` + `nvidia.runtime`): `nvidia-smi` inside, sway on NVIDIA GBM, Sunshine NVENC init, VRAM/encoder/power measured; GamingVM/Windows 11 guard + watchdog | Tower only (no GPU in CI) | yes: GO needed |
 | M3 | One LAN session to one Moonlight client (Shield): picture, audio, input, latency/encoder load | Tower | yes: network GO (static IP, ports) |
 | M4 | Persistent seat on a dedicated pool directory; `.plg` install/boot/uninstall in a maintenance window | Tower | yes: flash + pool GO |

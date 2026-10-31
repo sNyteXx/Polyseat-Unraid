@@ -74,7 +74,7 @@ class DesktopAllowListTests(unittest.TestCase):
     SEQUENCE = (
         "storage create default dir source=/var/lib/polyseat-unraid-canary/incus/storage-pools/default",
         "profile device add default root disk path=/ pool=default",
-        "image import /var/run/polyseat-unraid/seat-image/image --alias polyseat-desktop",
+        "image import /var/lib/polyseat-unraid-seat-image/image --alias polyseat-desktop",
         "init polyseat-desktop polyseat-desktop-cpu --storage default --config boot.autostart=false "
         "--config security.privileged=false --config security.nesting=false --config limits.cpu=2 "
         "--config limits.memory=2GiB --config limits.processes=1024",
@@ -246,7 +246,7 @@ class DesktopApprovalTests(unittest.TestCase):
         return source_ctl(body, str(self.dir), *map(str, args)).returncode
 
     def stage_copy(self, data: bytes):
-        seat = self.dir / "var/run/polyseat-unraid/seat-image"
+        seat = self.dir / "var/lib/polyseat-unraid-seat-image"
         seat.mkdir(parents=True, exist_ok=True)
         (seat / "image").write_bytes(data)
 
@@ -281,6 +281,13 @@ class DesktopApprovalTests(unittest.TestCase):
 
 
 class SeatImageStagingTests(unittest.TestCase):
+    def test_seat_image_is_never_staged_below_the_small_run_tmpfs(self):
+        # Tower run 3: /run (= /var/run) is a separate 128 MiB tmpfs; a 273 MB image failed there with ENOSPC.
+        res = source_ctl('init_paths; echo "$SEAT_DIR|$RUN_DIR"')
+        seat, run = res.stdout.strip().split("|")
+        self.assertEqual(seat, "/var/lib/polyseat-unraid-seat-image")
+        self.assertFalse(seat.startswith(run) or seat.startswith("/run") or seat.startswith("/var/run"))
+
     def setUp(self):
         self.sb = Sandbox()
         self.addCleanup(self.sb.cleanup)
@@ -307,7 +314,7 @@ class SeatImageStagingTests(unittest.TestCase):
     def test_valid_image_is_staged_privately_and_reverified(self):
         res = self.stage(self.sign())
         self.assertEqual(res.code, 0, res.text)
-        seat = self.sb.run_dir / "seat-image"
+        seat = self.sb.root / "var/lib/polyseat-unraid-seat-image"
         self.assertEqual(sorted(p.name for p in seat.iterdir()), ["image", "manifest.json", "manifest.json.sig"])
         self.assertEqual((seat / "image").read_bytes(), self.image.read_bytes())
         self.assertEqual(oct(seat.stat().st_mode & 0o777), "0o700")
@@ -316,7 +323,7 @@ class SeatImageStagingTests(unittest.TestCase):
 
     def test_bundle_signature_cannot_be_replayed_for_an_image(self):
         self.assertEqual(self.stage(self.sign("polyseat-unraid-bundle")).code, 5)
-        self.assertFalse((self.sb.run_dir / "seat-image/image").exists())
+        self.assertFalse((self.sb.root / "var/lib/polyseat-unraid-seat-image/image").exists())
 
     def test_manifest_must_bind_this_exact_image(self):
         sig = self.sign()
@@ -332,11 +339,11 @@ class SeatImageStagingTests(unittest.TestCase):
         evidence = self.sb.run_dir / "desktop-evidence"
         evidence.mkdir()
         (evidence / "selftest-start.json").write_text("{}")
-        stray = self.sb.run_dir / "seat-image/unexpected"
+        stray = self.sb.root / "var/lib/polyseat-unraid-seat-image/unexpected"
         stray.write_text("not ours")
         res = self.sb.ctl("uninstall", "--approve")
         self.assertEqual(res.code, 0, res.text)
-        self.assertFalse((self.sb.run_dir / "seat-image/image").exists())
+        self.assertFalse((self.sb.root / "var/lib/polyseat-unraid-seat-image/image").exists())
         self.assertTrue(stray.exists())  # unattributed files are kept, never deleted recursively
         self.assertTrue((evidence / "selftest-start.json").exists())
 

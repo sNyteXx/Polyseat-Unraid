@@ -102,7 +102,9 @@ init_paths() {
   if ci_real_system; then SUBID_DIR=/etc; fi
   UNRAID_VERSION_FILE="$ROOT/etc/unraid-version"
   SCHEMA="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../schema.json"
-  SEAT_DIR="$RUN_DIR/seat-image"
+  # NOT below RUN_DIR: Unraid mounts /run (= /var/run) as its own 128 MiB tmpfs (Tower run 3 failed there with
+  # ENOSPC). /var/lib lives on the RAM root filesystem.
+  SEAT_DIR="$ROOT/var/lib/polyseat-unraid-seat-image"
   SEAT_IMAGE="$SEAT_DIR/image"
   SEAT_MANIFEST="$SEAT_DIR/manifest.json"
   SEAT_EVIDENCE="$RUN_DIR/desktop-evidence"
@@ -1827,6 +1829,12 @@ cmd_seat_image_stage() { # image manifest sig
     [[ $avail =~ ^[0-9]+$ && $avail -ge $((size / 1024 + CANARY_HOST_MIN_AVAILABLE_KB)) ]] ||
       die $EX_SPACE "not enough available memory to stage the seat image in RAM"
   fi
+  # The filesystem that will hold the copy must have room for it plus 64 MiB, whatever its own size limit is.
+  local free_kb
+  if sandbox; then mkdir -p -- "$(dirname -- "$SEAT_DIR")"; fi
+  free_kb=$(df -Pk -- "$(dirname -- "$SEAT_DIR")" 2>/dev/null | awk 'NR == 2 { print $4 }')
+  [[ $free_kb =~ ^[0-9]+$ && $free_kb -ge $((size / 1024 + 65536)) ]] ||
+    die $EX_SPACE "not enough free space below $(dirname -- "$SEAT_DIR") for the seat image (${free_kb:-?} KiB free)"
   if [[ -e $SEAT_DIR || -L $SEAT_DIR ]]; then
     [[ -d $SEAT_DIR && ! -L $SEAT_DIR ]] || die $EX_BLOCKED "unexpected seat image path"
     [[ -z $(find "$SEAT_DIR" -mindepth 1 -maxdepth 1 -print -quit) ]] ||

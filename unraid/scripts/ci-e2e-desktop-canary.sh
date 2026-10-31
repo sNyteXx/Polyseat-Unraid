@@ -101,11 +101,12 @@ cleanup() {
     ctl stop >> "$evidence/cleanup.txt" 2>&1
     ctl uninstall --approve >> "$evidence/cleanup.txt" 2>&1
     mountpoint -q -- "$fixture/var/lib/polyseat-unraid-canary" && umount -- "$fixture/var/lib/polyseat-unraid-canary"
-    mkdir -p "$evidence/logs"
-    find "$fixture/var/log/polyseat-unraid" -maxdepth 1 -type f -exec cp -t "$evidence/logs" -- {} + 2>/dev/null
     if [[ -d $fixture/var/run/polyseat-unraid/desktop-evidence ]]; then
       cp -r -- "$fixture/var/run/polyseat-unraid/desktop-evidence" "$evidence/controller-evidence"
     fi
+    mountpoint -q -- "$fixture/var/run" && umount -l -- "$fixture/var/run"
+    mkdir -p "$evidence/logs"
+    find "$fixture/var/log/polyseat-unraid" -maxdepth 1 -type f -exec cp -t "$evidence/logs" -- {} + 2>/dev/null
   fi
   for group in "$workload" "$watchdog"; do
     if [[ -n $group && -d $group && ! -L $group ]]; then
@@ -170,6 +171,10 @@ mkdir -p "$flash" "$fixture/etc" "$fixture/var/lib" "$data"
 chmod 0755 "$fixture/var" "$fixture/var/lib" "$data"
 # RAM-backed like Tower's /var/lib; sized above the controller's monitored 3 GiB data budget.
 mount -t tmpfs -o size=4g,nosuid,nodev,mode=0755 tmpfs "$data"
+# Tower parity (measured read-only): /run is its own 128 MiB tmpfs (noexec), /var/run points into it.
+mkdir -p "$fixture/var/run"
+chmod 0755 "$fixture/var/run"
+mount -t tmpfs -o size=128m,nosuid,nodev,noexec,mode=0755 tmpfs "$fixture/var/run"
 tar --extract --xz --file "$controller_package" --directory "$fixture" --no-same-owner
 python3 - "$ctl_path" "$host_cpuset" "$ci_cpuset" "$workload" "$watchdog" "$tower_path" <<'PY'
 from pathlib import Path
@@ -244,9 +249,10 @@ done
 step desktop-smoke
 
 ctl uninstall --approve
-[[ ! -e $fixture/var/run/polyseat-unraid/seat-image/image ]] || fail 'uninstall left the staged seat image'
 cp -r -- "$fixture/var/run/polyseat-unraid/desktop-evidence" "$evidence/controller-evidence"
+[[ ! -e $fixture/var/lib/polyseat-unraid-seat-image/image ]] || fail 'uninstall left the staged seat image'
 umount -- "$data"
+umount -- "$fixture/var/run"
 fixture_done=$fixture
 fixture=""
 if pgrep -x incusd >/dev/null; then fail 'Incus daemon or helper survived teardown'; fi
