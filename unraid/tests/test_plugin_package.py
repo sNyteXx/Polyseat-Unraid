@@ -34,7 +34,8 @@ def code_lines(path: Path) -> list[str]:
 # Read-only GPU ownership guard (polyseatctl gpu-preflight). These functions may NAME libvirt,
 # vfio and nvidia-* files because they read them; test_gpu_guard_functions_are_read_only proves
 # they contain no write, exec-of-host-tool or sysfs-control primitive at all.
-GPU_READONLY_FUNCTIONS = ("host_path", "gpu_is_char", "gpu_libvirt_owners", "gpu_domain_active",
+GPU_READONLY_FUNCTIONS = ("host_path", "gpu_is_char", "gpu_libvirt_owners", "gpu_domain_active", "gpu_guard_quick",
+                          "gpu_preflight_run", "gpu_release_check",
                           "gpu_lock_held", "gpu_holders", "cmd_gpu_preflight")
 GPU_READONLY_PATTERNS = (r"\blibvirt", r"\bvfio", r"\bnvidia-")
 

@@ -6,6 +6,7 @@ Disposable keys and /tmp sandboxes only; no Incus daemon, no cgroup and no host 
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 import os
 import subprocess
@@ -190,10 +191,14 @@ class DesktopPolicyGuardTests(unittest.TestCase):
         self.assertNotEqual(self.guard(busybox, profile="cpu").returncode, 0)
 
     def test_budgets_are_two_fixed_tuples(self):
-        res = source_ctl('canary_budget_select desktop; echo "$CANARY_CPU_MAX|$CANARY_MEMORY_MAX|$CANARY_PIDS_MAX|'
-                         '$CANARY_DATA_MAX_KB|$CANARY_CPUSET|$CANARY_INSTANCE"; canary_budget_select gpu || echo refused')
-        self.assertEqual(res.stdout.splitlines(), ["200000 100000|3221225472|2048|3145728|24-27|polyseat-desktop-cpu",
-                                              "refused"])
+        show = 'echo "$CANARY_CPU_MAX|$CANARY_MEMORY_MAX|$CANARY_PIDS_MAX|$CANARY_DATA_MAX_KB|$CANARY_CPUSET|$CANARY_INSTANCE|$CANARY_GPU_PCI"'
+        res = source_ctl(f'{show}; canary_budget_select desktop; {show}; canary_budget_select gpu; {show}; '
+                         'canary_budget_select bogus || echo refused')
+        self.assertEqual(res.stdout.splitlines(), [
+            "100000 1000000|536870912|256|262144|24-27|polyseat-canary-cpu|",
+            "200000 100000|3221225472|2048|3145728|24-27|polyseat-desktop-cpu|",
+            "200000 100000|3221225472|2048|3145728|24-27|polyseat-desktop-gpu|0000:01:00.0",
+            "refused"])
 
 
 class DesktopApprovalTests(unittest.TestCase):
@@ -342,3 +347,90 @@ class SeatImageStagingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GpuCanaryPolicyTests(unittest.TestCase):
+    INIT = ("init polyseat-desktop polyseat-desktop-gpu --storage default --config boot.autostart=false "
+            "--config security.privileged=false --config security.nesting=false --config limits.cpu=2 "
+            "--config limits.memory=2GiB --config limits.processes=1024 --config nvidia.runtime=true "
+            "--config nvidia.driver.capabilities=compute,utility,video,graphics")
+
+    def allowed(self, operation, command):
+        return DesktopAllowListTests.allowed(self, operation, command)
+
+    def test_gpu_sequence_is_exact_and_only_for_gpu_smoke(self):
+        for command in (self.INIT,
+                        "config device add polyseat-desktop-gpu gpu gpu pci=0000:01:00.0 mode=0666",
+                        "start polyseat-desktop-gpu",
+                        "exec polyseat-desktop-gpu -- /usr/local/bin/polyseat-selftest nvidia",
+                        "stop polyseat-desktop-gpu --timeout 30", "delete polyseat-desktop-gpu"):
+            with self.subTest(command=command):
+                self.assertTrue(self.allowed(3, command))
+                self.assertFalse(self.allowed(2, command))
+                self.assertFalse(self.allowed(1, command))
+        for command in ("config device add polyseat-desktop-gpu gpu gpu pci=0000:00:02.0 mode=0666",
+                        "config device add polyseat-desktop-gpu gpu gpu mode=0666",
+                        "config device add polyseat-desktop-gpu gpu gpu gputype=mig pci=0000:01:00.0",
+                        "config device add polyseat-desktop-gpu vfio pci address=0000:01:00.0",
+                        self.INIT.replace("compute,utility,video,graphics", "all"),
+                        "exec polyseat-desktop-gpu -- /usr/local/bin/polyseat-selftest desktop",
+                        "exec polyseat-desktop-gpu -- nvidia-smi -pm 0"):
+            with self.subTest(command=command):
+                self.assertFalse(self.allowed(3, command))
+
+    def test_policy_guard_accepts_only_the_exact_gpu_device_and_config(self):
+        guard = DesktopPolicyGuardTests("test_fixed_desktop_instance_passes")
+        guard.setUp()
+        self.addCleanup(guard.tmp.cleanup)
+        inst = json.loads(json.dumps(guard.instance))
+        inst["name"] = "polyseat-desktop-gpu"
+        for d in (inst["config"], inst["expanded_config"]):
+            d["nvidia.runtime"] = "true"
+            d["nvidia.driver.capabilities"] = "compute,utility,video,graphics"
+        gpu = {"type": "gpu", "pci": "0000:01:00.0", "mode": "0666"}
+        inst["devices"]["gpu"] = gpu
+        inst["expanded_devices"]["gpu"] = gpu
+        self.assertEqual(guard.guard(inst, profile="gpu").returncode, 0)
+        self.assertNotEqual(guard.guard(inst, profile="desktop").returncode, 0)  # never in the CPU desktop run
+        for mutate in (lambda i: i["devices"]["gpu"].update(pci="0000:00:02.0"),
+                       lambda i: i["devices"]["gpu"].update(gputype="mdev"),
+                       lambda i: i["config"].update({"nvidia.driver.capabilities": "all"}),
+                       lambda i: i["config"].update({"nvidia.require.driver": ">=1"}),
+                       lambda i: i["devices"].update(eth0={"type": "nic", "nictype": "bridged", "parent": "br0"})):
+            bad = json.loads(json.dumps(inst))
+            bad["devices"]["gpu"] = dict(bad["devices"]["gpu"])
+            mutate(bad)
+            with self.subTest(bad=bad["devices"], cfg=bad["config"]):
+                self.assertNotEqual(guard.guard(bad, profile="gpu").returncode, 0)
+
+    def test_gpu_token_needs_the_image_binding(self):
+        app = DesktopApprovalTests("test_stage_and_smoke_are_bound_to_bundle_and_image")
+        app.setUp()
+        self.addCleanup(app.tmp.cleanup)
+        app.token["actions"] = ["gpu-smoke"]
+        app.sign()
+        app.stage_copy(app.image.read_bytes())
+        self.assertEqual(app.check("gpu-smoke"), 0)
+        self.assertEqual(app.check("desktop-smoke"), 2)
+        del app.token["seat_image_sha256"]
+        app.sign()
+        self.assertEqual(app.check("gpu-smoke"), 2)
+
+
+class SupervisorEnvironmentTests(unittest.TestCase):
+    """The expiry supervisor runs `env -i ... bash -u` with an explicit function list: every global those
+    functions read must be passed, or `-u` kills the supervisor (CI run 41199384911 failed exactly so)."""
+
+    def test_every_global_read_by_exported_functions_is_passed(self):
+        text = CTL.read_text()
+        block = re.search(r'^canary_watchdog_start\(\) \{\n(.*?)^\}', text, re.MULTILINE | re.DOTALL).group(1)
+        launch = block[block.index("env -i"):block.index("canary-watchdog \"$expiry\"")]
+        passed = set(re.findall(r'\b([A-Z][A-Z0-9_]*)=', launch))
+        functions = re.search(r'declare -f ([^)]*)\)', launch).group(1).replace("\\\n", " ").split()
+        res = subprocess.run(["bash", "-c", 'source <(sed \'$d\' "$1"); shift; declare -f "$@"', "x", str(CTL),
+                              *functions], capture_output=True, text=True, check=True)
+        used = set(re.findall(r'\$\{?([A-Z][A-Z0-9_]*)', res.stdout))
+        allowed_unset = {"POLYSEAT_CI_REAL_SYSTEM", "CI", "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT",  # read with ${X:-}
+                         "BASHPID", "PATH"}
+        missing = sorted(used - passed - allowed_unset)
+        self.assertEqual(missing, [], "globals read under bash -u but not passed to the supervisor")

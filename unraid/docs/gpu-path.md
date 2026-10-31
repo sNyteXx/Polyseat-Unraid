@@ -57,6 +57,15 @@ profile: `nvidia-smi -L`, sway with `WLR_RENDERER=gles2`/`GBM_BACKEND=nvidia-drm
 must show **no holder** → delete. Abort on any watchdog trigger. Expected host diff: none outside plugin-owned RAM
 paths; GPU back to idle P8 with 0 processes.
 
+Implemented as `polyseatctl gpu-smoke --approve` (canary gate only, owner token action `gpu-smoke` bound to the
+runtime bundle **and** the seat image): full `gpu-preflight` immediately before anything starts; fixed allow-list
+(`gpu` device exactly `pci=0000:01:00.0 mode=0666`, `nvidia.runtime=true`, capabilities exactly
+`compute,utility,video,graphics`); the independent canary supervisor re-runs a file-only ownership check every second
+and **hard-stops the whole workload** (closing every NVIDIA descriptor) on a VM status file, a running owning VM, an
+IOMMU-group member on `vfio-pci`, an unbound/rebound GPU, the owner's hand-over lock or failure marker; after every
+stop it proves that no process of the test tree still holds an NVIDIA node; after teardown `gpu-preflight` must
+report no holder. Tests: fixture-based (no GPU in CI); the first real run is the owner-approved M2 on Tower.
+
 Not part of M2: network, Moonlight, Steam, a VM start, persistence mode changes, Docker containers.
 
 ## If exclusive switching were ever needed

@@ -59,7 +59,7 @@ DECOY_VM_XML = """<domain type='kvm'>
 """
 
 
-class GpuPreflightTests(unittest.TestCase):
+class TowerFixture:
     def setUp(self):
         self.sb = Sandbox()
         self.addCleanup(self.sb.cleanup)
@@ -115,6 +115,9 @@ class GpuPreflightTests(unittest.TestCase):
         self.w("proc/meminfo", "MemTotal:       82116948 kB\nMemAvailable:   19866060 kB\n")
         self.w("usr/bin/nvidia-container-cli", "#!/bin/sh\nexit 0\n", 0o755)
 
+
+
+class GpuPreflightTests(TowerFixture, unittest.TestCase):
     def run_pf(self, *extra):
         res = self.sb.ctl("gpu-preflight", "--pci", GPU, "--json", *extra)
         data = json.loads(res.out) if res.out.strip().startswith("{") else None
@@ -242,3 +245,57 @@ class GpuPreflightTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GpuGuardQuickTests(TowerFixture, unittest.TestCase):
+    """The 1-second VM-priority check the canary supervisor runs during gpu-smoke."""
+
+    def quick(self):
+        script = r'''
+          source <(sed '$d' "$1")
+          POLYSEAT_ROOT="$2"
+          init_paths
+          gpu_guard_quick 0000:01:00.0 && echo HOLD || echo RELEASE
+        '''
+        import subprocess
+        from unraid.tests.ctl_support import CTL
+        res = subprocess.run(["bash", "-c", script, "quick", str(CTL), str(self.r)],
+                             env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=False)
+        return res.stdout.strip()
+
+    def test_quiet_tower_state_keeps_the_gpu(self):
+        self.assertEqual(self.quick(), "HOLD")
+
+    def test_vm_start_hand_over_or_driver_change_releases_immediately(self):
+        cases = {
+            "vm-status-file": lambda: self.w("var/run/libvirt/qemu/GamingVM.xml", "<domstatus/>"),
+            "vm-running": lambda: (self.w("var/run/libvirt/qemu/GamingVM.pid", "77\n"),
+                                   (self.r / "proc/77").mkdir(parents=True, exist_ok=True)),
+            "marker": lambda: self.w("var/run/gamingvm-transition.unhealthy"),
+            "audio-on-vfio": lambda: ((self.r / "sys/bus/pci/drivers/vfio-pci").mkdir(parents=True, exist_ok=True),
+                                      self.link(f"sys/bus/pci/devices/{AUDIO}/driver",
+                                                str(self.r / "sys/bus/pci/drivers/vfio-pci"))),
+            "unbound": lambda: (self.r / f"sys/bus/pci/devices/{GPU}/driver").unlink(),
+            "decoy-vm-running": None,
+        }
+        for name, change in cases.items():
+            with self.subTest(change=name):
+                self.tearDown_fixture()
+                if change is None:  # a VM that does not pass this GPU through may run freely
+                    self.w("var/run/libvirt/qemu/Windows 11.pid", "77\n")
+                    (self.r / "proc/77").mkdir(parents=True, exist_ok=True)
+                    self.assertEqual(self.quick(), "HOLD")
+                    continue
+                change()
+                self.assertEqual(self.quick(), "RELEASE")
+
+    def tearDown_fixture(self):
+        import shutil
+        for rel in ("var/run/libvirt", "var/run/gamingvm-transition.unhealthy", "proc/77", "sys"):
+            p = self.r / rel
+            if p.is_dir():
+                shutil.rmtree(p)
+            elif p.exists():
+                p.unlink()
+        self.tower_like()
+

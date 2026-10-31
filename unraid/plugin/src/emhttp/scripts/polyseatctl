@@ -58,6 +58,12 @@ DESKTOP_MEMORY_MAX=$((3 * 1024 * 1024 * 1024))
 DESKTOP_PIDS_MAX=2048
 DESKTOP_DATA_MAX_KB=$((3 * 1024 * 1024))
 DESKTOP_EVIDENCE_MAX_BYTES=$((8 * 1024 * 1024))
+# M2 GPU canary: the same desktop container plus ONE host-owned NVIDIA GPU by device access (never rebinding).
+# The address was verified read-only on Tower (2026-10-31); gpu-preflight must pass right before the test.
+GPU_CANARY_PCI="0000:01:00.0"
+GPU_INSTANCE="polyseat-desktop-gpu"
+GPU_CAPABILITIES="compute,utility,video,graphics"
+CANARY_GPU_PCI=""
 CANARY_INSTANCE="polyseat-canary-cpu"
 CANARY_SIGN_IDENTITY="polyseat-unraid-canary-approver"
 CANARY_SIGN_NAMESPACE="polyseat-unraid-canary-approval-v1"
@@ -253,7 +259,8 @@ canary_approval_for() { # command args... (root only, non-sandbox)
     ((keys | sort) == ["actions", "archive_sha256", "expires_at", "host_sha256", "issued_at", "schema"] or
      ((keys | sort) == ["actions", "archive_sha256", "expires_at", "host_sha256", "issued_at", "schema",
         "seat_image_sha256"] and (.seat_image_sha256 | type == "string" and test("^[0-9a-f]{64}$")))) and
-    ((.actions | any(.[]; . == "seat-image-stage" or . == "desktop-smoke")) == has("seat_image_sha256")) and
+    ((.actions | any(.[]; . == "seat-image-stage" or . == "desktop-smoke" or . == "gpu-smoke")) ==
+      has("seat_image_sha256")) and
     .schema == 1 and .host_sha256 == $host and
     (.archive_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
     (.issued_at | type == "number" and . == floor) and
@@ -263,7 +270,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
     (.actions | type == "array" and length <= 6 and length > 0 and
       (unique | length) == length and all(.[];
        . == "stage" or . == "activate" or . == "start" or . == "canary-smoke" or
-       . == "seat-image-stage" or . == "desktop-smoke" or
+       . == "seat-image-stage" or . == "desktop-smoke" or . == "gpu-smoke" or
        . == "config-set" or . == "config-reset")) and
     (.actions | index($action) != null)' "$CANARY_APPROVAL" >/dev/null 2>&1 ||
     die $EX_BLOCKED "canary approval expired, wrong host, invalid scope or bad schema"
@@ -276,7 +283,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
     start | canary-smoke)
       read_pointer
       target=$PTR_CURRENT ;;
-    seat-image-stage | desktop-smoke)
+    seat-image-stage | desktop-smoke | gpu-smoke)
       # Both the runtime bundle AND the exact seat image bytes are bound by the owner's token.
       local image_sha
       read_pointer
@@ -997,8 +1004,25 @@ canary_command_allowed() {
     'query /1.0/projects?recursion=1' | 'query /1.0/profiles?recursion=1' | \
     'query /1.0/instances?recursion=1' | 'query /1.0/storage-pools?recursion=1' | \
     'query /1.0/networks?recursion=1' | 'query /1.0/instances/polyseat-canary-cpu/state') return 0 ;;
-    "query /1.0/instances/$DESKTOP_INSTANCE/state") [[ $CANARY_OPERATION -ne 1 ]] && return 0 ;;
+    "query /1.0/instances/$DESKTOP_INSTANCE/state" | "query /1.0/instances/$GPU_INSTANCE/state")
+      [[ $CANARY_OPERATION -ne 1 ]] && return 0 ;;
   esac
+  if [[ $CANARY_OPERATION -eq 3 ]]; then
+    case "$*" in
+      "storage create default dir source=$INCUS_DIR/storage-pools/default" | \
+      'profile device add default root disk path=/ pool=default' | \
+      "image import $SEAT_IMAGE --alias $DESKTOP_ALIAS" | \
+      "init $DESKTOP_ALIAS $GPU_INSTANCE --storage default --config boot.autostart=false --config security.privileged=false --config security.nesting=false --config limits.cpu=2 --config limits.memory=2GiB --config limits.processes=1024 --config nvidia.runtime=true --config nvidia.driver.capabilities=$GPU_CAPABILITIES" | \
+      "config device add $GPU_INSTANCE gpu gpu pci=$GPU_CANARY_PCI mode=0666" | \
+      "image delete $DESKTOP_ALIAS" | "start $GPU_INSTANCE" | \
+      "query /1.0/instances/$GPU_INSTANCE/state" | \
+      "exec $GPU_INSTANCE -- $DESKTOP_SELFTEST nvidia" | \
+      "exec $GPU_INSTANCE -- /usr/bin/head -c $DESKTOP_EVIDENCE_MAX_BYTES /var/lib/polyseat-selftest/screenshot.png" | \
+      "stop $GPU_INSTANCE --timeout 30" | "stop $GPU_INSTANCE --force --timeout 5" | \
+      "delete $GPU_INSTANCE") return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   if [[ $CANARY_OPERATION -eq 2 ]]; then
     case "$*" in
       "storage create default dir source=$INCUS_DIR/storage-pools/default" | \
@@ -1101,6 +1125,9 @@ canary_budget_select() { # cpu|desktop
       CANARY_CPU_MAX=$DESKTOP_CPU_MAX CANARY_MEMORY_MAX=$DESKTOP_MEMORY_MAX
       CANARY_PIDS_MAX=$DESKTOP_PIDS_MAX CANARY_DATA_MAX_KB=$DESKTOP_DATA_MAX_KB
       CANARY_INSTANCE=$DESKTOP_INSTANCE ;;
+    gpu)
+      canary_budget_select desktop
+      CANARY_INSTANCE=$GPU_INSTANCE CANARY_GPU_PCI=$GPU_CANARY_PCI ;;
     *) return 1 ;;
   esac
 }
@@ -1229,6 +1256,11 @@ canary_watchdog_loop() { # epoch deadline, monotonic deadline
       [[ $aborted -ne 0 ]] || printf 'expired\n' > "$CANARY_SESSION.reason"
       aborted=1
     fi
+    if [[ $aborted -eq 0 && -n ${CANARY_GPU_PCI:-} ]] && ! gpu_guard_quick "$CANARY_GPU_PCI"; then
+      log error "canary: GPU ownership changed (VM start, hand-over or driver change); releasing the GPU now"
+      printf 'gpu-ownership-changed\n' > "$CANARY_SESSION.reason"
+      aborted=1
+    fi
     if [[ $aborted -eq 0 ]] && { ! canary_cgroup_check || ! canary_budget_check || ! canary_host_pressure_check; }; then
       log error "canary: resource policy/budget changed; hard-stopping workload"
       printf 'resource-policy-or-budget\n' > "$CANARY_SESSION.reason"
@@ -1263,8 +1295,11 @@ canary_watchdog_start() {
     CANARY_WATCHDOG_MEMORY_MAX="$CANARY_WATCHDOG_MEMORY_MAX" \
     CANARY_DATA_MAX_KB="$CANARY_DATA_MAX_KB" CANARY_LOG_MAX_BYTES="$CANARY_LOG_MAX_BYTES" \
     CANARY_HOST_MIN_AVAILABLE_KB="$CANARY_HOST_MIN_AVAILABLE_KB" CANARY_HOST_MAX_LOAD="$CANARY_HOST_MAX_LOAD" \
+    CANARY_OPERATION="$CANARY_OPERATION" DESKTOP_MEMORY_MAX="$DESKTOP_MEMORY_MAX" CANARY_GPU_PCI="$CANARY_GPU_PCI" \
+    GPU_TRANSITION_LOCKS="$GPU_TRANSITION_LOCKS" GPU_TRANSITION_MARKERS="$GPU_TRANSITION_MARKERS" \
     setsid bash -u -o pipefail -c "$(declare -f canary_watchdog_loop canary_process_starttime write_json_atomic sync_path \
-      canary_monotonic_seconds canary_cgroup_check canary_budget_check canary_host_pressure_check log sandbox)"$'\n''canary_watchdog_loop "$@"' \
+      canary_monotonic_seconds canary_cgroup_check canary_budget_check canary_host_pressure_check log sandbox \
+      gpu_guard_quick gpu_domain_active gpu_libvirt_owners gpu_lock_held host_path sys_root ci_real_system)"$'\n''canary_watchdog_loop "$@"' \
     canary-watchdog "$expiry" "$((mono + remaining))" \
     >/dev/null 2>&1 </dev/null 9>&- &
   pid=$!
@@ -1368,7 +1403,9 @@ canary_profile_guard() {
   jq -en --argjson server "$server" --argjson projects "$projects" --argjson profiles "$profiles" \
     --argjson instances "$instances" --argjson pools "$pools" --argjson networks "$networks" \
     --arg source "$INCUS_DIR/storage-pools/default" --arg inst "$CANARY_INSTANCE" \
-    --argjson desktop "$([[ $CANARY_INSTANCE == "$DESKTOP_INSTANCE" ]] && echo true || echo false)" '
+    --argjson desktop "$([[ $CANARY_INSTANCE == "$DESKTOP_INSTANCE" || $CANARY_INSTANCE == "$GPU_INSTANCE" ]] && echo true || echo false)" \
+    --argjson gpu "$([[ $CANARY_INSTANCE == "$GPU_INSTANCE" ]] && echo true || echo false)" \
+    --arg gpupci "$GPU_CANARY_PCI" --arg caps "$GPU_CAPABILITIES" '
     def object: if type == "object" and .type == "sync" and .status_code == 200
       then .metadata else . end | if type == "object" then . else error("unexpected API object") end;
     def records: if type == "array" then . elif .type == "sync" and .status_code == 200
@@ -1385,7 +1422,12 @@ canary_profile_guard() {
       (.key == "boot.autostart" or .key == "security.privileged" or .key == "security.nesting")
         and .value == "false" or
       $desktop and ((.key == "limits.cpu" and .value == "2") or (.key == "limits.memory" and .value == "2GiB") or
-        (.key == "limits.processes" and .value == "1024"))));
+        (.key == "limits.processes" and .value == "1024")) or
+      $gpu and ((.key == "nvidia.runtime" and .value == "true") or
+        (.key == "nvidia.driver.capabilities" and .value == $caps))));
+    def instance_devices: type == "object" and (to_entries | all(.[];
+      .key == "root" and .value == {type:"disk", path:"/", pool:"default"} or
+      $gpu and .key == "gpu" and .value == {type:"gpu", pci:$gpupci, mode:"0666"}));
     def project_cfg: type == "object" and (to_entries | all(.[];
       (.key as $k | ["features.images", "features.networks", "features.networks.zones",
         "features.profiles", "features.storage.buckets", "features.storage.volumes"] | index($k) != null)
@@ -1407,8 +1449,8 @@ canary_profile_guard() {
       (.profiles == ["default"]) and
       (.config // {} | safe_cfg) and
       (.expanded_config // {} | safe_cfg) and
-      (.devices // {} | root_only) and
-      (.expanded_devices // {} | root_only)))' >/dev/null || {
+      (.devices // {} | instance_devices) and
+      (.expanded_devices // {} | instance_devices)))' >/dev/null || {
     log error "canary: Incus policy violation (server, project, profile, instance, storage, network or device)"; return 1;
   }
 }
@@ -1520,6 +1562,7 @@ svc_start() {
     case "$CANARY_OPERATION" in
       1) canary_approval_for canary-smoke ;;
       2) canary_approval_for desktop-smoke ;;
+      3) canary_approval_for gpu-smoke ;;
       *) canary_approval_for start ;;
     esac
     canary_host_pressure_check || { log error "canary: host memory/load outside approved safety window"; return 1; }
@@ -1809,16 +1852,16 @@ seat_image_remove_exact() {
   rmdir -- "$SEAT_DIR" 2>/dev/null || true
 }
 
-desktop_selftest() { # phase : run the signed image's fixed self-test, keep its bounded JSON and screenshot
-  local phase=$1 out png
-  out=$(INCUS_CMD_TIMEOUT=150 run_incus exec "$DESKTOP_INSTANCE" -- "$DESKTOP_SELFTEST" desktop | head -c 262144) || true
-  printf '%s\n' "$out" > "$SEAT_EVIDENCE/selftest-$phase.json"
-  jq -e '.verdict == "PASS"' <<< "$out" >/dev/null 2>&1 || { log error "desktop self-test ($phase) did not pass"; return 1; }
-  png="$SEAT_EVIDENCE/screenshot-$phase.png"
-  INCUS_CMD_TIMEOUT=30 run_incus exec "$DESKTOP_INSTANCE" -- /usr/bin/head -c "$DESKTOP_EVIDENCE_MAX_BYTES" \
+desktop_selftest() { # phase [instance profile evidence-dir] : the signed image's fixed self-test, bounded JSON + PNG
+  local phase=$1 instance=${2:-$DESKTOP_INSTANCE} profile=${3:-desktop} dir=${4:-$SEAT_EVIDENCE} out png
+  out=$(INCUS_CMD_TIMEOUT=150 run_incus exec "$instance" -- "$DESKTOP_SELFTEST" "$profile" | head -c 262144) || true
+  printf '%s\n' "$out" > "$dir/selftest-$phase.json"
+  jq -e '.verdict == "PASS"' <<< "$out" >/dev/null 2>&1 || { log error "$profile self-test ($phase) did not pass"; return 1; }
+  png="$dir/screenshot-$phase.png"
+  INCUS_CMD_TIMEOUT=30 run_incus exec "$instance" -- /usr/bin/head -c "$DESKTOP_EVIDENCE_MAX_BYTES" \
     /var/lib/polyseat-selftest/screenshot.png | head -c "$DESKTOP_EVIDENCE_MAX_BYTES" > "$png" || return 1
   [[ $(head -c 8 -- "$png" | od -An -tx1 | tr -d ' \n') == 89504e470d0a1a0a ]] || { log error "screenshot is not a PNG"; return 1; }
-  log info "desktop self-test ($phase) PASS; screenshot $(sha256sum -- "$png" | awk '{print $1}')"
+  log info "$profile self-test ($phase) PASS; screenshot $(sha256sum -- "$png" | awk '{print $1}')"
 }
 
 cmd_desktop_smoke() (
@@ -1866,6 +1909,77 @@ cmd_desktop_smoke() (
   svc_stop full || exit $EX_HEALTH
   trap - EXIT
   printf 'PASS: CPU-only desktop canary (systemd, headless sway, screenshot, Sunshine software encoder); no NIC, no GPU, no persistence claim.\n'
+)
+
+gpu_release_check() { # : no process of this plugin's bounded tree still holds the test GPU
+  local minor held
+  minor=$(awk -F: '/^Device Minor/ { gsub(/[ \t]/, "", $2); print $2 }' \
+    "$(host_path "/proc/driver/nvidia/gpus/$GPU_CANARY_PCI/information")" 2>/dev/null)
+  held=$(gpu_holders /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-modeset ${minor:+"/dev/nvidia$minor"} |
+    awk -v cg="/${CANARY_CGROUP##*/}" 'index($3, cg) == 1')
+  [[ -z $held ]] || { log error "GPU still held by the test tree: $held"; return 1; }
+}
+
+cmd_gpu_smoke() (
+  local a
+  [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 0 ]] || die $EX_BLOCKED "gpu-smoke needs a canary build and takes no arguments"
+  require_approval gpu-smoke
+  require_no_journal
+  read_pointer
+  [[ -n $PTR_CURRENT && $(current_sha_from_link) == "$PTR_CURRENT" ]] || die $EX_BLOCKED "no active canary bundle"
+  { verify_bundle_files "$PTR_CURRENT" && verify_slot "$PTR_CURRENT"; } || die $EX_VERIFY "runtime bundle failed verification"
+  jq -e '.files | any(.[]; .path == "payload/share/lxc/hooks/nvidia" and .mode == 493)' \
+    "$(bundle_manifest "$PTR_CURRENT")" >/dev/null || die $EX_VERIFY "runtime bundle has no LXC nvidia hook"
+  seat_image_verify_staged || die $EX_VERIFY "staged seat image failed verification"
+  # The full read-only ownership decision immediately before anything starts. Never "fixed" automatically.
+  if ! gpu_preflight_run "$GPU_CANARY_PCI"; then
+    for a in "${GPU_RES[@]}"; do [[ ${a%%$'\t'*} == FAIL ]] && log error "gpu-preflight: ${a#*$'\t'}"; done
+    die $EX_BLOCKED "GPU is not available for a seat now; nothing was started"
+  fi
+  local dir="$RUN_DIR/gpu-evidence"
+  [[ ! -e $dir && ! -L $dir ]] || die $EX_BLOCKED "GPU evidence from an earlier run exists; collect it first"
+  (umask 077; mkdir -- "$dir") || die $EX_BLOCKED "cannot create evidence directory"
+  printf '%s\n' "${GPU_RES[@]}" > "$dir/gpu-preflight-before.txt"
+  canary_budget_select gpu
+  CANARY_OPERATION=3
+  trap 'rc=$?; if [[ $CANARY_RUN_OWNED -eq 1 ]]; then svc_stop full || rc=4; fi; exit "$rc"' EXIT
+  svc_start || exit $EX_HEALTH
+  canary_profile_guard || exit $EX_HEALTH
+  log info "gpu phase: storage"
+  run_incus storage create default dir "source=$INCUS_DIR/storage-pools/default" || exit $EX_HEALTH
+  run_incus profile device add default root disk path=/ pool=default || exit $EX_HEALTH
+  log info "gpu phase: import"
+  seat_image_verify_staged || exit $EX_VERIFY
+  INCUS_CMD_TIMEOUT=300 run_incus image import "$SEAT_IMAGE" --alias "$DESKTOP_ALIAS" || exit $EX_HEALTH
+  INCUS_CMD_TIMEOUT=300 run_incus init "$DESKTOP_ALIAS" "$GPU_INSTANCE" --storage default \
+    --config boot.autostart=false --config security.privileged=false --config security.nesting=false \
+    --config limits.cpu=2 --config limits.memory=2GiB --config limits.processes=1024 \
+    --config nvidia.runtime=true --config "nvidia.driver.capabilities=$GPU_CAPABILITIES" || exit $EX_HEALTH
+  run_incus config device add "$GPU_INSTANCE" gpu gpu "pci=$GPU_CANARY_PCI" mode=0666 || exit $EX_HEALTH
+  INCUS_CMD_TIMEOUT=60 run_incus image delete "$DESKTOP_ALIAS" || exit $EX_HEALTH
+  canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+  for phase in start restart; do
+    gpu_guard_quick "$GPU_CANARY_PCI" || { log error "GPU ownership changed before $phase"; exit $EX_BLOCKED; }
+    log info "gpu phase: $phase"
+    INCUS_CMD_TIMEOUT=90 run_incus start "$GPU_INSTANCE" || exit $EX_HEALTH
+    canary_instance_containment && canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+    desktop_selftest "$phase" "$GPU_INSTANCE" nvidia "$dir" || exit $EX_HEALTH
+    log info "gpu phase: stop"
+    INCUS_CMD_TIMEOUT=45 run_incus stop "$GPU_INSTANCE" --timeout 30 ||
+      INCUS_CMD_TIMEOUT=20 run_incus stop "$GPU_INSTANCE" --force --timeout 5 || exit $EX_HEALTH
+    gpu_release_check || exit $EX_HEALTH
+    log info "gpu phase: released"
+  done
+  log info "gpu phase: delete"
+  INCUS_CMD_TIMEOUT=120 run_incus delete "$GPU_INSTANCE" || exit $EX_HEALTH
+  canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+  log info "gpu phase: daemon-stop"
+  svc_stop full || exit $EX_HEALTH
+  trap - EXIT
+  gpu_preflight_run "$GPU_CANARY_PCI" || true
+  printf '%s\n' "${GPU_RES[@]}" > "$dir/gpu-preflight-after.txt"
+  grep -q $'^PASS\tholder\t' "$dir/gpu-preflight-after.txt" || { log error "GPU not idle after teardown"; exit $EX_HEALTH; }
+  printf 'PASS: GPU desktop canary (device access, nvidia.runtime, self-test nvidia twice, GPU released after each stop); no NIC, no VFIO, no persistence claim.\n'
 )
 
 # --------------------------------------------------------- transaction ----
@@ -2431,19 +2545,31 @@ gpu_holders() { # device paths... : "pid comm cgroup devices" for every process 
   done
 }
 
-cmd_gpu_preflight() { # [--pci ADDR] [--json] : read-only
-  local pci="" json=0 sys dev drv group member minor info node render="" card="" owners owner name xml
-  local f held vm_kb avail res=() a
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --pci) pci=${2:-}; shift 2 || die $EX_USAGE "--pci needs an address" ;;
-      --json) json=1; shift ;;
-      *) die $EX_USAGE "gpu-preflight [--pci 0000:01:00.0] [--json]" ;;
-    esac
+# Re-checked every second by the independent canary supervisor while a GPU test runs. Any change hands the GPU
+# back at once: the supervisor kills the whole bounded workload, which closes every NVIDIA file descriptor.
+gpu_guard_quick() { # pci : 0 while the GPU stays host-owned and no owning VM is starting/running
+  local pci=$1 sys dev member name xml f group=()
+  sys=$(sys_root) dev="$sys/bus/pci/devices/$pci"
+  [[ -L $dev/driver && $(basename -- "$(readlink -- "$dev/driver")") == nvidia ]] || return 1
+  for member in "$(readlink -f -- "$dev/iommu_group")"/devices/*; do
+    group+=("$(basename -- "$member")")
+    [[ -L $member/driver && $(basename -- "$(readlink -- "$member/driver")") == vfio-pci ]] && return 1
   done
-  [[ -n $pci ]] || pci=$(cfg_get GPU_PCI '')
-  [[ $pci =~ $GPU_PCI_RE ]] || die $EX_USAGE "gpu-preflight needs a PCI address like 0000:01:00.0 (got '${pci}')"
-  r() { res+=("$1"$'\t'"$2"$'\t'"$3"); }
+  while IFS=$'\t' read -r name xml; do
+    [[ -n $name ]] || continue
+    gpu_domain_active "$name" && return 1
+  done < <(gpu_libvirt_owners "${group[@]}")
+  for f in $GPU_TRANSITION_LOCKS; do gpu_lock_held "$(host_path "$f")" && return 1; done
+  for f in $GPU_TRANSITION_MARKERS; do [[ -e $(host_path "$f") ]] && return 1; done
+  return 0
+}
+
+GPU_RES=()
+gpu_preflight_run() { # pci : fills GPU_RES with "STATUS<TAB>id<TAB>detail"; returns 1 if any check failed
+  local pci=$1 sys dev drv group member minor info node render="" card="" owners name xml
+  local f held vm_kb avail a
+  GPU_RES=()
+  r() { GPU_RES+=("$1"$'\t'"$2"$'\t'"$3"); }
   sys=$(sys_root) dev="$sys/bus/pci/devices/$pci"
   if [[ -d $dev && ! -L $dev/class ]] && [[ $(< "$dev/class") == 0x03* && $(< "$dev/vendor") == 0x10de ]]; then
     r PASS pci "$pci is an NVIDIA display controller ($(< "$dev/device"))"
@@ -2539,14 +2665,28 @@ cmd_gpu_preflight() { # [--pci ADDR] [--json] : read-only
   avail=$(awk '/^MemAvailable:/ { print $2 }' "$(host_path /proc/meminfo)" 2>/dev/null)
   if [[ $avail =~ ^[0-9]+$ && $avail -ge $GPU_MIN_AVAILABLE_KB ]]; then r PASS memory "MemAvailable $((avail / 1024)) MiB"
   else r FAIL memory "MemAvailable ${avail:-?} kB below $((GPU_MIN_AVAILABLE_KB / 1024)) MiB"; fi
-  local failed=0
-  for a in "${res[@]}"; do [[ ${a%%$'\t'*} == FAIL ]] && failed=1; done
+  for a in "${GPU_RES[@]}"; do [[ ${a%%$'\t'*} == FAIL ]] && return 1; done
+  return 0
+}
+
+cmd_gpu_preflight() { # [--pci ADDR] [--json] : read-only
+  local pci="" json=0 failed=0 a f node info
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pci) pci=${2:-}; shift 2 || die $EX_USAGE "--pci needs an address" ;;
+      --json) json=1; shift ;;
+      *) die $EX_USAGE "gpu-preflight [--pci 0000:01:00.0] [--json]" ;;
+    esac
+  done
+  [[ -n $pci ]] || pci=$(cfg_get GPU_PCI '')
+  [[ $pci =~ $GPU_PCI_RE ]] || die $EX_USAGE "gpu-preflight needs a PCI address like 0000:01:00.0 (got '${pci}')"
+  gpu_preflight_run "$pci" || failed=1
   if [[ $json -eq 1 ]]; then
-    printf '%s\n' "${res[@]}" | jq -R -s --arg pci "$pci" --argjson ok "$((1 - failed))" '
+    printf '%s\n' "${GPU_RES[@]}" | jq -R -s --arg pci "$pci" --argjson ok "$((1 - failed))" '
       { schema: 1, pci: $pci, gpu_seat_allowed: ($ok == 1), read_only: true,
         checks: (split("\n") | map(select(length > 0) | split("\t") | {status: .[0], id: .[1], detail: .[2]})) }'
   else
-    for a in "${res[@]}"; do IFS=$'\t' read -r f node info <<< "$a"; printf '%s: [%s] %s\n' "$f" "$node" "$info"; done
+    for a in "${GPU_RES[@]}"; do IFS=$'\t' read -r f node info <<< "$a"; printf '%s: [%s] %s\n' "$f" "$node" "$info"; done
     if [[ $failed -eq 0 ]]; then echo "VERDICT: a seat MAY use $pci by device access (read-only check, nothing changed)"
     else echo "VERDICT: a seat must NOT use $pci now (read-only check, nothing changed)"; fi
   fi
@@ -2564,6 +2704,7 @@ usage: polyseatctl COMMAND [args]
  service:    start | stop | restart | boot
  canary:     canary-smoke --approve (fixed local image; one-shot CPU-only run)
              seat-image-stage IMAGE MANIFEST SIG --approve | desktop-smoke --approve (M1, NIC-less)
+             gpu-smoke --approve (M2: + host-owned GPU by device access; VM keeps priority)
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
 EOF
@@ -2593,7 +2734,7 @@ main() {
     metrics) cmd_metrics; return ;;
     logs) cmd_logs "${args[@]}"; return ;;
     config-get) cmd_config_get; return ;;
-    stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke | seat-image-stage | desktop-smoke) ;;
+    stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke | seat-image-stage | desktop-smoke | gpu-smoke) ;;
     *) usage ;;
   esac
   require_mutation_allowed "$cmd" "${args[@]}"
@@ -2620,6 +2761,7 @@ main() {
     canary-smoke) cmd_canary_smoke "${args[@]}" ;;
     seat-image-stage) cmd_seat_image_stage "${args[@]}" ;;
     desktop-smoke) cmd_desktop_smoke "${args[@]}" ;;
+    gpu-smoke) cmd_gpu_smoke "${args[@]}" ;;
     start)
       require_no_journal
       read_pointer

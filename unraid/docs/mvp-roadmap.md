@@ -31,8 +31,8 @@ Legend: ✅ implemented and proven on Tower · 🟢 implemented, proven on dispo
 | LXC `nvidia` hook in the bundle (`nvidia.runtime`) | 🟢 *(this change)* | copied verbatim from the pinned LXC tag; controller sets `INCUS_LXC_HOOK` |
 | Read-only GPU ownership guard (`gpu-preflight`) | ✅ read-only on Tower *(this change)* | 18 fixture tests; live read-only run 2026-10-31: allowed |
 | Seat image (Arch desktop, offline, pinned, signed) | 🟡 in progress | branch `wip/seat-image-desktop`; upstream builds seats online only |
-| CPU-only desktop (headless sway + Sunshine software encode) in a container | 🟡 in progress | CI smoke on disposable runner; never on Tower |
-| GPU seat (NVIDIA device access + NVENC) | 🔴 | guard + hook ready; needs desktop image + Tower GO |
+| CPU-only desktop (headless sway + Sunshine software encode) in a container | 🟡 in progress | `seat-image-stage` + `desktop-smoke` (M1) implemented and unit-tested; CI rehearsal script ready; image build in progress; never on Tower |
+| GPU seat (NVIDIA device access + NVENC) | 🟡 | `gpu-smoke` (M2) implemented with VM-priority supervisor + release proof; fixture-tested only; needs desktop image + Tower GO |
 | LAN streaming (Moonlight ↔ Sunshine) | 🔴 | network plan: [streaming-network.md](streaming-network.md); needs owner IP decision + GO |
 | Input (uinput/uhid broker) | 🔴 | upstream broker needs python3 + bpftrace on the host; **both absent on Tower** |
 | Two seats, shared library | 🔴 | upstream sharing needs reflink (btrfs/XFS); ZFS block cloning unverified |
