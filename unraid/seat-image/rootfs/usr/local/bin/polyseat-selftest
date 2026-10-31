@@ -361,14 +361,18 @@ if [ "$STEAM" = 1 ]; then
     fi
   done
 
-  # Vulkan (Proton/DXVK need it): the driver's manifest is pushed in by the controller, as upstream does.
+  # Vulkan (Proton/DXVK need it): the driver's manifest is pushed in by the controller, as upstream does. Without a
+  # window system (device enumeration only) and with the loader's own errors kept: Tower run 9 failed here with no
+  # detail. A failure still lets Steam run (its client does not need Vulkan) but fails the verdict.
   if [ "$PROFILE" = nvidia ]; then
     t=$(now)
-    ev_vulkan=$(as_x timeout 60 vulkaninfo --summary 2>&1 | grep -E 'apiVersion|deviceName|driverName|driverInfo' | head -n 8)
+    ev_vulkan=$(as_player env VK_LOADER_DEBUG=error,warn timeout 60 vulkaninfo --summary 2>&1 | head -n 60)
+    ev_vulkan="$ev_vulkan
+icd.d: $(find /usr/share/vulkan/icd.d -maxdepth 1 -printf '%f %m %u;' 2>&1)"
     if printf '%s\n' "$ev_vulkan" | grep -Eq 'deviceName *= *NVIDIA'; then
       check vulkan pass "$(printf '%s\n' "$ev_vulkan" | grep deviceName | head -n1 | sed 's/^[[:space:]]*//')" "$t"
     else
-      check vulkan fail "no NVIDIA Vulkan device: $(printf '%s' "$ev_vulkan" | tr '\n' '|' | cut -c1-200)" "$t"; exit 1
+      check vulkan fail "no NVIDIA Vulkan device: $(printf '%s' "$ev_vulkan" | grep -iE 'error|fail|warn|icd' | head -n 4 | tr '\n' '|' | cut -c1-300)" "$t"
     fi
   fi
 

@@ -28,8 +28,9 @@ way and proves that it runs on Tower's GPU, up to its sign-in window. Nobody sig
   - budget 4 CPUs on cores 24–27, **8 GiB**, 4096 pids;
   - before start: GPU preflight, br0 is a bridge, the MAC is free, the token has enough time left;
   - after stop: GPU released and the veth gone.
+- **Host-veth MAC** (after Tower run 9, owner decision): a pinned Incus patch gives the host end of the veth an `fe:` MAC, as libvirt's VM taps have, so br0 never adopts it. See [tower-run9-steam.md](tower-run9-steam.md).
 - **nft stub**: Incus 7.5.1 only knows nftables. Without `nft` (Tower) a bridged NIC's stop fails before it removes its veth. The rehearsal showed the veth left in the bridge.
-  - The canary daemon's private `deny-tools` now hold an `nft` that answers exactly `--terse --json -nn list ruleset` with an empty ruleset and refuses everything else.
+  - The canary daemon's private `deny-tools` (on the exec-capable `/var/lib/polyseat-lxc`, self-tested; `/run` is noexec) now hold an `nft` that answers exactly `--terse --json -nn list ruleset` with an empty ruleset and refuses everything else.
   - A real nft would load `nf_tables` and create a test table at daemon start.
 
 ## Budget, measured
