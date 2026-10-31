@@ -64,7 +64,10 @@ class HostVethMacPatch(unittest.TestCase):
 
     def test_build_applies_patches_first_and_records_them_in_the_proof(self):
         core = CORE.read_text()
-        body = core.split("core_build_incus() { # incus_src\n", 1)[1]
-        self.assertTrue(body.startswith("  core_apply_incus_patches \"$1\"\n"))
+        body = core.split("core_build_incus() { # incus_src\n", 1)[1].split("\n}\n", 1)[0]
+        # After the dependency preparation (it needs a clean tree and checks that only go.mod/go.sum changed;
+        # CI run 41233369434 refused the patched tree), before the compile.
+        self.assertLess(body.index("prepare-incus-deps.py"), body.index('core_apply_incus_patches "$1"'))
+        self.assertLess(body.index('core_apply_incus_patches "$1"'), body.index("make -C"))
         self.assertIn('cp "$src.polyseat-patches.txt" "$output/incus-source-patches.txt"', core)
         self.assertIn("incus-source-patches.txt", core.split("> SHA256SUMS", 1)[0].rsplit("sha256sum --", 1)[1])

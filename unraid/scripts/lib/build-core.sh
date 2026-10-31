@@ -268,10 +268,11 @@ core_apply_incus_patches() { # incus_src
 }
 
 core_build_incus() { # incus_src
-  core_apply_incus_patches "$1"
+  # Dependency preparation needs a clean checkout and verifies it changed only go.mod/go.sum; source patches follow.
   python3 "$CORE_REPO/unraid/scripts/prepare-incus-deps.py" --source "$1" \
     --pins "$CORE_REPO/unraid/build-pins.env" --plan "$CORE_REPO/unraid/dependency-overrides.json" \
     --report "$1.polyseat-dependency-overrides.json"
+  core_apply_incus_patches "$1"
   pkg-config --modversion raft cowsql lxc
   # No additional dependency mutation is permitted during compilation.
   GOFLAGS="${GOFLAGS:-} -mod=readonly" make -C "$1" -j"$CORE_JOBS"
