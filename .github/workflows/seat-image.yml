@@ -77,8 +77,8 @@ jobs:
         if: always()
         run: |
           mkdir -p desktop-smoke-out
-          cp seat-image-in/seat-image.json desktop-smoke-out/ 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" desktop-smoke-out
+          cp seat-image-in/seat-image.json desktop-smoke-out/ || true
           if [ -f desktop-smoke-out/measurements.json ]; then jq . desktop-smoke-out/measurements.json; fi
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
