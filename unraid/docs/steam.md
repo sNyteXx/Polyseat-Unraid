@@ -22,7 +22,8 @@ way and proves that it runs on Tower's GPU, up to its sign-in window. Nobody sig
   - Steam's bootstrap and self-update, a stable `steamwebhelper` with a Steam window, and a screenshot;
   - Steam fully stopped afterwards.
 - **Controller** `steam-smoke` (operation 4, its own approval action, bound to the seat image):
-  - the M2 GPU path plus `compat32`;
+  - the M2 GPU path plus `compat32` and `display`. In libnvidia-container 1.20.1, `display` only adds
+    `/dev/nvidia-modeset`, which NVIDIA's Vulkan presentation needs (Tower run 11). Upstream seats get `all`;
   - exactly one NIC: `nictype=bridged parent=br0 hwaddr=00:16:3e:50:53:01`, a veth in the host's existing br0 for the test only (owner decision 2026-10-31). No Incus-managed network, no firewall or routing change, no port forward; Sunshine's web UI is localhost-only and UPnP off;
   - the host's Vulkan manifest, validated strictly, pushed into the seat as upstream does;
   - budget 4 CPUs on cores 24–27, **8 GiB**, 4096 pids;

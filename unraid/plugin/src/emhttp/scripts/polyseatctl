@@ -67,7 +67,10 @@ GPU_CAPABILITIES="compute,utility,video,graphics"
 # a veth in the host's existing bridge br0 for the test's lifetime only: no Incus-managed network, no firewall or
 # routing change, no port forward. The fixed MAC keeps one stable DHCP lease on the LAN router. Data stays in RAM.
 STEAM_INSTANCE="polyseat-steam-gpu"
-STEAM_CAPABILITIES="compute,utility,video,graphics,compat32"
+# compat32: Steam's 32 bit client and games. display: in libnvidia-container 1.20.1 it only adds /dev/nvidia-modeset,
+# which NVIDIA's Vulkan presentation needs (Tower run 11: vkcube selected the RTX, then crashed in the swapchain on
+# Wayland and on Xwayland). Upstream seats get "all". The seat already has /dev/dri/card0 via the gpu device.
+STEAM_CAPABILITIES="compute,utility,video,graphics,compat32,display"
 STEAM_NIC_PARENT="br0"
 STEAM_HWADDR="00:16:3e:50:53:01"
 STEAM_CPU_MAX="400000 100000"  # four CPUs' worth (the cpuset stays 24-27)

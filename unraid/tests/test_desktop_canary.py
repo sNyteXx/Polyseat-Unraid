@@ -431,7 +431,7 @@ class SteamCanaryPolicyTests(unittest.TestCase):
     INIT = ("init polyseat-desktop polyseat-steam-gpu --storage default --config boot.autostart=false "
             "--config security.privileged=false --config security.nesting=false --config limits.cpu=4 "
             "--config limits.memory=8GiB --config limits.processes=4096 --config nvidia.runtime=true "
-            "--config nvidia.driver.capabilities=compute,utility,video,graphics,compat32")
+            "--config nvidia.driver.capabilities=compute,utility,video,graphics,compat32,display")
     NIC = "config device add polyseat-steam-gpu eth0 nic nictype=bridged parent=br0 hwaddr=00:16:3e:50:53:01 name=eth0"
     ETH0 = {"type": "nic", "nictype": "bridged", "parent": "br0", "hwaddr": "00:16:3e:50:53:01", "name": "eth0"}
 
@@ -454,7 +454,7 @@ class SteamCanaryPolicyTests(unittest.TestCase):
                         self.NIC + " security.mac_filtering=false",
                         self.NIC.replace("eth0 nic", "eth1 nic").replace("name=eth0", "name=eth1"),
                         "config device add polyseat-steam-gpu proxy proxy listen=tcp:0.0.0.0:47989 connect=tcp:127.0.0.1:47989",
-                        self.INIT.replace(",compat32", ""), self.INIT.replace("security.nesting=false", "security.nesting=true"),
+                        self.INIT.replace(",compat32", ""), self.INIT.replace(",display", ""), self.INIT.replace(",display", ",display,all"), self.INIT.replace("security.nesting=false", "security.nesting=true"),
                         "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest steam-cpu",
                         "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest nvidia",
                         "exec polyseat-steam-gpu -- /usr/bin/steam"):
@@ -466,7 +466,7 @@ class SteamCanaryPolicyTests(unittest.TestCase):
         inst["name"] = "polyseat-steam-gpu"
         for d in (inst["config"], inst["expanded_config"]):
             d.update({"limits.cpu": "4", "limits.memory": "8GiB", "limits.processes": "4096", "nvidia.runtime": "true",
-                      "nvidia.driver.capabilities": "compute,utility,video,graphics,compat32",
+                      "nvidia.driver.capabilities": "compute,utility,video,graphics,compat32,display",
                       "volatile.eth0.host_name": "veth1a2b3c4d"})
         gpu = {"type": "gpu", "pci": "0000:01:00.0", "mode": "0666"}
         for d in (inst["devices"], inst["expanded_devices"]):
