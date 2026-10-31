@@ -81,6 +81,19 @@ class ExecInventoryTests(unittest.TestCase):
         self.assertIn("/usr/lib/x86_64-linux-gnu/helper-only-on-ubuntu", data["tool-internal"])
         self.assertIn("zfs", data["missing-everywhere-but-on-tower"])
 
+    def test_lxc_hook_via_daemon_pid_exe_is_self_reexec_but_other_proc_exe_is_not(self):
+        self.happy_trace()
+        hook = (f'execve("/proc/1/exe", ["/proc/1/exe", "callhook", "{self.fixture}/var/lib/polyseat-unraid-canary/incus", '
+                '"default", "polyseat-canary-cpu", "start"], 0x7ffd /* 3 vars */) = 0')
+        self.record(104, hook)
+        result, data = self.run_inventory("--require-lifecycle")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(data["self-reexec"], 2)
+        self.record(103, 'execve("/proc/1/exe", ["/proc/1/exe", "-c", "id"], 0x7ffd /* 3 vars */) = 0')
+        result, data = self.run_inventory("--require-lifecycle")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(any("/proc/1/exe" in item for item in data["violations"]))
+
     def test_host_program_that_unraid_lacks_is_a_violation(self):
         self.happy_trace()
         self.record(103, self.ok("/usr/bin/unsquashfs"))

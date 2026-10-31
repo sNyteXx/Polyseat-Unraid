@@ -15,7 +15,9 @@ import re
 import sys
 from pathlib import Path
 
-EXEC = re.compile(r'^execve(?:at)?\((?:[^,"]+, )?"((?:[^"\\]|\\.)*)"')
+EXEC = re.compile(r'^execve(?:at)?\((?:[^,"]+, )?"((?:[^"\\]|\\.)*)", \[(?:"(?:[^"\\]|\\.)*")?(?:, "((?:[^"\\]|\\.)*)")?')
+# incusd re-executes itself for these internal subcommands; liblxc calls hooks via /proc/<daemon pid>/exe.
+SELF_SUBCOMMAND = re.compile(r"^(callhook|fork[a-z]+)$")
 RESULT = re.compile(r"\)\s+=\s+(-?\d+)(?:\s+([A-Z][A-Z0-9_]*))?")
 CHILD = re.compile(r"^(?:clone3?|fork|vfork)\(.*\)\s+=\s+(\d+)\s*$")
 NAME = re.compile(r"^(\[|[A-Za-z0-9][A-Za-z0-9._+-]*)$")
@@ -35,7 +37,7 @@ def load_tools(path: Path) -> set[str]:
 
 def parse(trace_dir: Path, prefix: str):
     """Return {pid: [(path, ok, errno)]} and {child: parent} from per-process strace files."""
-    execs: dict[int, list[tuple[str, bool, str]]] = {}
+    execs: dict[int, list[tuple[str, bool, str, str]]] = {}
     parents: dict[int, int] = {}
     files = sorted(p for p in trace_dir.iterdir() if p.name.startswith(prefix + "."))
     if not files:
@@ -54,7 +56,8 @@ def parse(trace_dir: Path, prefix: str):
             if not result:
                 raise ValueError(f"unfinished exec record in {path.name}: {line[:120]}")
             program = bytes(match.group(1), "utf-8").decode("unicode_escape")
-            execs.setdefault(pid, []).append((program, result.group(1) == "0", result.group(2) or ""))
+            argv1 = match.group(2) or ""
+            execs.setdefault(pid, []).append((program, result.group(1) == "0", result.group(2) or "", argv1))
     return execs, parents
 
 
@@ -83,13 +86,13 @@ def classify(args) -> dict:
         name = program.rsplit("/", 1)[-1]
         if program.startswith(tower_path) or (program.startswith("/") and name in tools and not (
                 program.startswith(ram) or program.startswith(deny) or program in harness or program in image
-                or program == "/proc/self/exe")):
+                or program.startswith("/proc/"))):
             return name
         return None
 
     def own_tool(pid: int) -> bool:
         return any(ok and (name := host_tool(program)) is not None and name not in WRAPPERS
-                   for program, ok, _ in execs.get(pid, []))
+                   for program, ok, _, _ in execs.get(pid, []))
 
     memo: dict[int, bool] = {}
 
@@ -106,7 +109,7 @@ def classify(args) -> dict:
     strict_failures: list[tuple[int, str, str]] = []
     for pid in sorted(execs):
         internal = inherited_tool(pid)
-        for program, ok, errno in execs[pid]:
+        for program, ok, errno, argv1 in execs[pid]:
             name = program.rsplit("/", 1)[-1]
             if not ok:
                 if not internal:
@@ -121,7 +124,8 @@ def classify(args) -> dict:
                 continue
             if program.startswith(ram):
                 report["bundle"].add(program[len(fixture):])
-            elif program == "/proc/self/exe":
+            elif program == "/proc/self/exe" or (re.fullmatch(r"/proc/[0-9]+/exe", program)
+                                                 and SELF_SUBCOMMAND.fullmatch(argv1)):
                 report["self-reexec"] += 1
             elif program.startswith(deny):
                 report["denied"].add(name)
