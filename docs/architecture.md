@@ -1133,6 +1133,15 @@ because a seat where the player picked Proton Experimental on purpose is not a
 seat with a broken setting. What does get rewritten is a setting naming one of
 our own builds under an older, versioned name.
 
+The same pass keeps Steam's screensaver off running games. Steam counts input, a
+cutscene has none, and after five minutes of one the screensaver came up over
+the game. The switch is `Customization/Screensaver/WhileInGame` in that same
+file, per installation and on until somebody turns it off, so a seat nobody has
+signed in to yet can be given it too: Steam reads it from a file holding nothing
+else and keeps it when it writes the file out. This one is not somebody else's
+choice to keep, so a seat where it was turned on gets it turned off again. The
+idle screensaver over Steam's own menus is a different setting and stays.
+
 That versioned name is the reason the tool's own manifest is rewritten too.
 Upstream names it after the version and the instruction set, so every update
 introduces a tool with a new identity and every setting that named the old one
