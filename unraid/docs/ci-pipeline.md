@@ -82,4 +82,18 @@ Fail-closed (full rebuild, 731 s wall, green), but no saving. Fixed with one dir
 per-run key with prefix lookup above, and `WorkflowCacheTests` (mutation-checked: a differing save path or a
 missing `restore-keys` fails the suite).
 
-After the fix: see below.
+After the fix (all on the WIP branch, 2026-10-31):
+
+| Run | Change | Lane | Cache | Result |
+|---|---|---|---|---|
+| 41219296632 (`536a913`, push) | workflow (a runtime key input) | full | miss (new key) | wall 10:13; `build` 516 s (source build 169, GoBGP 13, CPU canary 107, E2E 180); sealed and saved as `…-cf386fec…-41219296632-1` |
+| 41219296734 (`536a913`, push) | same | fast | miss (full lane still running) | wall 2:22; `hook-l2` 5 s, skipped with a notice |
+| 41220919987 (`6d65e21`, push) | controller/hook only | fast | **hit, verified** | wall 2:29; `hook-l2` **31 s** incl. L2 19 s (real incusd/LXC, `--no-pivot` shim, real CLI 1.20.1); `shell-check` 145 s |
+| 41220919953 (`6d65e21`, dispatch) | controller/hook only | full | **hit, verified** | source build + GoBGP skipped; `build` failed after 142 s in the CPU canary: Azure VF hot-plug race (above), fixed in `4a9a43e` |
+| 41221824997 (`4a9a43e`, dispatch, **M2 candidate**) | CI scripts only | full | **hit, verified** (restore 3 s, verify incl. tamper refusal, drift and ABI recheck 3 s) | wall **7:13** (before 11:48); `build` **328 s** (before 629 s): CPU canary 102, E2E 169, scans 19; `desktop-canary` 100 s incl. L2 17 s; `seat-image` 227 s in parallel; kit qualified from it in 38 s and M2 PASS on Tower (run 8) |
+
+Summary:
+- A controller/hook change runs the fast lane (about 2.5 min, `hook-l2` 31 s on the verified cached runtime) instead of the 11–12 min full lane.
+- A candidate run with an unchanged runtime takes about 7 min instead of about 12 min: −40 % wall, −48 % `build`.
+- A runtime change still builds everything (about 10–12 min).
+- No security step was removed. Only the rebuild of byte-identical, verified input is skipped; every rehearsal, scan and CI artifact still runs per commit.

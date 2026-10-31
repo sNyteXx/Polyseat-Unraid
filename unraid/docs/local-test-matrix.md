@@ -27,6 +27,8 @@ Tower run 7 got through NVML, device listing and every driver mount. It then fai
 ldconfig step: `pivot_root` returns EINVAL on Unraid's initramfs root (`/` is rootfs). The CLI now runs with
 `--no-pivot` through the shim (see [tower-run7-gpu.md](tower-run7-gpu.md)). Neither UbuntuDev nor a GitHub runner
 has a rootfs root, and without a driver the real CLI stops before ldconfig, so that step remains Tower-only.
+Tower run 8 passed it with the shim. The whole M2 path then worked: ldconfig, the container start, `nvidia-smi`,
+sway on GLES2/GBM and Sunshine NVENC ([tower-run8-gpu.md](tower-run8-gpu.md)).
 
 The step after case D: the real CLI with a **real NVIDIA driver** — loading NVML (`libnvidia-ml`) and the driver RPC
 service against `/dev/nvidia*`, resolving the driver's userspace via Unraid's `/etc/ld.so.cache` (Unraid's NVIDIA
