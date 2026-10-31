@@ -17,11 +17,16 @@ L2 cases (all PASS on UbuntuDev; the same script runs in CI job `desktop-canary`
 | Case | Setup | Result |
 |---|---|---|
 | A | hook directory 0700 | `Script exited with status 126` → **Tower run 5 reproduced locally** |
-| B | stub CLI exits 0 | container starts; recorded context: `uid_map 0 1000000`, own user/mnt/pid/cgroup/net namespaces, `LXC_HOOK_VERSION=1`, `LXC_HOOK_TYPE=mount`, `LXC_LOG_LEVEL=WARN`, `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics`; CLI argv `--debug=/var/lib/polyseat-lxc/hook-log/nvidia-container-cli.log --user configure --no-cgroups --ldconfig=@<ldconfig> --compute --utility --video --graphics /var/lib/polyseat-lxc/rootfs` (+ `--device=<GPU UUID>` with a GPU device) |
+| B | stub CLI exits 0 | container starts; recorded context: `uid_map 0 1000000`, own user/mnt/pid/cgroup/net namespaces, `LXC_HOOK_VERSION=1`, `LXC_HOOK_TYPE=mount`, `LXC_LOG_LEVEL=WARN`, `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics`; CLI argv (through the shim) `--no-pivot --debug=/var/lib/polyseat-lxc/hook-log/nvidia-container-cli.log --user configure --no-cgroups --ldconfig=@<ldconfig> --compute --utility --video --graphics /var/lib/polyseat-lxc/rootfs` (+ `--device=<GPU UUID>` with a GPU device) |
 | C | stub CLI prints an error, exits 1 | LXC logs only `Script exited with status 1` (**exactly Tower run 6**); the wrapper log holds the CLI's text and status 1, still present after the instance is deleted |
 | D | **NVIDIA's real `nvidia-container-cli` 1.20.1** (Tower's version; `.deb` sha256-pinned from nvidia.github.io, extracted, never installed) | reached as container root ("using unprivileged user 0:0"), starts its driver RPC service, fails with `initialization error: load library failed: libnvidia-ml.so.1` (no driver here); the error is captured and its debug log opens at the writable path (1.20.1 `assert`s that it can) |
 
 ## What only Tower with the RTX can reproduce
+
+Tower run 7 got through NVML, device listing and every driver mount. It then failed in the CLI's
+ldconfig step: `pivot_root` returns EINVAL on Unraid's initramfs root (`/` is rootfs). The CLI now runs with
+`--no-pivot` through the shim (see [tower-run7-gpu.md](tower-run7-gpu.md)). Neither UbuntuDev nor a GitHub runner
+has a rootfs root, and without a driver the real CLI stops before ldconfig, so that step remains Tower-only.
 
 The step after case D: the real CLI with a **real NVIDIA driver** — loading NVML (`libnvidia-ml`) and the driver RPC
 service against `/dev/nvidia*`, resolving the driver's userspace via Unraid's `/etc/ld.so.cache` (Unraid's NVIDIA

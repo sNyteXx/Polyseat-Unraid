@@ -477,18 +477,21 @@ class LxcHookPathTests(unittest.TestCase):
         res = self.sb.ctl("start", "--approve")
         self.assertEqual(res.code, 0, res.text)
         hooks = self.sb.root / "var/lib/polyseat-lxc/hooks"
-        upstream, wrapper = hooks / "nvidia.upstream", hooks / "nvidia"
+        upstream, wrapper, shim = hooks / "nvidia.upstream", hooks / "nvidia", hooks / "cli/nvidia-container-cli"
         self.assertEqual(upstream.read_bytes(), self.HOOK)  # verbatim bundle hook
         self.assertEqual(wrapper.read_bytes(), (CTL.parent / "lxc-nvidia-hook").read_bytes())  # diagnostic wrapper
-        for f in (upstream, wrapper, hooks):
+        self.assertEqual(shim.read_bytes(), (CTL.parent / "lxc-nvidia-cli").read_bytes())  # --no-pivot (run 7)
+        for f in (upstream, wrapper, shim, hooks, shim.parent):
             self.assertEqual(oct(f.stat().st_mode & 0o777), "0o755", f)
         self.assertTrue((self.sb.root / "var/lib/polyseat-lxc/hook-log").is_dir())
         self.assertEqual(self.sb.ctl("stop", "--approve").code, 0)
         upstream.write_bytes(b"#!/bin/bash\necho tampered\n")  # a changed copy is replaced on the next start
         wrapper.write_bytes(b"#!/bin/bash\nexit 0\n")
+        shim.write_bytes(b"#!/bin/bash\nexit 0\n")
         self.assertEqual(self.sb.ctl("start", "--approve").code, 0)
         self.assertEqual(upstream.read_bytes(), self.HOOK)
         self.assertEqual(wrapper.read_bytes(), (CTL.parent / "lxc-nvidia-hook").read_bytes())
+        self.assertEqual(shim.read_bytes(), (CTL.parent / "lxc-nvidia-cli").read_bytes())
         log = self.sb.root / "var/lib/polyseat-lxc/hook-log"
         (log / "hook.out").write_text("x")  # wrapper output is removed exactly
         self.assertEqual(self.sb.ctl("uninstall", "--approve").code, 0)
@@ -500,4 +503,5 @@ class LxcHookPathTests(unittest.TestCase):
         text = CTL.read_text()
         self.assertEqual(text.count('INCUS_LXC_HOOK="$(lxc_mount_real "$LXC_HOOK_DIR")"'), 2)
         self.assertNotIn('INCUS_LXC_HOOK="$slot_real', text)
-        self.assertIn('setpriv --reuid="$uid" --regid="$uid" --clear-groups -- test -x "$dir/nvidia" -a -x "$dir/nvidia.upstream" -a -w "$logdir"', text)
+        self.assertIn('setpriv --reuid="$uid" --regid="$uid" --clear-groups -- test -x "$dir/nvidia" -a -x "$dir/nvidia.upstream" \\\n'
+                      '      -a -x "$dir/cli/nvidia-container-cli" -a -w "$logdir"', text)

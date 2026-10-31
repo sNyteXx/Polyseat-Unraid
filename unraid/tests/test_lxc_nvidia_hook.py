@@ -19,6 +19,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 WRAPPER = REPO / "unraid/plugin/src/emhttp/scripts/lxc-nvidia-hook"
+SHIM = REPO / "unraid/plugin/src/emhttp/scripts/lxc-nvidia-cli"
 UPSTREAM = REPO / "unraid/tests/fixtures/lxc-6.0.6-hooks-nvidia"
 PINS = dict(line.split("=", 1) for line in (REPO / "unraid/build-pins.env").read_text().splitlines()
             if line and not line.startswith("#"))
@@ -42,7 +43,9 @@ class Harness(unittest.TestCase):
         self.hooks.mkdir()
         shutil.copy(WRAPPER, self.hooks / "nvidia")
         shutil.copy(UPSTREAM, self.hooks / "nvidia.upstream")
-        for f in ("nvidia", "nvidia.upstream"):
+        (self.hooks / "cli").mkdir()
+        shutil.copy(SHIM, self.hooks / "cli/nvidia-container-cli")
+        for f in ("nvidia", "nvidia.upstream", "cli/nvidia-container-cli"):
             (self.hooks / f).chmod(0o755)
         self.log = d / "hook-log"
         self.log.mkdir(mode=0o700)
@@ -72,6 +75,10 @@ class Harness(unittest.TestCase):
         return subprocess.run(["/bin/sh", "-c", f'"{self.hooks / hook}" "$@"', "sh", *args], env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30)
 
+    def run_with_fake_upstream(self, body: str, **extra):
+        (self.hooks / "nvidia.upstream").write_text("#!/bin/bash\n" + body)
+        return self.run_hook(**extra)
+
 
 class UpstreamPinTests(unittest.TestCase):
     def test_fixture_is_the_pinned_upstream_hook(self):
@@ -79,10 +86,6 @@ class UpstreamPinTests(unittest.TestCase):
 
 
 class WrapperTests(Harness):
-    def run_with_fake_upstream(self, body: str, **extra):
-        (self.hooks / "nvidia.upstream").write_text("#!/bin/bash\n" + body)
-        return self.run_hook(**extra)
-
     def test_arguments_pass_through_with_a_writable_cli_debug_log(self):
         res = self.run_with_fake_upstream('printf "%s\\n" "$@" > "$STUB_DIR/upstream-argv"\n')
         self.assertEqual(res.returncode, 0, res.stdout)
@@ -108,7 +111,8 @@ class WrapperTests(Harness):
         self.assertIn("NVIDIA_VISIBLE_DEVICES=GPU-3cf9157a", text)
         self.assertIn("LXC_HOOK_TYPE=mount", text)
         self.assertIn("uid_map=", text)
-        self.assertIn(f"cli={self.bin}/nvidia-container-cli", text)
+        self.assertIn(f"cli={self.hooks}/cli/nvidia-container-cli", text)  # the shim, first on PATH
+        self.assertIn(f"POLYSEAT_NVC_REAL={self.bin}/nvidia-container-cli", text)
         self.assertNotIn("must-not-be-logged", text)
         self.assertNotIn("STUB_DIR", text)
 
@@ -126,6 +130,58 @@ class WrapperTests(Harness):
         res = self.run_with_fake_upstream("exit 4\n")
         self.assertEqual(res.returncode, 4)
         self.assertFalse((self.log / "status").exists())
+
+
+# The upstream hook's own CLI lookup and call (lines 33-34 and 258 of the pinned hook), with a typical argv.
+HOOK_LIKE_CALL = """export PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin
+command -v nvidia-container-cli >/dev/null || { echo "ERROR: Missing tool nvidia-container-cli" >&2; exit 1; }
+exec nvidia-container-cli --debug=/x/cli.log --user configure --no-cgroups --ldconfig=@/sbin/ldconfig /x/rootfs
+"""
+HOOK_ARGV = ["--debug=/x/cli.log", "--user", "configure", "--no-cgroups", "--ldconfig=@/sbin/ldconfig", "/x/rootfs"]
+
+
+class CliShimTests(Harness):
+    """Tower run 7: pivot_root fails on Unraid's initramfs root, so the CLI must run with --no-pivot."""
+
+    def argv(self):
+        return (self.stub / "argv").read_text().splitlines()
+
+    def test_hook_reaches_the_real_cli_with_no_pivot_first_and_its_status(self):
+        for rc in (0, 1):
+            with self.subTest(rc=rc):
+                res = self.run_with_fake_upstream(HOOK_LIKE_CALL, STUB_RC=str(rc))
+                self.assertEqual(res.returncode, rc, res.stdout)
+                self.assertEqual(self.argv(), ["--no-pivot", *HOOK_ARGV])
+                self.assertEqual((self.log / "status").read_text().strip(), str(rc))
+
+    def test_shim_also_applies_without_a_log_directory(self):
+        shutil.rmtree(self.log)
+        res = self.run_with_fake_upstream(HOOK_LIKE_CALL)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertEqual(self.argv(), ["--no-pivot", *HOOK_ARGV])
+
+    def test_without_the_shim_the_cli_call_is_unchanged(self):
+        shutil.rmtree(self.hooks / "cli")
+        self.assertEqual(self.run_with_fake_upstream(HOOK_LIKE_CALL).returncode, 0)
+        self.assertEqual(self.argv(), HOOK_ARGV)
+
+    def test_missing_cli_is_still_reported_by_the_hook(self):
+        res = self.run_with_fake_upstream(HOOK_LIKE_CALL, PATH="/usr/sbin:/usr/bin:/sbin:/bin")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("Missing tool nvidia-container-cli", (self.log / "hook.out").read_text())
+        self.assertNotIn("POLYSEAT_NVC_REAL", (self.log / "env.txt").read_text())
+
+    def test_shim_refuses_without_an_absolute_real_cli_or_pointing_at_itself(self):
+        shim = self.hooks / "cli/nvidia-container-cli"
+        for value in (None, "", "nvidia-container-cli", str(shim)):
+            with self.subTest(value=value):
+                env = {"PATH": "/usr/bin:/bin", "STUB_DIR": str(self.stub)}
+                if value is not None:
+                    env["POLYSEAT_NVC_REAL"] = value
+                res = subprocess.run([str(shim), "info"], env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(res.returncode, 1)
+                self.assertIn("polyseat: POLYSEAT_NVC_REAL", res.stderr)
+                self.assertFalse((self.stub / "argv").exists())
 
 
 class UpstreamHookPaths(Harness):

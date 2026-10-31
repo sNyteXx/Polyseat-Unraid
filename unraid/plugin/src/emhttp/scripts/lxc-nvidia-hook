@@ -7,13 +7,20 @@
 # and namespaces, the hook's complete stdout+stderr, its exit status, and nvidia-container-cli's own debug log.
 # The log directory is created by the controller, owned by the container root uid, mode 0700.
 #
-# It never changes the hook's arguments, environment or exit status. It only adds `--debug FILE`, which the
-# upstream hook accepts, so the CLI writes its log to a directory that uid can write (the hook's own default, the
-# instance directory, is root-only, and libnvidia-container 1.20.1 asserts that its debug log opens).
+# It never changes the hook's exit status. It adds `--debug FILE`, which the upstream hook accepts, so the CLI
+# writes its log to a directory that uid can write (the hook's own default, the instance directory, is root-only,
+# and libnvidia-container 1.20.1 asserts that its debug log opens). And it puts the shim in cli/ (lxc-nvidia-cli)
+# first on the hook's PATH, which runs the real CLI with --no-pivot: pivot_root fails on Unraid's initramfs root.
 set -u
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 log=${POLYSEAT_HOOK_LOG_DIR:-$(cd -- "$here/.." && pwd)/hook-log}
 cap=262144
+
+# Resolved like the upstream hook does (it appends the standard directories); without a CLI the hook reports it.
+if [ -x "$here/cli/nvidia-container-cli" ] &&
+   POLYSEAT_NVC_REAL=$(PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin command -v nvidia-container-cli); then
+  export POLYSEAT_NVC_REAL PATH="$here/cli:$PATH"
+fi
 
 if [ -d "$log" ] && [ -w "$log" ]; then
   {
@@ -22,7 +29,7 @@ if [ -d "$log" ] && [ -w "$log" ]; then
     printf 'uid_map=%s\n' "$(tr -s ' ' < /proc/self/uid_map 2>&1 | tr '\n' ';')"
     printf 'gid_map=%s\n' "$(tr -s ' ' < /proc/self/gid_map 2>&1 | tr '\n' ';')"
     for ns in user mnt pid cgroup net; do printf 'ns_%s=%s\n' "$ns" "$(readlink "/proc/self/ns/$ns" 2>&1)"; done
-    env | grep -E '^(LXC_[A-Z_]+|NVIDIA_[A-Z_]+|CUDA_VERSION|PATH)=' | sort
+    env | grep -E '^(LXC_[A-Z_]+|NVIDIA_[A-Z_]+|CUDA_VERSION|PATH|POLYSEAT_NVC_REAL)=' | sort
     printf 'cli=%s\n' "$(command -v nvidia-container-cli 2>&1 || echo MISSING)"
     printf 'rootfs=%s\n' "$(ls -ld -- "${LXC_ROOTFS_MOUNT:-/nonexistent}" 2>&1)"
   } 2>&1 | head -c 16384 > "$log/env.txt"

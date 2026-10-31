@@ -15,9 +15,9 @@ mkdir -p /var/lib/polyseat-lxc/rootfs
 manifest=/tmp/manifest.json
 jq -n --arg h "$(sha256sum "$slot/payload/share/lxc/hooks/nvidia" | cut -d' ' -f1)" \
   '{files:[{path:"payload/share/lxc/hooks/nvidia",mode:493,sha256:$h}]}' > "$manifest"
-# shellcheck disable=SC1090,SC2034  # the real controller functions; LXC_HOOK_WRAPPER is read by lxc_hook_prepare
+# shellcheck disable=SC1090,SC2034  # the real controller functions; both paths are read by lxc_hook_prepare
 ( source <(sed '$d' /in/emhttp/scripts/polyseatctl); init_paths; LXC_HOOK_WRAPPER=/in/emhttp/scripts/lxc-nvidia-hook
-  lxc_hook_prepare "$manifest" "$slot" ) || fail 'controller lxc_hook_prepare'
+  LXC_HOOK_CLI_SHIM=/in/emhttp/scripts/lxc-nvidia-cli; lxc_hook_prepare "$manifest" "$slot" ) || fail 'controller lxc_hook_prepare'
 pass "hooks prepared: $(stat -c '%a %U' /var/lib/polyseat-lxc/hooks/nvidia /var/lib/polyseat-lxc/hook-log | tr '\n' ' ')"
 
 # Stub nvidia-container-cli: behaviour from a root-owned, world-readable control file.
@@ -74,6 +74,9 @@ grep -q '^LXC_HOOK_TYPE=mount' /out/B-ok-env.txt && grep -q '^NVIDIA_DRIVER_CAPA
 for a in --user configure --no-cgroups --compute --utility --video --graphics /var/lib/polyseat-lxc/rootfs; do
   grep -qxF -- "$a" /out/B-ok-stub-argv || fail "B: argument $a missing"
 done
+# Tower run 7: pivot_root fails on Unraid's initramfs root; the shim must put --no-pivot first (a global option).
+[[ $(head -n1 /out/B-ok-stub-argv) == --no-pivot ]] && grep -q '^POLYSEAT_NVC_REAL=/stub/nvidia-container-cli$' /out/B-ok-env.txt &&
+  pass 'B: the CLI shim ran the real CLI with --no-pivot first' || fail 'B: --no-pivot via the CLI shim'
 grep -q -- '^--debug=/var/lib/polyseat-lxc/hook-log/nvidia-container-cli.log$' /out/B-ok-stub-argv &&
   grep -q -- '^--ldconfig=@' /out/B-ok-stub-argv && pass "B: CLI argv $(tr '\n' ' ' < /out/B-ok-stub-argv)" || fail 'B: debug/ldconfig args'
 grep -qx 0 /out/B-ok-status && pass 'B: status 0 recorded' || fail 'B: status'

@@ -1,0 +1,18 @@
+#!/bin/bash
+# Polyseat shim for nvidia-container-cli. The LXC hook wrapper (lxc-nvidia-hook) puts its directory first on PATH
+# for the verbatim upstream hook only; it is never on any other PATH.
+#
+# Unraid runs from its initramfs: the host root is the kernel's rootfs mount, and pivot_root(2) refuses that with
+# EINVAL. libnvidia-container pivots into the container rootfs before it runs ldconfig there, so on Tower (run 7)
+# the hook failed with "could not start /sbin/ldconfig: process confinement failed: invalid argument" after every
+# driver file and device had been mounted. --no-pivot makes it move the rootfs bind mount over / and chroot
+# instead (what Docker does on Unraid with DOCKER_RAMDISK). The ldconfig child stays confined: its own mount, PID
+# and IPC namespaces, empty capability bounding set, rlimits and seccomp. Nothing else is added or changed.
+set -u
+real=${POLYSEAT_NVC_REAL:-}
+case $real in
+  /*) ;;
+  *) echo "polyseat: POLYSEAT_NVC_REAL is not set by the hook wrapper" >&2; exit 1 ;;
+esac
+if [ "$real" -ef "$0" ]; then echo "polyseat: POLYSEAT_NVC_REAL points at this shim" >&2; exit 1; fi
+exec "$real" --no-pivot "$@"

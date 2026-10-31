@@ -862,11 +862,12 @@ ensure_lxc_rootfs_mount() { # manifest
 
 remove_lxc_rootfs_mount() {
   local f
-  for f in "hooks/nvidia" "hooks/nvidia.upstream" "hook-log/env.txt" "hook-log/hook.out" "hook-log/status" \
-           "hook-log/nvidia-container-cli.log"; do
+  for f in "hooks/nvidia" "hooks/nvidia.upstream" "hooks/cli/nvidia-container-cli" "hook-log/env.txt" \
+           "hook-log/hook.out" "hook-log/status" "hook-log/nvidia-container-cli.log"; do
     rm -f -- "$(lxc_mount_real "$LXC_STATE_PARENT/$f")"
   done
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hook-log")" 2>/dev/null || true
+  rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks/cli")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT")" 2>/dev/null || true
@@ -879,8 +880,10 @@ remove_lxc_rootfs_mount() {
 # on every start, and checked as that uid. /run would not do: it is mounted noexec on Unraid.
 LXC_HOOK_DIR="$LXC_STATE_PARENT/hooks"
 LXC_HOOK_LOG_DIR="$LXC_STATE_PARENT/hook-log"
-# Ships with the controller (signed package); see the file for why it exists. It execs nvidia.upstream.
+# Both ship with the controller (signed package); see the files for why they exist. The wrapper execs
+# nvidia.upstream; the shim (installed as cli/nvidia-container-cli) runs the real CLI with --no-pivot (Tower run 7).
 LXC_HOOK_WRAPPER="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/lxc-nvidia-hook"
+LXC_HOOK_CLI_SHIM="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/lxc-nvidia-cli"
 
 lxc_hook_install() { # source target sha|"" : copy only if the target differs, then verify
   local src=$1 dst=$2 want=$3
@@ -892,21 +895,26 @@ lxc_hook_install() { # source target sha|"" : copy only if the target differs, t
   [[ $(sha256sum -- "$dst" | awk '{print $1}') == "$want" ]]
 }
 
-lxc_hook_prepare() { # manifest slot : 0 = wrapper + verbatim hook in place, usable by the container root uid
-  local manifest=$1 slot=$2 want dir logdir uid
+lxc_hook_prepare() { # manifest slot : 0 = wrapper + verbatim hook + CLI shim in place, usable by the container root uid
+  local manifest=$1 slot=$2 want dir logdir uid f
   want=$(jq -r '.files[] | select(.path == "payload/share/lxc/hooks/nvidia" and .mode == 493) | .sha256' "$manifest")
-  [[ $want =~ $SHA_RE && -f $LXC_HOOK_WRAPPER && ! -L $LXC_HOOK_WRAPPER ]] || return 1
+  [[ $want =~ $SHA_RE && -f $LXC_HOOK_WRAPPER && ! -L $LXC_HOOK_WRAPPER && -f $LXC_HOOK_CLI_SHIM && ! -L $LXC_HOOK_CLI_SHIM ]] ||
+    return 1
   dir=$(lxc_mount_real "$LXC_HOOK_DIR") logdir=$(lxc_mount_real "$LXC_HOOK_LOG_DIR")
-  [[ ! -L $dir && ! -L $logdir ]] || { log error "refusing a symlinked LXC hook path"; return 1; }
-  (umask 022; mkdir -p -- "$dir") && chmod 0755 -- "$dir" || return 1
+  [[ ! -L $dir && ! -L $dir/cli && ! -L $logdir ]] || { log error "refusing a symlinked LXC hook path"; return 1; }
+  (umask 022; mkdir -p -- "$dir/cli") && chmod 0755 -- "$dir" "$dir/cli" || return 1
   lxc_hook_install "$slot/payload/share/lxc/hooks/nvidia" "$dir/nvidia.upstream" "$want" || return 1
   lxc_hook_install "$LXC_HOOK_WRAPPER" "$dir/nvidia" "" || return 1
+  lxc_hook_install "$LXC_HOOK_CLI_SHIM" "$dir/cli/nvidia-container-cli" "" || return 1
   uid=$(cfg_get SUBID_START 1000000)
   (umask 077; mkdir -p -- "$logdir") || return 1
   sandbox && ! ci_real_system && return 0
   chown "$uid:$uid" -- "$logdir" && chmod 0700 -- "$logdir" || return 1
-  [[ $(stat -c '%u %a' -- "$dir/nvidia") == "0 755" && $(stat -c '%u %a' -- "$dir/nvidia.upstream") == "0 755" ]] || return 1
-  setpriv --reuid="$uid" --regid="$uid" --clear-groups -- test -x "$dir/nvidia" -a -x "$dir/nvidia.upstream" -a -w "$logdir" || {
+  for f in "$dir/cli" "$dir/nvidia" "$dir/nvidia.upstream" "$dir/cli/nvidia-container-cli"; do
+    [[ $(stat -c '%u %a' -- "$f") == "0 755" ]] || return 1
+  done
+  setpriv --reuid="$uid" --regid="$uid" --clear-groups -- test -x "$dir/nvidia" -a -x "$dir/nvidia.upstream" \
+      -a -x "$dir/cli/nvidia-container-cli" -a -w "$logdir" || {
     log error "LXC nvidia hook or its log directory not usable by the container root uid $uid"; return 1; }
 }
 
