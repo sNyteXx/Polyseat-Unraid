@@ -1,0 +1,29 @@
+#!/bin/bash
+# Classify the network interfaces a seat sees in its own network namespace (read-only).
+#   netns-classify [SYSFS_NET_DIR]        (default /sys/class/net)
+# Prints: lo=<yes|no>  inert=<names>  unexpected=<names>; exit 0 only if lo exists and nothing is unexpected.
+#
+# Interfaces are the symlinks in /sys/class/net; plain files there (bonding_masters) come from host modules.
+# A new namespace also gets the kernel's per-namespace fallback tunnel devices whenever the matching module is
+# loaded on the host (Unraid loads ipip: tunl0, measured on Tower 2026-10-31). They connect to nothing; they
+# are accepted only while DOWN and without any address. Everything else (veth, macvlan, ipvlan, a physical NIC,
+# or a fallback device that is up or addressed) is unexpected.
+set -u
+net=${1:-/sys/class/net}
+lo=no inert='' unexpected=''
+for dev in "$net"/*; do
+  [ -L "$dev" ] || continue
+  name=${dev##*/}
+  if [ "$name" = lo ]; then lo=yes; continue; fi
+  case "$name" in
+    tunl0 | sit0 | ip6tnl0 | gre0 | gretap0 | erspan0 | ip_vti0 | ip6_vti0 | ip6gre0)
+      flags=$(cat "$dev/flags" 2>/dev/null || echo 0x1)
+      if [ $(( flags & 0x1 )) -eq 0 ] && [ -z "$(ip -o address show dev "$name" 2>/dev/null)" ]; then
+        inert="$inert $name"
+        continue
+      fi ;;
+  esac
+  unexpected="$unexpected $name"
+done
+printf 'lo=%s inert=%s unexpected=%s\n' "$lo" "${inert# }" "${unexpected# }"
+[ "$lo" = yes ] && [ -z "$unexpected" ]

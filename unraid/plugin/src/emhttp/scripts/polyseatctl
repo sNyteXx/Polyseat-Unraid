@@ -1726,12 +1726,17 @@ canary_instance_containment() {
         [[ $(< "/proc/$pid/cgroup") == "0::/${CANARY_CGROUP##*/}/daemon/"* ]] || return 1
         awk '$1 == 0 && $2 >= 100000 && $3 >= 65536 { ok=1 } END { exit !ok }' \
           "/proc/$pid/uid_map" || return 1
+        # Host-side proof of network isolation: the container init lives in a network namespace of its own,
+        # not the one this controller (and the daemon) run in.
+        [[ $(readlink "/proc/$pid/ns/net") =~ ^net:\[[0-9]+\]$ &&
+           $(readlink "/proc/$pid/ns/net") != "$(readlink /proc/self/ns/net)" ]] || {
+          log error "canary: container shares the host network namespace"; return 1; }
         found=$pid
       fi
     done < "$file"
   done < <(find "$CANARY_CGROUP/daemon" -xdev -type f -name cgroup.procs -print0)
   [[ -n $found ]] || { log error "canary: container init is not an unprivileged descendant of the bounded tree"; return 1; }
-  log info "canary instance host_pid=$found namespace_pid=$namespace_pid"
+  log info "canary instance host_pid=$found namespace_pid=$namespace_pid netns=$(readlink "/proc/$found/ns/net")"
 }
 
 cmd_canary_smoke() (
@@ -1861,6 +1866,17 @@ seat_image_remove_exact() {
   rmdir -- "$SEAT_DIR" 2>/dev/null || true
 }
 
+# Failure path only: while the bounded daemon is still healthy, remove the test instance (and a leftover image)
+# with the operation's own allow-listed commands, so a failed run leaves the small one-shot state instead of a
+# full container rootfs in RAM. Best effort and bounded; the hard stop that follows does not depend on it.
+canary_failure_cleanup() { # instance
+  svc_pid >/dev/null 2>&1 && canary_watchdog_check || return 0
+  log warn "canary: failure path, removing test instance $1 before the hard stop"
+  INCUS_CMD_TIMEOUT=20 run_incus stop "$1" --force --timeout 5 >/dev/null 2>&1 || true
+  INCUS_CMD_TIMEOUT=90 run_incus delete "$1" >/dev/null 2>&1 || true
+  INCUS_CMD_TIMEOUT=30 run_incus image delete "$DESKTOP_ALIAS" >/dev/null 2>&1 || true
+}
+
 desktop_selftest() { # phase [instance profile evidence-dir] : the signed image's fixed self-test, bounded JSON + PNG
   local phase=$1 instance=${2:-$DESKTOP_INSTANCE} profile=${3:-desktop} dir=${4:-$SEAT_EVIDENCE} out png
   out=$(INCUS_CMD_TIMEOUT=150 run_incus exec "$instance" -- "$DESKTOP_SELFTEST" "$profile" | head -c 262144) || true
@@ -1885,7 +1901,7 @@ cmd_desktop_smoke() (
   (umask 077; mkdir -- "$SEAT_EVIDENCE") || die $EX_BLOCKED "cannot create evidence directory"
   canary_budget_select desktop
   CANARY_OPERATION=2
-  trap 'rc=$?; if [[ $CANARY_RUN_OWNED -eq 1 ]]; then svc_stop full || rc=4; fi; exit "$rc"' EXIT
+  trap 'rc=$?; if [[ $CANARY_RUN_OWNED -eq 1 ]]; then canary_failure_cleanup "$DESKTOP_INSTANCE"; svc_stop full || rc=4; fi; exit "$rc"' EXIT
   svc_start || exit $EX_HEALTH
   canary_profile_guard || exit $EX_HEALTH
   log info "desktop phase: storage"
@@ -1951,7 +1967,7 @@ cmd_gpu_smoke() (
   printf '%s\n' "${GPU_RES[@]}" > "$dir/gpu-preflight-before.txt"
   canary_budget_select gpu
   CANARY_OPERATION=3
-  trap 'rc=$?; if [[ $CANARY_RUN_OWNED -eq 1 ]]; then svc_stop full || rc=4; fi; exit "$rc"' EXIT
+  trap 'rc=$?; if [[ $CANARY_RUN_OWNED -eq 1 ]]; then canary_failure_cleanup "$GPU_INSTANCE"; svc_stop full || rc=4; fi; exit "$rc"' EXIT
   svc_start || exit $EX_HEALTH
   canary_profile_guard || exit $EX_HEALTH
   log info "gpu phase: storage"

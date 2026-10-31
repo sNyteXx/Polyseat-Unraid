@@ -273,7 +273,7 @@ fi
 
 # --- 7. network: only the container's own netns -----------------------------------------------------------------------
 t=$(now)
-ev_ifaces=$(ls /sys/class/net)
+ev_ifaces=$(/usr/local/lib/polyseat/netns-classify); netns_ok=$?
 hexip() { # little-endian 8 hex digits -> dotted quad
   local h=$1
   printf '%d.%d.%d.%d' "$((16#${h:6:2}))" "$((16#${h:4:2}))" "$((16#${h:2:2}))" "$((16#${h:0:2}))"
@@ -298,10 +298,10 @@ while [ "$i" -lt 40 ]; do
   i=$((i + 1)); sleep 0.5
 done
 ev_listeners=$(printf '%s\n' "$ev_listeners" | sed '/^$/d')
-if [ "$ev_ifaces" = lo ] && printf '%s\n' "$ev_listeners" | grep -q '^tcp .*:47989$'; then
-  check netns-only pass "interfaces: lo only; $(printf '%s\n' "$ev_listeners" | wc -l) listening sockets, incl. tcp :47989" "$t"
+if [ "$netns_ok" = 0 ] && printf '%s\n' "$ev_listeners" | grep -q '^tcp .*:47989$'; then
+  check netns-only pass "interfaces: $ev_ifaces; $(printf '%s\n' "$ev_listeners" | wc -l) listening sockets, incl. tcp :47989" "$t"
 else
-  check netns-only fail "interfaces: $(printf '%s' "$ev_ifaces" | tr '\n' ' '); Sunshine tcp :47989 listening: $(printf '%s\n' "$ev_listeners" | grep -c ':47989$')" "$t"
+  check netns-only fail "interfaces: $ev_ifaces; Sunshine tcp :47989 listening: $(printf '%s\n' "$ev_listeners" | grep -c ':47989$')" "$t"
 fi
 
 # The EXIT trap stops both services, evaluates the stop and prints the verdict.

@@ -441,3 +441,21 @@ class SupervisorEnvironmentTests(unittest.TestCase):
                          "BASHPID", "PATH"}
         missing = sorted(used - passed - allowed_unset)
         self.assertEqual(missing, [], "globals read under bash -u but not passed to the supervisor")
+
+
+class FailurePathTests(unittest.TestCase):
+    """Tower run 4 failed after start and kept a 1.3 GB container rootfs in RAM: the failure trap must first
+    remove the test instance with allow-listed commands, then hard-stop."""
+
+    def test_both_runs_clean_their_instance_before_the_hard_stop(self):
+        text = CTL.read_text()
+        for function, instance in (("cmd_desktop_smoke", "DESKTOP_INSTANCE"), ("cmd_gpu_smoke", "GPU_INSTANCE")):
+            body = re.search(rf"^{function}\(\) \(\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
+            self.assertIn(f'canary_failure_cleanup "${instance}"; svc_stop full', body, function)
+
+    def test_cleanup_uses_only_commands_the_operation_allows(self):
+        for operation, instance in ((2, "polyseat-desktop-cpu"), (3, "polyseat-desktop-gpu")):
+            for command in (f"stop {instance} --force --timeout 5", f"delete {instance}", "image delete polyseat-desktop"):
+                with self.subTest(op=operation, command=command):
+                    self.assertTrue(DesktopAllowListTests.allowed(self, operation, command))
+

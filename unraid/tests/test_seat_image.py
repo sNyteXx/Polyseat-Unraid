@@ -311,3 +311,68 @@ class PackImage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NetnsClassify(unittest.TestCase):
+    """The seat's network-isolation check (Tower run 4 saw `bonding_masters lo tunl0` and failed the old check)."""
+    TOOL = OVERLAY / "usr/local/lib/polyseat/netns-classify"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.net = self.root / "net"
+        self.net.mkdir()
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.addresses = self.root / "addresses"
+        self.addresses.mkdir()
+        # Stub `ip -o address show dev NAME`: prints whatever the fixture says that device has.
+        (self.bin / "ip").write_text('#!/bin/sh\ncat "$ADDRS/$5" 2>/dev/null\n')
+        (self.bin / "ip").chmod(0o755)
+
+    def dev(self, name, flags="0x0", address=""):
+        target = self.root / "devices" / name
+        target.mkdir(parents=True)
+        (target / "flags").write_text(flags + "\n")
+        (self.net / name).symlink_to(target)
+        if address:
+            (self.addresses / name).write_text(address + "\n")
+
+    def run_tool(self):
+        env = {"PATH": f"{self.bin}:/usr/bin:/bin", "ADDRS": str(self.addresses)}
+        return subprocess.run(["bash", str(self.TOOL), str(self.net)], capture_output=True, text=True, env=env)
+
+    def test_tower_run4_view_is_isolated(self):
+        self.dev("lo", "0x9")
+        self.dev("tunl0", "0x80")  # ipip fallback device: down, no address
+        (self.net / "bonding_masters").write_text("\n")  # a file from the host's bonding module, not a device
+        res = self.run_tool()
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertEqual(res.stdout.strip(), "lo=yes inert=tunl0 unexpected=")
+
+    def test_lo_only_ci_view(self):
+        self.dev("lo", "0x9")
+        res = self.run_tool()
+        self.assertEqual((res.returncode, res.stdout.strip()), (0, "lo=yes inert= unexpected="))
+
+    def test_any_real_or_active_interface_fails(self):
+        cases = {"eth0": ("0x1003", ""), "veth1": ("0x0", ""), "tunl0-up": ("0x81", ""),
+                 "tunl0-addr": ("0x80", "5: tunl0 inet 10.0.0.1/32 scope global tunl0")}
+        for label, (flags, address) in cases.items():
+            with self.subTest(label=label):
+                for p in list(self.net.iterdir()):
+                    p.unlink()
+                for p in self.addresses.iterdir():
+                    p.unlink()
+                import shutil
+                shutil.rmtree(self.root / "devices", ignore_errors=True)
+                self.dev("lo", "0x9")
+                self.dev(label.split("-")[0], flags, address)
+                res = self.run_tool()
+                self.assertNotEqual(res.returncode, 0, res.stdout)
+                self.assertIn(label.split("-")[0], res.stdout.split("unexpected=")[1])
+
+    def test_missing_loopback_fails(self):
+        self.dev("tunl0", "0x80")
+        self.assertNotEqual(self.run_tool().returncode, 0)

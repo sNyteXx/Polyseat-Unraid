@@ -16,7 +16,7 @@ fail() { printf 'DESKTOP CANARY E2E BLOCKED/FAILED: %s\n' "$*" >&2; exit 2; }
 [[ ${SEAT_IMAGE_DIR:-} == "$GITHUB_WORKSPACE"/* && -d $SEAT_IMAGE_DIR && ! -L $SEAT_IMAGE_DIR ]] ||
   fail 'SEAT_IMAGE_DIR must be the downloaded seat image artifact inside the workspace'
 for tool in bash python3 jq git ssh-keygen sha256sum tar findmnt mount umount mountpoint \
-            ip ss iptables-save ip6tables-save nft pgrep stat readlink timeout; do
+            ip ss iptables-save ip6tables-save nft pgrep stat readlink timeout modprobe; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing CI prerequisite: $tool"
 done
 [[ $(stat -f -c %T /sys/fs/cgroup) == cgroup2fs ]] || fail 'unified cgroup v2 required'
@@ -129,6 +129,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' HUP TERM
 
+# Tower parity (run 4): Unraid has ipip and bonding loaded, so every new network namespace shows the inert
+# fallback device tunl0 and the bonding_masters file. Load both on this disposable runner BEFORE the baseline;
+# max_bonds=0 creates no bond device.
+modprobe ipip
+modprobe bonding max_bonds=0
 host_state before
 ssh-keygen -q -t ed25519 -N '' -f "$work/release-key"
 ssh-keygen -q -t ed25519 -N '' -f "$work/approval-key"

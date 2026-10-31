@@ -45,7 +45,7 @@ Legend: ✅ implemented and proven on Tower · 🟢 implemented, proven on dispo
 | Step | Proves | Where first | Tower write? |
 |---|---|---|---|
 | M0 | CPU-only BusyBox lifecycle | done (run 2) | done |
-| **M1** (run 3 failed closed at staging, see [tower-run3-desktop.md](tower-run3-desktop.md)) | Real Polyseat desktop (systemd, headless sway, grim screenshot, Sunshine software-encoder init) in one unprivileged, NIC-less container on the Unraid kernel; start/stop/restart/delete; host diff | disposable CI runner, then Tower | yes: RAM-only, GO needed |
+| **M1** (run 3 failed closed at staging, [tower-run3-desktop.md](tower-run3-desktop.md); run 4 desktop ran on Tower but failed an over-strict isolation check, [tower-run4-desktop.md](tower-run4-desktop.md)) | Real Polyseat desktop (systemd, headless sway, grim screenshot, Sunshine software-encoder init) in one unprivileged, NIC-less container on the Unraid kernel; start/stop/restart/delete; host diff | disposable CI runner, then Tower | yes: RAM-only, GO needed |
 | **M2** | Same container with the RTX 5070 Ti by **device access** (`gpu pci=0000:01:00.0` + `nvidia.runtime`): `nvidia-smi` inside, sway on NVIDIA GBM, Sunshine NVENC init, VRAM/encoder/power measured; GamingVM/Windows 11 guard + watchdog | Tower only (no GPU in CI) | yes: GO needed |
 | M3 | One LAN session to one Moonlight client (Shield): picture, audio, input, latency/encoder load | Tower | yes: network GO (static IP, ports) |
 | M4 | Persistent seat on a dedicated pool directory; `.plg` install/boot/uninstall in a maintenance window | Tower | yes: flash + pool GO |
@@ -55,3 +55,14 @@ Legend: ✅ implemented and proven on Tower · 🟢 implemented, proven on dispo
 Smallest meaningful desktop test = **M1**: it exercises the parts most likely to break on Unraid (systemd as
 container init under `cgroup2-unraid`, idmapped unpacking of a full Arch rootfs, user session/linger, wlroots,
 Sunshine's capture/encode probe) without touching any device, network or persistent storage.
+
+## Deferred: upstream Polyseat 0.45/0.46 (owner instruction 2026-10-31)
+
+Upstream `superuser404notfound/Polyseat` is at 0.46.0 (`ed4d27198881bec3d42f1f843098475a5f58454a`; tags v0.45.0
+`03c93cfb2998`, v0.46.0 `d47a9e48bd9f`); this branch carries upstream up to 0.44.0.
+0.45.0 adds desktop/emulator game shortcuts directly in Moonlight; 0.46.0 disables Steam's in-game screensaver so it
+does not cover cutscenes. **Integrate only after M1 and M2 have passed on Tower AND the first Moonlight stream works
+end-to-end**, as a separate, reviewable step (own WIP branch/commit), with conflict check, tests/CI and documented seat
+re-provisioning. Until then: no upstream merge, no main merge, no release, no Tower write for it. Newer upstream changes
+are assessed separately.
+
