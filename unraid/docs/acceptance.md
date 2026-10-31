@@ -15,6 +15,8 @@ only with recorded evidence from the relevant disposable test environment.
 | G | Shared library and per-seat storage on selected filesystem | TODO |
 | H | Backup, stage, upgrade, rollback and uninstall without data loss | Verified staging, journal, atomic switch, health-check rollback, recovery, manual rollback and exact-path uninstall pass in 170+ sandbox tests **and** the real-incusd end-to-end on Ubuntu (state and user-data comparison after uninstall). **Not run on Unraid**; power loss and vfat/ZFS flash behaviour **TODO** |
 | I | Steam/Proton/Once Human and anti-cheat | Unverified; no compatibility guarantee |
+| J2 | Production desktop canary (M1) on Tower | **PASS 2026-10-31 (run 5)**: real Polyseat desktop (systemd, headless sway, screenshot, Sunshine wlr + libx264) in one unprivileged, NIC-less container on the Unraid kernel; start/restart/delete; host state restored ([tower-run5-desktop-gpu.md](tower-run5-desktop-gpu.md)) |
+| J3 | Production GPU canary (M2) on Tower | run 5 failed closed before the container started (LXC hook unreachable from the user namespace); fixed, not yet re-run |
 | J | Production CPU-only canary on the owner's Tower | **No-Go**: preconditions P1–P9 in [production-canary-plan.md](production-canary-plan.md) open (signing, confinement, canary gate, profile policy, triage); no host change made |
 
 Order of the next live steps: [mvp-roadmap.md](mvp-roadmap.md).

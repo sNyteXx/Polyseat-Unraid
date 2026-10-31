@@ -459,3 +459,37 @@ class FailurePathTests(unittest.TestCase):
                 with self.subTest(op=operation, command=command):
                     self.assertTrue(DesktopAllowListTests.allowed(self, operation, command))
 
+
+
+class LxcHookPathTests(unittest.TestCase):
+    """Tower run 5 (M2): the nvidia mount hook runs as the container root inside its user namespace and could not
+    reach the 0700 slot ("Script exited with status 126"). It must live in a 0755 chain outside the slot."""
+    HOOK = b"#!/bin/bash\necho fixture-hook\n"
+
+    def setUp(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+
+    def test_hook_is_materialized_with_the_manifest_hash_and_removed_by_uninstall(self):
+        b = self.sb.make_bundle("7.5.1", extra={"share/lxc/hooks/nvidia": self.HOOK},
+                                executable=("share/lxc/hooks/nvidia",))
+        self.assertEqual(self.sb.install(b).code, 0)
+        res = self.sb.ctl("start", "--approve")
+        self.assertEqual(res.code, 0, res.text)
+        hook = self.sb.root / "var/lib/polyseat-lxc/hooks/nvidia"
+        self.assertEqual(hook.read_bytes(), self.HOOK)
+        self.assertEqual(oct(hook.stat().st_mode & 0o777), "0o755")
+        self.assertEqual(oct(hook.parent.stat().st_mode & 0o777), "0o755")
+        self.assertEqual(self.sb.ctl("stop", "--approve").code, 0)
+        hook.write_bytes(b"#!/bin/bash\necho tampered\n")  # a changed copy is replaced on the next start
+        self.assertEqual(self.sb.ctl("start", "--approve").code, 0)
+        self.assertEqual(hook.read_bytes(), self.HOOK)
+        self.assertEqual(self.sb.ctl("uninstall", "--approve").code, 0)
+        self.assertFalse(hook.exists())
+        self.assertFalse((self.sb.root / "var/lib/polyseat-lxc").exists())
+
+    def test_daemon_is_never_pointed_into_the_private_slot(self):
+        text = CTL.read_text()
+        self.assertEqual(text.count('INCUS_LXC_HOOK="$(lxc_mount_real "$LXC_HOOK_DIR")"'), 2)
+        self.assertNotIn('INCUS_LXC_HOOK="$slot_real', text)
+        self.assertIn('setpriv --reuid="$uid" --regid="$uid" --clear-groups -- test -x "$file"', text)

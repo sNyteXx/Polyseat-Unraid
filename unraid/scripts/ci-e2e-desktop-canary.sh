@@ -16,7 +16,7 @@ fail() { printf 'DESKTOP CANARY E2E BLOCKED/FAILED: %s\n' "$*" >&2; exit 2; }
 [[ ${SEAT_IMAGE_DIR:-} == "$GITHUB_WORKSPACE"/* && -d $SEAT_IMAGE_DIR && ! -L $SEAT_IMAGE_DIR ]] ||
   fail 'SEAT_IMAGE_DIR must be the downloaded seat image artifact inside the workspace'
 for tool in bash python3 jq git ssh-keygen sha256sum tar findmnt mount umount mountpoint \
-            ip ss iptables-save ip6tables-save nft pgrep stat readlink timeout modprobe; do
+            ip ss iptables-save ip6tables-save nft pgrep stat readlink timeout modprobe setpriv; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing CI prerequisite: $tool"
 done
 [[ $(stat -f -c %T /sys/fs/cgroup) == cgroup2fs ]] || fail 'unified cgroup v2 required'
@@ -252,6 +252,14 @@ for phase in start restart; do
 done
 [[ ! -e $workload && ! -e $watchdog ]] || fail 'desktop-smoke did not remove its own groups'
 step desktop-smoke
+# The GPU path's LXC hook must be reachable by the container root uid (Tower run 5 failed with exit 126 here).
+hook=/var/lib/polyseat-lxc/hooks/nvidia
+[[ -f $hook && ! -L $hook && $(stat -c '%u %a' "$hook") == '0 755' ]] || fail 'LXC nvidia hook was not materialized'
+setpriv --reuid=1000000 --regid=1000000 --clear-groups -- test -x "$hook" ||
+  fail 'LXC nvidia hook is not executable by the container root uid'
+! grep -q 'LXC nvidia hook unavailable' "$evidence/desktop-smoke.txt" || fail 'controller reported the hook unavailable'
+printf 'hook_sha256=%s\n' "$(sha256sum "$hook" | awk '{print $1}')" >> "$evidence/sampler-peak.txt"
+step lxc-hook-reachable
 
 ctl uninstall --approve
 cp -r -- "$fixture/var/run/polyseat-unraid/desktop-evidence" "$evidence/controller-evidence"

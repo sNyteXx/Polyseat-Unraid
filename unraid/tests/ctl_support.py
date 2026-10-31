@@ -160,7 +160,7 @@ class Sandbox:
 
     # -- bundles -----------------------------------------------------------
     def make_bundle(self, version: str, *, fail_start=False, fail_smoke=False,
-                    needed_libs=None, sign_key=None, extra=None, built_without=None) -> dict:
+                    needed_libs=None, sign_key=None, extra=None, built_without=None, executable=()) -> dict:
         payload = self.work / f"payload-{version}-{len(list(self.work.iterdir()))}"
         (payload / "bin").mkdir(parents=True)
         (payload / "lib").mkdir()
@@ -176,6 +176,8 @@ class Sandbox:
             target = payload / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
+            if name in executable:
+                target.chmod(0o755)
         out = self.work / f"out-{version}-{len(list(self.work.iterdir()))}"
         out.mkdir()
         archive, manifest = bundle.build(

@@ -71,6 +71,7 @@ CANARY_SIGN_NAMESPACE="polyseat-unraid-canary-approval-v1"
 EX_USAGE=1 EX_BLOCKED=2 EX_CORRUPT=3 EX_HEALTH=4 EX_VERIFY=5 EX_SPACE=6 EX_PENDING=7
 
 LOG_ENABLED=0
+LXC_HOOK_READY=0
 LOCK_HELD=0
 APPROVED=0
 CANARY_OPERATION=0
@@ -860,8 +861,36 @@ ensure_lxc_rootfs_mount() { # manifest
 }
 
 remove_lxc_rootfs_mount() {
+  rm -f -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks/nvidia")"
+  rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT")" 2>/dev/null || true
+}
+
+# The LXC nvidia mount hook runs as the container's root INSIDE its user namespace (host uid SUBID_START), so it
+# must be reachable without root's rights. The slots below /usr/local/polyseat-unraid are 0700 on purpose; Tower
+# run 5 (M2) failed with "Script exited with status 126" for exactly that reason. The hook is therefore copied
+# from the verified slot into a 0755 chain on the exec-capable RAM root, re-hashed against the signed manifest
+# on every start, and checked as that uid. /run would not do: it is mounted noexec on Unraid.
+LXC_HOOK_DIR="$LXC_STATE_PARENT/hooks"
+
+lxc_hook_prepare() { # manifest slot : 0 = hook in place and executable by the container root uid
+  local manifest=$1 slot=$2 want dir file uid
+  want=$(jq -r '.files[] | select(.path == "payload/share/lxc/hooks/nvidia" and .mode == 493) | .sha256' "$manifest")
+  [[ $want =~ $SHA_RE ]] || return 1
+  dir=$(lxc_mount_real "$LXC_HOOK_DIR") file=$dir/nvidia
+  [[ ! -L $dir && ! -L $file ]] || { log error "refusing a symlinked LXC hook path"; return 1; }
+  (umask 022; mkdir -p -- "$dir") || return 1
+  chmod 0755 -- "$dir" || return 1
+  if ! [[ -f $file && $(sha256sum -- "$file" | awk '{print $1}') == "$want" ]]; then
+    { install -m 0755 -- "$slot/payload/share/lxc/hooks/nvidia" "$file.new" && mv -f -- "$file.new" "$file"; } || return 1
+  fi
+  [[ $(sha256sum -- "$file" | awk '{print $1}') == "$want" ]] || return 1
+  sandbox && ! ci_real_system && return 0
+  [[ $(stat -c '%u %a' -- "$file") == "0 755" ]] || return 1
+  uid=$(cfg_get SUBID_START 1000000)
+  setpriv --reuid="$uid" --regid="$uid" --clear-groups -- test -x "$file" -a -r "$file" || {
+    log error "LXC nvidia hook not executable by the container root uid $uid"; return 1; }
 }
 
 # ---------------------------------------------------------- data dir ----
@@ -1497,7 +1526,7 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   # shellcheck disable=SC2016  # launcher body must expand in its new namespaces
   exec setsid env -i PATH="$RUN_DIR/deny-tools:$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
     INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
-    INCUS_LXC_HOOK="$slot_real/payload/share/lxc/hooks" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
+    INCUS_LXC_HOOK="$(lxc_mount_real "$LXC_HOOK_DIR")" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
     setpriv --bounding-set=-sys_module,-sys_rawio \
     unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private \
     bash -u -o pipefail -c '
@@ -1577,6 +1606,12 @@ svc_start() {
   # Stub-daemon sandboxes have no real incusd; real hosts and the real CI system always check, before any write.
   if ! sandbox || ci_real_system; then daemon_programs_check "$slot_real" || return 1; fi
   ensure_lxc_rootfs_mount "$(bundle_manifest "$active_sha")" || return 1
+  LXC_HOOK_READY=0
+  if jq -e '.files | any(.[]; .path == "payload/share/lxc/hooks/nvidia")' "$(bundle_manifest "$active_sha")" >/dev/null; then
+    if lxc_hook_prepare "$(bundle_manifest "$active_sha")" "$slot_real"; then LXC_HOOK_READY=1
+    else log warn "LXC nvidia hook unavailable: GPU seats cannot start"; fi
+  fi
+  [[ $CANARY_OPERATION -ne 3 || $LXC_HOOK_READY -eq 1 ]] || { log error "gpu: LXC nvidia hook not ready"; return 1; }
   validate_data_dir || return 1
   if svc_pid >/dev/null; then
     if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
@@ -1624,7 +1659,7 @@ svc_start() {
     # shellcheck disable=SC2016  # $$ and $@ must expand in the child shell
     exec setsid env -i PATH="$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
       INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
-      INCUS_LXC_HOOK="$slot_real/payload/share/lxc/hooks" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
+      INCUS_LXC_HOOK="$(lxc_mount_real "$LXC_HOOK_DIR")" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
       bash -c 'echo $$ > "$1"; shift; exec "$@"' polyseat-launch "$PIDFILE" \
       "$slot_real/payload/bin/incusd" --group "" --logfile "$LOG_DIR/incusd.log" \
       > "$LOG_DIR/incusd.out" 2>&1 < /dev/null 9>&-
