@@ -1,4 +1,5 @@
 """Offline canary image tests: no binary execution, daemon, network or host changes."""
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -37,10 +38,32 @@ class CanaryImageTests(unittest.TestCase):
         report = IMAGE.validate_image(first, binary_sha256=self.sha, version="1.36.1")
         self.assertEqual(report["binary_sha256"], self.sha)
         self.assertEqual(report["source_date_epoch"], 0)
+        self.assertEqual(report["image_creation_date"], 1)
         with tarfile.open(fileobj=io.BytesIO(first), mode="r:gz") as tar:
             self.assertFalse(any(m.isdev() or m.isfifo() for m in tar))
+            self.assertIn(b"\ncreation_date: 1\n", tar.extractfile("metadata.yaml").read())
+            self.assertTrue(all(member.mtime == 0 for member in tar.getmembers()))
             self.assertEqual(tar.extractfile("rootfs/sbin/init").read(), IMAGE.INIT)
             self.assertEqual(tar.getmember("rootfs/bin/sh").linkname, "busybox")
+
+    def test_incus_requires_a_fixed_positive_creation_date(self):
+        image = self.build()
+        for replacement in (b"", b"creation_date: 0\n", b"creation_date: -1\n",
+                            b"creation_date: null\n", b"creation_date: 2\n",
+                            b"creation_date: 1\ncreation_date: 1\n"):
+            with self.subTest(creation_date=replacement):
+                target = io.BytesIO()
+                with gzip.GzipFile(filename="", fileobj=target, mode="wb", mtime=0, compresslevel=9) as gz:
+                    with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as out:
+                        with tarfile.open(fileobj=io.BytesIO(image), mode="r:gz") as source:
+                            for member in source:
+                                content = source.extractfile(member).read() if member.isreg() else None
+                                if member.name == "metadata.yaml":
+                                    content = content.replace(b"creation_date: 1\n", replacement)
+                                    member.size = len(content)
+                                out.addfile(member, io.BytesIO(content) if content is not None else None)
+                with self.assertRaisesRegex(ValueError, "fixed positive creation_date"):
+                    IMAGE.validate_image(target.getvalue())
 
     def test_bad_hash_and_mismatching_version_block(self):
         for kw in ({"sha": "0" * 64}, {"version": "1.37.0"}, {"version": "x"}):

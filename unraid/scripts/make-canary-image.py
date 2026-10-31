@@ -24,6 +24,9 @@ from urllib.parse import urlparse
 
 INIT = b"#!/bin/busybox sh\nexec /bin/busybox init\n"
 INITTAB = b"::sysinit:/bin/busybox true\n::respawn:/bin/busybox sleep 3600\n"
+# Incus treats creation_date == 0 as missing. Keep a fixed, positive Unix second
+# for image metadata; tar and gzip timestamps remain normalized to zero.
+IMAGE_CREATION_DATE = 1
 DIRECTORIES = ("rootfs", "rootfs/bin", "rootfs/dev", "rootfs/etc", "rootfs/proc",
                "rootfs/root", "rootfs/sbin", "rootfs/sys", "rootfs/tmp")
 LINKS = {"rootfs/bin/sh": "busybox"}
@@ -65,7 +68,7 @@ def static_busybox(data: bytes, expected_hash: str, version: str) -> None:
 
 def build_image(binary: bytes, *, binary_sha256: str, version: str) -> bytes:
     static_busybox(binary, binary_sha256, version)
-    metadata = ("architecture: x86_64\ncreation_date: 0\nproperties:\n"
+    metadata = (f"architecture: x86_64\ncreation_date: {IMAGE_CREATION_DATE}\nproperties:\n"
                 "  os: BusyBox\n  description: Polyseat CPU-only canary (no network or devices)\n"
                 f"  release: '{version}'\n").encode("ascii")
     files = {**FIXED_FILES, "metadata.yaml": (metadata, 0o644),
@@ -135,6 +138,8 @@ def validate_image(image: bytes, *, binary_sha256: str | None = None,
                     raise ValueError("unexpected image file mode")
                 if name in FIXED_FILES and blobs[name] != FIXED_FILES[name][0]:
                     raise ValueError("canary init differs from the fixed no-network program")
+    if blobs["metadata.yaml"].splitlines().count(f"creation_date: {IMAGE_CREATION_DATE}".encode("ascii")) != 1:
+        raise ValueError("canary image requires the fixed positive creation_date")
     binary = blobs["rootfs/bin/busybox"]
     actual_sha = hashlib.sha256(binary).hexdigest()
     banners = set(re.findall(rb"BusyBox v([0-9]+\.[0-9]+\.[0-9]+)(?:[ (\x00])", binary))
@@ -148,6 +153,7 @@ def validate_image(image: bytes, *, binary_sha256: str | None = None,
         raise ValueError("image is not the canonical disk-only canary image")
     return {"image_sha256": hashlib.sha256(image).hexdigest(), "binary_sha256": actual_sha,
             "busybox_version": actual_version, "source_date_epoch": 0,
+            "image_creation_date": IMAGE_CREATION_DATE,
             "files": sorted(expected_names)}
 
 
