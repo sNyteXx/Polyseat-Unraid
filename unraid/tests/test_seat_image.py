@@ -230,8 +230,10 @@ class Selftest(unittest.TestCase):
         self.assertIn("steam) PROFILE=nvidia STEAM=1 ;;", text)
         self.assertIn("steam-cpu) PROFILE=cpu STEAM=1 ;;", text)
         self.assertIn("STEAM_WAIT=900", text)
+        self.assertNotIn("vulkaninfo", text.split("# --- 6c. Steam:")[0].split("vulkaninfo cannot be used here")[1])  # Tower run 10
         for needle in ("glxinfo -B", "glxinfo32 -B", "/usr/lib32/libGLX_nvidia.so.0", "client-update.steamstatic.com",
-                       "steamwebhelper", "steam -shutdown", "NETNS_ALLOW=$netns_allow"):
+                       "steamwebhelper", "steam -shutdown", "NETNS_ALLOW=$netns_allow",
+                       "vkcube --wsi \"$wsi\" --c 120 --suppress_popups"):
             self.assertIn(needle, text)
         lan = text.index('# --- 1b. LAN (steam*)')
         self.assertIn('if [ "$STEAM" = 1 ]; then', text[lan:lan + 200])
