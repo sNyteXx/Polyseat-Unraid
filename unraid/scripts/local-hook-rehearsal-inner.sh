@@ -51,8 +51,14 @@ log=/var/lib/polyseat-lxc/hook-log
 attempt() { # label rc msg -> start exit code
   printf '%s\n' "$2" > /stubctl/rc; printf '%s\n' "$3" > /stubctl/msg
   rm -f "$log"/{env.txt,hook.out,status,stub-argv,stub-id}
-  # A failed start can leave Incus believing the instance runs (its aborted LXC monitor); reset first.
+  # A failed start can leave Incus believing the instance runs (its aborted LXC monitor); reset first and wait
+  # until Incus reports it stopped (CI run 41238762803: case B hit "The instance is already running").
   inc stop c1 --force >/dev/null 2>&1 || true
+  local _
+  for _ in $(seq 30); do
+    [[ $(inc query /1.0/instances/c1/state 2>/dev/null | jq -r .status) == Stopped ]] && break
+    inc stop c1 --force >/dev/null 2>&1 || true; sleep 1
+  done
   local rc=0; inc start c1 > "/out/start-$1.txt" 2>&1 || rc=$?
   cp "$INCUS_DIR/logs/c1/lxc.log" "/out/lxc-$1.log" 2>/dev/null || true
   for f in env.txt hook.out status stub-argv stub-id; do cp "$log/$f" "/out/$1-$f" 2>/dev/null || true; done
