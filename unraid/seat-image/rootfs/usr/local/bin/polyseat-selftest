@@ -1,23 +1,30 @@
 #!/bin/bash
 # shellcheck disable=SC2329  # finish() and its helpers run from the EXIT trap
-# polyseat-selftest desktop|nvidia
+# polyseat-selftest desktop|nvidia|steam|steam-cpu
 #
 # One fixed program, run as root INSIDE the seat (incus exec <ct> -- /usr/local/bin/polyseat-selftest desktop), so that
 # CI and the Unraid canary execute byte-identical checks. It starts the headless sway session and Sunshine as the player,
 # looks at what they produced, then stops both again so the container can be stopped cleanly.
 #
 # stdout: exactly ONE JSON object (also written to /var/lib/polyseat-selftest/result.json). stderr: progress.
-# Exit 0 only on verdict PASS. No network, no package manager; writes only /var/lib/polyseat-selftest, the player's
-# home (the Sunshine log, and polyseat-profile's files for `nvidia`) and the player's /run/user.
+# Exit 0 only on verdict PASS. No package manager; writes only /var/lib/polyseat-selftest, the player's home (the
+# Sunshine log, polyseat-profile's files for the GPU profile, and Steam's own files for steam*) and /run/user.
+# desktop and nvidia use no network at all. steam and steam-cpu (a seat that was given eth0 on the LAN) bring the
+# interface up by DHCP, check 64 and 32 bit GL on the seat's display, let Steam bootstrap and update itself and wait
+# for its sign-in window. Nobody signs in. steam-cpu is the rehearsal variant without a GPU.
 set -u
 
 SELFTEST_SCHEMA=1
 MODE=${1:-}
 case "$MODE" in
-  desktop) PROFILE=cpu ;;
-  nvidia) PROFILE=nvidia ;;
-  *) echo 'usage: polyseat-selftest desktop|nvidia' >&2; exit 2 ;;
+  desktop) PROFILE=cpu STEAM=0 ;;
+  nvidia) PROFILE=nvidia STEAM=0 ;;
+  steam) PROFILE=nvidia STEAM=1 ;;
+  steam-cpu) PROFILE=cpu STEAM=1 ;;
+  *) echo 'usage: polyseat-selftest desktop|nvidia|steam|steam-cpu' >&2; exit 2 ;;
 esac
+STEAM_WAIT=900
+STEAM_UNIT=polyseat-steam-selftest.service
 
 PLAYER=player
 PUID=1000
@@ -39,8 +46,11 @@ CHECKS=$STATE/checks.jsonl
 ev_system_state=''; ev_failed_units=''; ev_outputs=''; ev_shot_sha=''; ev_shot_w=0; ev_shot_h=0; ev_colours=0
 ev_encoder_lines=''; ev_capture_lines=''; ev_sunshine_errors=''; ev_ifaces=''; ev_listeners=''; ev_nvidia=''
 ev_left_procs=''
+ev_lan=''; ev_vulkan=''; ev_glx64=''; ev_glx32=''; ev_steam_windows=''; ev_steam_log=''; ev_steam_gl=''; ev_steam_elf=''; ev_lib32=''
 profile_switched=0
 sway_started=0
+steam_started=0
+XDISP=''
 
 now() { date +%s%3N; }
 log() { printf '[selftest %s] %s\n' "$(( $(now) - T0 ))ms" "$*" >&2; }
@@ -87,8 +97,28 @@ stop_session() {
   return 1
 }
 
+steam_pids() { pgrep -u "$PUID" -f 'steamwebhelper|/ubuntu12_(32|64)/|/Steam/steam\.sh|^/usr/bin/steam|^/bin/sh /usr/bin/steam'; }
+
+stop_steam() {
+  local i=0
+  as_player env DISPLAY="$XDISP" timeout 30 steam -shutdown >/dev/null 2>&1
+  while [ "$i" -lt 40 ] && [ -n "$(steam_pids)" ]; do i=$((i + 1)); sleep 0.5; done
+  uctl stop "$STEAM_UNIT" >/dev/null 2>&1
+  i=0
+  while [ "$i" -lt 30 ] && [ -n "$(steam_pids)" ]; do i=$((i + 1)); sleep 0.5; done
+  ev_left_procs="$ev_left_procs$(steam_pids | xargs -r ps -o pid=,comm= -p 2>/dev/null | tr '\n' ';')"
+  [ -z "$(steam_pids)" ]
+}
+
 finish() { # emits the JSON and exits; called once
   trap - EXIT
+  if [ "$steam_started" = 1 ]; then
+    t=$(now)
+    ev_steam_log=$( { tail -n 25 "$HOME_DIR/.local/share/Steam/logs/bootstrap_log.txt" 2>/dev/null
+      journalctl --no-pager -q -o cat -n 40 "_SYSTEMD_USER_UNIT=$STEAM_UNIT" 2>/dev/null; } | cut -c1-300)
+    if stop_steam; then check steam-stop pass 'every Steam process is gone' "$t"
+    else check steam-stop fail "still running: $ev_left_procs" "$t"; fi
+  fi
   if [ "$sway_started" = 1 ]; then
     t=$(now)
     if stop_session; then check stop-session pass 'sunshine, sway and their children are gone' "$t"
@@ -110,6 +140,8 @@ finish() { # emits the JSON and exits; called once
     --argjson colours "$ev_colours" --arg encoder "$ev_encoder_lines" --arg capture "$ev_capture_lines" \
     --arg serrors "$ev_sunshine_errors" --arg ifaces "$ev_ifaces" --arg listeners "$ev_listeners" \
     --arg nvidia "$ev_nvidia" --arg left "$ev_left_procs" \
+    --arg lan "$ev_lan" --arg glx64 "$ev_glx64" --arg glx32 "$ev_glx32" --arg lib32 "$ev_lib32" --arg vk "$ev_vulkan" \
+    --arg swin "$ev_steam_windows" --arg slog "$ev_steam_log" --arg sgl "$ev_steam_gl" --arg self "$ev_steam_elf" \
     "{schema: \$schema, mode: \$mode, profile: \$profile, verdict: \$verdict, reason: \$reason, total_ms: \$total_ms,
       checks: \$checks,
       evidence: {
@@ -119,6 +151,10 @@ finish() { # emits the JSON and exits; called once
         sunshine: {encoder_lines: (\$encoder | $lines), capture_lines: (\$capture | $lines), error_lines: (\$serrors | $lines)},
         network: {interfaces: (\$ifaces | $lines), listeners: (\$listeners | $lines)},
         nvidia_smi: (\$nvidia | $lines),
+        lan: (\$lan | $lines),
+        gl: {glx64: (\$glx64 | $lines), glx32: (\$glx32 | $lines), nvidia_lib32: (\$lib32 | $lines), vulkan: (\$vk | $lines)},
+        steam: {windows: (\$swin | $lines), log_tail: (\$slog | $lines), nvidia_gl_mapped: (\$sgl | $lines),
+          processes_elf: (\$self | $lines)},
         processes_left: (\$left | split(\";\") | map(select(length > 0)))
       }}" | tee "$STATE/result.json"
   [ "$verdict" = PASS ]
@@ -127,7 +163,7 @@ finish() { # emits the JSON and exits; called once
 trap finish EXIT
 
 # --- nvidia: a GPU must exist before anything is changed -----------------------------------------------------------
-if [ "$MODE" = nvidia ]; then
+if [ "$PROFILE" = nvidia ]; then
   t=$(now)
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     check nvidia-gpu fail 'nvidia-smi not found in the seat: no NVIDIA userspace was injected, no GPU' "$t"
@@ -141,6 +177,17 @@ if [ "$MODE" = nvidia ]; then
   check nvidia-gpu pass "$(printf '%s' "$ev_nvidia" | head -n1)" "$t"
   profile_switched=1
   polyseat-profile nvidia >/dev/null 2>&1 || { check profile-switch fail 'polyseat-profile nvidia failed' "$t"; exit 1; }
+  if [ "$STEAM" = 1 ]; then
+    # Steam's client and most games are 32 bit: the driver's 32 bit userspace must have been injected (compat32).
+    t=$(now)
+    ev_lib32=$(for f in /usr/lib32/libGLX_nvidia.so.0 /usr/lib32/libEGL_nvidia.so.0 /usr/lib32/libnvidia-glcore.so.*; do
+      [ -e "$f" ] && printf '%s elfclass=%s\n' "$f" "$(od -An -tx1 -j4 -N1 -- "$f" 2>/dev/null | tr -d ' ')"; done)
+    if printf '%s\n' "$ev_lib32" | grep -q '^/usr/lib32/libGLX_nvidia.so.0 elfclass=01$'; then
+      check nvidia-32bit pass "$(printf '%s\n' "$ev_lib32" | wc -l) 32 bit driver libraries in /usr/lib32" "$t"
+    else
+      check nvidia-32bit fail 'no 32 bit libGLX_nvidia in /usr/lib32: compat32 was not injected' "$t"; exit 1
+    fi
+  fi
 fi
 
 # --- 1. systemd -------------------------------------------------------------------------------------------------------
@@ -160,6 +207,30 @@ case "$ev_system_state" in
   degraded) check system-running pass "degraded (failed units: $(printf '%s' "$ev_failed_units" | tr '\n' ' '))" "$t" ;;
   *) check system-running fail "state '${ev_system_state:-<no answer>}' after ${SYSTEM_WAIT}s; failed units: $(printf '%s' "$ev_failed_units" | tr '\n' ' ')" "$t"; exit 1 ;;
 esac
+
+# --- 1b. LAN (steam*): the bridged eth0, IPv4 by DHCP, a default route and DNS ------------------------------------------
+if [ "$STEAM" = 1 ]; then
+  t=$(now)
+  [ -e /sys/class/net/eth0 ] || { check lan fail 'no eth0: the seat was given no NIC' "$t"; exit 1; }
+  # Only this running copy: the image keeps networkd and resolved masked.
+  systemctl unmask systemd-networkd.socket systemd-networkd.service systemd-resolved.service >/dev/null 2>&1
+  ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+  if ! systemctl start systemd-networkd.socket systemd-networkd.service systemd-resolved.service; then
+    check lan fail 'systemd-networkd/resolved did not start' "$t"; exit 1
+  fi
+  addr='' gw='' dns=''
+  i=0
+  while [ "$i" -lt 60 ]; do
+    addr=$(ip -4 -o addr show dev eth0 scope global 2>/dev/null | awk '{print $4; exit}')
+    gw=$(ip -4 route show default dev eth0 2>/dev/null | awk '{print $3; exit}')
+    [ -n "$addr" ] && [ -n "$gw" ] && dns=$(getent ahostsv4 client-update.steamstatic.com 2>/dev/null | awk '{print $1; exit}')
+    [ -n "$dns" ] && break
+    i=$((i + 1)); sleep 1
+  done
+  ev_lan="eth0 ${addr:-none} gateway ${gw:-none}; client-update.steamstatic.com -> ${dns:-unresolved}"
+  if [ -n "$addr" ] && [ -n "$gw" ] && [ -n "$dns" ]; then check lan pass "$ev_lan" "$t"
+  else check lan fail "$ev_lan" "$t"; exit 1; fi
+fi
 
 # --- 2. user manager ------------------------------------------------------------------------------------------------
 t=$(now)
@@ -271,9 +342,102 @@ else
   check sunshine-capture fail 'no wayland/wlr line in the Sunshine log' "$t"
 fi
 
+# --- 6b. GL on the seat's X display, 64 and 32 bit (steam*) ------------------------------------------------------------
+if [ "$STEAM" = 1 ]; then
+  t=$(now)
+  XDISP=$(find /tmp/.X11-unix -maxdepth 1 -name 'X[0-9]*' -printf '%f\n' 2>/dev/null | sed -n 's/^X\([0-9]*\)$/:\1/p' | sort | head -1)
+  [ -n "$XDISP" ] || { check xwayland fail 'sway offers no X11 display (xwayland)' "$t"; exit 1; }
+  WDISP=$(basename "$(sock 'wayland-[0-9]*')")
+  if [ "$PROFILE" = nvidia ]; then want_gl='NVIDIA Corporation'; vendor=nvidia; else want_gl='Mesa'; vendor=mesa; fi
+  as_x() { as_player env DISPLAY="$XDISP" WAYLAND_DISPLAY="$WDISP" __GLX_VENDOR_LIBRARY_NAME="$vendor" LANG=en_US.UTF-8 "$@"; }
+  ev_glx64=$(as_x timeout 60 glxinfo -B 2>&1 | grep -E 'direct rendering|OpenGL (vendor|renderer|core profile version) string' | head -n 4)
+  ev_glx32=$(as_x timeout 60 glxinfo32 -B 2>&1 | grep -E 'direct rendering|OpenGL (vendor|renderer|core profile version) string' | head -n 4)
+  for bits in 64 32; do
+    if [ "$bits" = 64 ]; then out=$ev_glx64; else out=$ev_glx32; fi
+    if printf '%s\n' "$out" | grep -q "OpenGL vendor string: $want_gl" && printf '%s\n' "$out" | grep -q 'direct rendering: Yes'; then
+      check "gl-$bits" pass "$(printf '%s\n' "$out" | grep 'OpenGL renderer' | head -n1)" "$t"
+    else
+      check "gl-$bits" fail "want direct rendering by '$want_gl' on $XDISP: $(printf '%s' "$out" | tr '\n' '|' | cut -c1-240)" "$t"; exit 1
+    fi
+  done
+
+  # Vulkan (Proton/DXVK need it): the driver's manifest is pushed in by the controller, as upstream does.
+  if [ "$PROFILE" = nvidia ]; then
+    t=$(now)
+    ev_vulkan=$(as_x timeout 60 vulkaninfo --summary 2>&1 | grep -E 'apiVersion|deviceName|driverName|driverInfo' | head -n 8)
+    if printf '%s\n' "$ev_vulkan" | grep -Eq 'deviceName *= *NVIDIA'; then
+      check vulkan pass "$(printf '%s\n' "$ev_vulkan" | grep deviceName | head -n1 | sed 's/^[[:space:]]*//')" "$t"
+    else
+      check vulkan fail "no NVIDIA Vulkan device: $(printf '%s' "$ev_vulkan" | tr '\n' '|' | cut -c1-200)" "$t"; exit 1
+    fi
+  fi
+
+  # --- 6c. Steam: bootstrap, self-update over the LAN, then its sign-in window. Nobody signs in. ----------------------
+  t=$(now)
+  steam_started=1
+  if ! as_player timeout 40 systemd-run --user --quiet --collect --unit="$STEAM_UNIT" \
+       -E DISPLAY="$XDISP" -E WAYLAND_DISPLAY="$WDISP" -E __GLX_VENDOR_LIBRARY_NAME="$vendor" -E LANG=en_US.UTF-8 \
+       /usr/bin/steam; then
+    check steam-start fail 'systemd-run could not start Steam' "$t"; exit 1
+  fi
+  steam_windows() {
+    swaymsg_p -t get_tree 2>/dev/null | jq -r '.. | objects | select(has("window_properties"))
+      | select((.window_properties.class // "") | test("steam"; "i")) | "\(.window_properties.class)|\(.name)"' 2>/dev/null
+  }
+  deadline=$(( $(date +%s) + STEAM_WAIT )); stable=0; last=$(date +%s)
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if ! uctl is-active --quiet "$STEAM_UNIT"; then break; fi
+    ev_steam_windows=$(steam_windows)
+    if pgrep -u "$PUID" -x steamwebhelper >/dev/null && [ -n "$ev_steam_windows" ]; then
+      stable=$((stable + 1)); [ "$stable" -ge 3 ] && break
+    else
+      stable=0
+    fi
+    if [ $(( $(date +%s) - last )) -ge 30 ]; then
+      last=$(date +%s)
+      log "steam: $(tail -n 1 "$HOME_DIR/.local/share/Steam/logs/bootstrap_log.txt" 2>/dev/null | cut -c1-160)"
+    fi
+    sleep 5
+  done
+  if [ "$stable" -ge 3 ]; then
+    check steam-ui pass "steamwebhelper up; windows: $(printf '%s\n' "$ev_steam_windows" | tr '\n' ';')" "$t"
+  else
+    check steam-ui fail "no stable Steam window with steamwebhelper within ${STEAM_WAIT}s (unit $(uctl is-active "$STEAM_UNIT" 2>/dev/null)); windows: $(printf '%s\n' "$ev_steam_windows" | tr '\n' ';')" "$t"
+    exit 1
+  fi
+  # Which Steam processes run as 32/64 bit, and which ones mapped NVIDIA's GL (evidence, not a gate: games are
+  # proved by gl-64/gl-32 above).
+  for pid in $(steam_pids); do
+    ev_steam_elf="$ev_steam_elf$(ps -o comm= -p "$pid") elfclass=$(od -An -tx1 -j4 -N1 "/proc/$pid/exe" 2>/dev/null | tr -d ' ')
+"
+    grep -qE 'libnvidia-(glcore|eglcore)' "/proc/$pid/maps" 2>/dev/null && ev_steam_gl="$ev_steam_gl$(ps -o comm= -p "$pid")
+"
+  done
+  ev_steam_elf=$(printf '%s' "$ev_steam_elf" | sort | uniq -c | sed 's/^ *//')
+  ev_steam_gl=$(printf '%s' "$ev_steam_gl" | sort -u)
+  # The screenshot the controller keeps is Steam's.
+  t=$(now)
+  i=0; ev_colours=0
+  while [ "$i" -lt 20 ]; do
+    grim_p - > "$STATE/screenshot-steam.png" 2>/dev/null
+    ev_colours=$(grim_p -t ppm - 2>/dev/null | tail -c +$((3 + ${#ev_shot_w} + 1 + ${#ev_shot_h} + 1 + 4 + 1)) | od -An -v -tx1 -w3 | sort -u -S 48M | wc -l)
+    [ "$ev_colours" -ge 20 ] && break
+    i=$((i + 1)); sleep 1
+  done
+  if [ "$(head -c 8 "$STATE/screenshot-steam.png" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = 89504e470d0a1a0a ] && [ "$ev_colours" -ge 20 ]; then
+    mv -f "$STATE/screenshot.png" "$STATE/screenshot-desktop.png"
+    cp -f "$STATE/screenshot-steam.png" "$STATE/screenshot.png"
+    ev_shot_sha=$(sha256sum "$STATE/screenshot.png" | cut -d' ' -f1)
+    check steam-screenshot pass "Steam on screen: $ev_colours distinct colours, sha256 $ev_shot_sha" "$t"
+  else
+    check steam-screenshot fail "no Steam screenshot with at least 20 colours ($ev_colours)" "$t"; exit 1
+  fi
+fi
+
 # --- 7. network: only the container's own netns -----------------------------------------------------------------------
 t=$(now)
-ev_ifaces=$(/usr/local/lib/polyseat/netns-classify); netns_ok=$?
+if [ "$STEAM" = 1 ]; then netns_allow=eth0; else netns_allow=''; fi
+ev_ifaces=$(NETNS_ALLOW=$netns_allow /usr/local/lib/polyseat/netns-classify); netns_ok=$?
 hexip() { # little-endian 8 hex digits -> dotted quad
   local h=$1
   printf '%d.%d.%d.%d' "$((16#${h:6:2}))" "$((16#${h:4:2}))" "$((16#${h:2:2}))" "$((16#${h:0:2}))"

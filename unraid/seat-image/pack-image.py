@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import threading
 from pathlib import Path
 
 DROP = {".dockerenv", "etc/hostname", "etc/hosts", "etc/resolv.conf"}
@@ -62,25 +63,29 @@ def add_bytes(out: tarfile.TarFile, name: str, data: bytes, epoch: int, mode: in
     out.addfile(info, io.BytesIO(data))
 
 
-def compress(tar_path: Path, image: Path) -> dict:
-    """xz with fixed 32 MiB blocks: multi-threaded, yet the bytes do not depend on the thread count."""
-    digest = hashlib.sha256()
-    with image.open("wb") as raw:
-        proc = subprocess.Popen(["xz", "-c", "-6", "-T0", "--block-size=33554432", "--check=crc64", str(tar_path)],
-                                stdout=subprocess.PIPE)
-        while chunk := proc.stdout.read(1 << 20):
-            digest.update(chunk)
-            raw.write(chunk)
-        if proc.wait() != 0:
-            sys.exit("xz failed")
-    return {"sha256": digest.hexdigest(), "size_bytes": image.stat().st_size}
+# xz with fixed 32 MiB blocks: multi-threaded, yet the bytes do not depend on the thread count.
+XZ = ["xz", "-c", "-6", "-T0", "--block-size=33554432", "--check=crc64"]
 
 
 def pack(export: Path, image: Path, epoch: int, archive_date: str, base: str, sunshine: str) -> dict:
+    """Streams: the export (a path, or "-" for stdin) is read once and the normalised tar goes straight into xz.
+    Only the final image touches the disk; a rootfs with Steam's 32 bit userspace is several GB unpacked."""
     stats = {"files": 0, "dirs": 0, "symlinks": 0, "hardlinks": 0, "unpacked_bytes": 0, "dropped": []}
-    plain = image.with_suffix(".tmp")
-    with export.open("rb") as src, plain.open("wb") as raw:
-        with tarfile.open(fileobj=raw, mode="w", format=tarfile.PAX_FORMAT) as out, \
+    digest = hashlib.sha256()
+    src = sys.stdin.buffer if str(export) == "-" else export.open("rb")
+    raw = image.open("wb")
+    proc = subprocess.Popen(XZ, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+    def drain():
+        while chunk := proc.stdout.read(1 << 20):
+            digest.update(chunk)
+            raw.write(chunk)
+
+    reader = threading.Thread(target=drain)
+    reader.start()
+    ok = False
+    try:
+        with tarfile.open(fileobj=proc.stdin, mode="w|", format=tarfile.PAX_FORMAT) as out, \
                 tarfile.open(fileobj=src, mode="r|") as tin:
             add_bytes(out, "metadata.yaml", metadata_yaml(epoch, archive_date, base, sunshine), epoch)
             root = tarfile.TarInfo("rootfs")
@@ -104,11 +109,19 @@ def pack(export: Path, image: Path, epoch: int, archive_date: str, base: str, su
                 else:
                     stats["dirs" if member.isdir() else "symlinks" if member.issym() else "hardlinks"] += 1
                     out.addfile(member)
-    try:
-        packed = compress(plain, image)
+        ok = True
     finally:
-        plain.unlink(missing_ok=True)
-    return {**packed, **stats}
+        proc.stdin.close()
+        reader.join()
+        rc = proc.wait()
+        raw.close()
+        if src is not sys.stdin.buffer:
+            src.close()
+        if not ok or rc != 0:
+            image.unlink(missing_ok=True)
+    if rc != 0:
+        sys.exit("xz failed")
+    return {"sha256": digest.hexdigest(), "size_bytes": image.stat().st_size, **stats}
 
 
 def parse_pacman(text: str) -> list[dict]:
@@ -131,7 +144,7 @@ def cyclonedx(packages: list[dict], epoch: int) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--export", required=True, type=Path)
+    ap.add_argument("--export", required=True, type=Path, help="docker export tar, or - for stdin")
     ap.add_argument("--pacman-q", required=True, type=Path)
     ap.add_argument("--out-dir", required=True, type=Path)
     ap.add_argument("--epoch", required=True, type=int)

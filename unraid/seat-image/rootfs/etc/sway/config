@@ -1,5 +1,6 @@
 # Polyseat seat: minimal headless desktop. Outputs are virtual (WLR_BACKENDS=headless).
-xwayland disable
+# Lazy: Xwayland starts only when an X11 client (Steam) connects.
+xwayland enable
 output * resolution 1280x720
 output * bg #1d3557 solid_color
 font pango:DejaVu Sans Mono 10

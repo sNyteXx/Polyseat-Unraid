@@ -68,11 +68,12 @@ docker build --platform linux/amd64 --tag "$tag" \
 # `pacman -Q` from the finished image; the container is only ever used for this and the export.
 docker run --rm --network none --entrypoint pacman "$tag" -Q > "$work/pacman-q.txt"
 container=$(docker create --network none "$tag" /bin/true)
-docker export "$container" > "$work/rootfs.tar"
+# Streamed: the rootfs (several GB with Steam's 32 bit userspace) never lands on disk, only the final .tar.xz does.
+{ docker export "$container" || : > "$work/export-failed"; } |
+  python3 -I "$here/pack-image.py" --export - --pacman-q "$work/pacman-q.txt" --out-dir "$out" \
+    --epoch "$SOURCE_DATE_EPOCH" --archive-date "$SEAT_ARCHIVE_DATE" --base-image "$SEAT_BASE_IMAGE" \
+    --sunshine-version "$SUNSHINE_PKG_VERSION" --sunshine-url "$SUNSHINE_PKG_URL" \
+    --sunshine-sha256 "$SUNSHINE_PKG_SHA256" --build-commit "$build_commit"
+[ ! -e "$work/export-failed" ] || fail 'docker export failed'
 docker rm -f "$container" >/dev/null
 container=
-
-python3 -I "$here/pack-image.py" --export "$work/rootfs.tar" --pacman-q "$work/pacman-q.txt" --out-dir "$out" \
-  --epoch "$SOURCE_DATE_EPOCH" --archive-date "$SEAT_ARCHIVE_DATE" --base-image "$SEAT_BASE_IMAGE" \
-  --sunshine-version "$SUNSHINE_PKG_VERSION" --sunshine-url "$SUNSHINE_PKG_URL" \
-  --sunshine-sha256 "$SUNSHINE_PKG_SHA256" --build-commit "$build_commit"

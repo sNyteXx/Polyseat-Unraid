@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -223,6 +224,42 @@ class Selftest(unittest.TestCase):
         for forbidden in ("pacman", "curl", "wget", "ping ", "apt"):
             self.assertNotRegex(text, rf"(?m)^[^#]*\b{re.escape(forbidden)}", forbidden)
 
+    def test_steam_modes_use_the_lan_only_when_asked(self):
+        text = SELFTEST.read_text()
+        self.assertIn("usage: polyseat-selftest desktop|nvidia|steam|steam-cpu", text)
+        self.assertIn("steam) PROFILE=nvidia STEAM=1 ;;", text)
+        self.assertIn("steam-cpu) PROFILE=cpu STEAM=1 ;;", text)
+        self.assertIn("STEAM_WAIT=900", text)
+        for needle in ("glxinfo -B", "glxinfo32 -B", "/usr/lib32/libGLX_nvidia.so.0", "client-update.steamstatic.com",
+                       "steamwebhelper", "steam -shutdown", "NETNS_ALLOW=$netns_allow"):
+            self.assertIn(needle, text)
+        lan = text.index('# --- 1b. LAN (steam*)')
+        self.assertIn('if [ "$STEAM" = 1 ]; then', text[lan:lan + 200])
+        self.assertEqual(text.count("systemctl unmask"), 1)
+        self.assertGreater(text.index("systemctl unmask"), lan)
+        self.assertIn('if [ "$STEAM" = 1 ]; then netns_allow=eth0; else netns_allow=\'\'; fi', text)
+
+    def test_steam_packages_cover_the_upstream_provisioner(self):
+        upstream = (ROOT / "internal/seat/provision.go").read_text()
+        step = re.search(r"func \(p \*Provisioner\) stepSteam.*?argv = append\(argv,(.*?)\)\n", upstream, re.S).group(1)
+        wanted = set(re.findall(r'"([a-z0-9-]+)"', step))
+        self.assertIn("steam", wanted)
+        provision = (SEAT / "provision.sh").read_text()
+        ours = set(re.search(r"STEAM_PACKAGES='([^']*)'", provision).group(1).split())
+        self.assertLessEqual(wanted, ours, "the seat image must install everything upstream's stepSteam does")
+        for flag in ("vulkan-driver", "lib32-vulkan-driver"):  # upstream's driverFlags on NVIDIA
+            self.assertIn(f"--assume-installed {flag}", provision)
+
+    def test_lan_config_is_eth0_dhcp4_only_and_sway_starts_xwayland_lazily(self):
+        net = (OVERLAY / "etc/systemd/network/20-polyseat-lan.network").read_text()
+        self.assertIn("[Match]\nName=eth0\n", net)
+        for line in ("DHCP=ipv4", "LinkLocalAddressing=no", "IPv6AcceptRA=no", "UseDomains=no"):
+            self.assertIn(line + "\n", net)
+        self.assertRegex((OVERLAY / "etc/sway/config").read_text(), r"(?m)^xwayland enable$")
+        provision = (SEAT / "provision.sh").read_text()
+        self.assertIn("STEAM_PACKAGES='steam lib32-libglvnd lib32-mesa lib32-vulkan-icd-loader ttf-liberation zenity", provision)
+        self.assertIn("STEAM_ASSUME='--assume-installed vulkan-driver --assume-installed lib32-vulkan-driver'", provision)
+
     def test_smoke_script_uses_the_fixed_names_and_config(self):
         text = SMOKE.read_text()
         for needle in ("CT=polyseat-desktop-cpu", "ALIAS=polyseat-desktop", "boot.autostart=false",
@@ -301,6 +338,23 @@ class PackImage(unittest.TestCase):
             self.assertEqual(result["unpacked_bytes"], len(b"binary") + 1)
             self.assertIn(".dockerenv", result["dropped"])
 
+    def test_stdin_stream_gives_the_same_bytes_and_a_truncated_export_leaves_nothing(self):
+        script = SEAT / "pack-image.py"
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            first, _ = self.pack(Path(a))
+            (Path(b) / "q.txt").write_text("sunshine 1-1\n")
+            argv = [sys.executable, "-I", str(script), "--export", "-", "--pacman-q", str(Path(b) / "q.txt"),
+                    "--out-dir", str(Path(b) / "out"), "--epoch", str(self.EPOCH), "--archive-date", "2026/10/29",
+                    "--base-image", "archlinux@sha256:" + "a" * 64, "--sunshine-version", "1-1",
+                    "--sunshine-url", "https://example.invalid/s.pkg.tar.zst", "--sunshine-sha256", "b" * 64,
+                    "--build-commit", "c" * 40]
+            subprocess.run(argv, input=fake_export(), check=True, capture_output=True)
+            self.assertEqual((Path(b) / "out/polyseat-desktop.tar.xz").read_bytes(), first.read_bytes())
+            (Path(b) / "out/polyseat-desktop.tar.xz").unlink()
+            res = subprocess.run(argv, input=fake_export()[:1536], capture_output=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertFalse((Path(b) / "out/polyseat-desktop.tar.xz").exists())
+
     def test_package_list_and_sbom(self):
         packages = PACK.parse_pacman("sway 1.11-1\nsunshine 2026.914.233613-1.1\n")
         self.assertEqual(packages[1], {"name": "sunshine", "version": "2026.914.233613-1.1"})
@@ -339,9 +393,31 @@ class NetnsClassify(unittest.TestCase):
         if address:
             (self.addresses / name).write_text(address + "\n")
 
-    def run_tool(self):
+    def run_tool(self, allow=None):
         env = {"PATH": f"{self.bin}:/usr/bin:/bin", "ADDRS": str(self.addresses)}
+        if allow is not None:
+            env["NETNS_ALLOW"] = allow
         return subprocess.run(["bash", str(self.TOOL), str(self.net)], capture_output=True, text=True, env=env)
+
+    def test_lan_self_test_accepts_exactly_the_allowed_interface_when_up(self):
+        self.dev("lo", "0x9")
+        self.dev("tunl0", "0x80")
+        self.dev("eth0", "0x1003")
+        self.assertEqual(self.run_tool().returncode, 1)  # without the allowance eth0 stays unexpected
+        res = self.run_tool(allow="eth0")
+        self.assertEqual((res.returncode, res.stdout.strip()),
+                         (0, "lo=yes inert=tunl0 unexpected= allowed=eth0 missing="))
+        (self.root / "devices/eth0/flags").write_text("0x1002\n")  # down
+        res = self.run_tool(allow="eth0")
+        self.assertEqual((res.returncode, res.stdout.strip()),
+                         (1, "lo=yes inert=tunl0 unexpected=eth0 allowed= missing=eth0"))
+        (self.root / "devices/eth0/flags").write_text("0x1003\n")
+        self.dev("eth1", "0x1003")
+        self.assertEqual(self.run_tool(allow="eth0").returncode, 1)  # a second NIC is never allowed
+        for p in (self.net / "eth0", self.net / "eth1"):
+            p.unlink()
+        res = self.run_tool(allow="eth0")
+        self.assertEqual((res.returncode, res.stdout.strip()), (1, "lo=yes inert=tunl0 unexpected= allowed= missing=eth0"))
 
     def test_tower_run4_view_is_isolated(self):
         self.dev("lo", "0x9")
