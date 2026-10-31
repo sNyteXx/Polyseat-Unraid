@@ -42,6 +42,10 @@ the local-dev build is described in [dev-build](docs/dev-build.md), the producti
 [test-system runbook](docs/test-system-runbook.md). `polyseatctl` refuses all
 host mutation while its release gate is closed (the committed state).
 
+The gap matrix and MVP order after the second Tower canary are in [mvp-roadmap](docs/mvp-roadmap.md); the GPU
+device-access design and read-only guard in [gpu-path](docs/gpu-path.md); seat LAN reachability in
+[streaming-network](docs/streaming-network.md).
+
 Read [the security and rollback contract](docs/security-rollback-contract.md)
 and [acceptance matrix](docs/acceptance.md) before implementing any mutating
 host operation. The committed controller makes none on a real host.

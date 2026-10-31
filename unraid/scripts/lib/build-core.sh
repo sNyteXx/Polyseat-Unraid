@@ -131,6 +131,15 @@ build_lxc() { # lxc_commit src prefix [mirror]
 
   lxc_lib="$lxc_prefix/lib/liblxc.so.1"
   [ -e "$lxc_lib" ] || die 'liblxc.so.1 was not installed'
+
+  # Incus 7.5.1 refuses `nvidia.runtime=true` unless "$INCUS_LXC_HOOK/nvidia" exists
+  # (internal/server/instance/drivers/driver_lxc.go). The hook is a plain LGPL-2.1+ script
+  # from the same pinned checkout; in an unprivileged container it never loads kernel
+  # modules (--user --no-cgroups). Copied verbatim, never generated or patched.
+  [ -f "$lxc_src/hooks/nvidia" ] || die 'pinned LXC source lacks hooks/nvidia'
+  mkdir -p "$lxc_prefix/share/polyseat-lxc/hooks" "$lxc_prefix/share/licenses/lxc"
+  cp "$lxc_src/hooks/nvidia" "$lxc_prefix/share/polyseat-lxc/hooks/nvidia"
+  cp "$lxc_src/LICENSE.LGPL2.1" "$lxc_prefix/share/licenses/lxc/LICENSE.LGPL2.1"
   lxc_real=$(readlink -f "$lxc_lib")
 
   # RUNPATH (DT_RUNPATH) = $ORIGIN so bundled sibling libs are found.
@@ -339,6 +348,15 @@ core_package() { # incus_src prefix output
   cp "$prefix/share/licenses/squashfs-tools/COPYING" "$payload/share/licenses/squashfs-tools/COPYING"
   chmod 0755 "$payload/tools/unsquashfs"
   chmod 0644 "$payload/share/licenses/squashfs-tools/COPYING"
+  # The LXC nvidia mount hook (see build_lxc); the controller points INCUS_LXC_HOOK at this directory.
+  mkdir -p "$payload/share/lxc/hooks" "$payload/share/licenses/lxc"
+  [ -f "$prefix/share/polyseat-lxc/hooks/nvidia" ] || die 'missing bundled LXC nvidia hook'
+  cp "$prefix/share/polyseat-lxc/hooks/nvidia" "$payload/share/lxc/hooks/nvidia"
+  cp "$prefix/share/licenses/lxc/LICENSE.LGPL2.1" "$payload/share/licenses/lxc/LICENSE.LGPL2.1"
+  chmod 0755 "$payload/share/lxc/hooks/nvidia"
+  chmod 0644 "$payload/share/licenses/lxc/LICENSE.LGPL2.1"
+  head -n 1 "$payload/share/lxc/hooks/nvidia" | grep -qx '#!/bin/bash' || die 'unexpected LXC nvidia hook interpreter'
+  sha256sum "$payload/share/lxc/hooks/nvidia" | sed "s#  .*#  payload/share/lxc/hooks/nvidia#" > "$output/lxc-nvidia-hook.sha256"
   readelf -W -d "$payload/tools/unsquashfs" > "$output/unsquashfs-elf-dynamic.txt"
   readelf -W --version-info "$payload/tools/unsquashfs" > "$output/unsquashfs-elf-versions.txt"
   "$payload/tools/unsquashfs" -version > "$output/unsquashfs-version.txt" 2>&1 || [ "$?" -eq 1 ] ||
@@ -393,7 +411,7 @@ core_checksums() { # output
       *-elf-versions.txt incusd-go-buildinfo.txt incus-go-buildinfo.txt incusd-go-packages.txt incus-go-packages.txt \
       dependency-overrides.json busybox-image-provenance.json \
       incus-cli-version.txt incusd-cli-version.txt incusd-needed-programs.txt \
-      unsquashfs-elf-dynamic.txt unsquashfs-elf-versions.txt unsquashfs-version.txt \
+      unsquashfs-elf-dynamic.txt unsquashfs-elf-versions.txt unsquashfs-version.txt lxc-nvidia-hook.sha256 \
       go-modules.txt SBOM-build-source-only.cdx.json SBOM-runtime.cdx.json NOTICE.txt > SHA256SUMS
     sha256sum --check SHA256SUMS
   )

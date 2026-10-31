@@ -1,5 +1,11 @@
 # 🚧 WIP — DO NOT USE — Active gaming VM protection
 
+> **Update 2026-10-31 (read-only measurement):** the GamingVM and the "Windows 11" VM are both *shut off*; the
+> RTX 5070 Ti is on the host `nvidia` driver and is handed to a VM only by the owner's `gamingvm-manager.sh` via
+> libvirt `managed='yes'`. While that is so, a seat may use the GPU by **device access** (no rebind), and the VM
+> keeps priority. Details, hazards and the read-only `polyseatctl gpu-preflight` guard: [gpu-path.md](gpu-path.md).
+> The rules below remain in force for every state in which a VM owns or is acquiring the GPU.
+
 The existing Windows gaming VM is **running and must stay available**. This
 repository's work is restricted to GitHub and offline CI. No action may stop,
 pause, reconfigure or inspect the live VM, detach PCI devices, unbind `vfio-pci`,

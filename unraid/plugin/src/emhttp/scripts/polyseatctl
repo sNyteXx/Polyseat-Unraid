@@ -1380,7 +1380,7 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   # shellcheck disable=SC2016  # launcher body must expand in its new namespaces
   exec setsid env -i PATH="$RUN_DIR/deny-tools:$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
     INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
-    INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
+    INCUS_LXC_HOOK="$slot_real/payload/share/lxc/hooks" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
     setpriv --bounding-set=-sys_module,-sys_rawio \
     unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private \
     bash -u -o pipefail -c '
@@ -1502,7 +1502,7 @@ svc_start() {
     # shellcheck disable=SC2016  # $$ and $@ must expand in the child shell
     exec setsid env -i PATH="$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
       INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
-      INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
+      INCUS_LXC_HOOK="$slot_real/payload/share/lxc/hooks" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
       bash -c 'echo $$ > "$1"; shift; exec "$@"' polyseat-launch "$PIDFILE" \
       "$slot_real/payload/bin/incusd" --group "" --logfile "$LOG_DIR/incusd.log" \
       > "$LOG_DIR/incusd.out" 2>&1 < /dev/null 9>&-
@@ -2136,11 +2136,212 @@ cmd_diagnose() {
   fi
 }
 
+# ----------------------------------------------------------- gpu guard ----
+# Read-only decision whether ONE host-owned NVIDIA GPU may be handed to a seat
+# container by device access. The plugin never rebinds a driver, loads a module,
+# touches libvirt or takes a lock: everything below reads files (sysfs, /proc,
+# libvirt's on-disk domain definitions and run state). A GPU that a VM owns, is
+# about to own, or is being handed over is refused, never "freed".
+#
+# Owner integration on the inspected Tower (read-only facts, 2026-10-31): the
+# GamingVM lifecycle script holds `flock -n` on this file during a hand-over and
+# leaves the marker after a failed one. Absent files simply pass.
+GPU_TRANSITION_LOCKS="/var/run/gamingvm-transition.lock"
+GPU_TRANSITION_MARKERS="/var/run/gamingvm-transition.unhealthy"
+GPU_PCI_RE='^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$'
+GPU_MIN_AVAILABLE_KB=$((4 * 1024 * 1024))
+
+host_path() { # logical absolute path -> sandbox fixture path unless a CI job addresses the real system
+  if sandbox && ! ci_real_system; then printf '%s%s\n' "$ROOT" "$1"; else printf '%s\n' "$1"; fi
+}
+
+gpu_is_char() { [[ -c $1 ]] || { sandbox && ! ci_real_system && [[ -f $1 && ! -L $1 ]]; }; }
+
+gpu_libvirt_owners() { # pci... : prints "name<TAB>xmlfile" for every defined domain with one of them as PCI hostdev
+  local xml name addrs
+  for xml in "$(host_path /etc/libvirt/qemu)"/*.xml; do
+    [[ -f $xml && ! -L $xml ]] || continue
+    addrs=$(awk '
+      /<hostdev[ >]/ { h = ($0 ~ /type=.pci./) } /<\/hostdev>/ { h = 0; s = 0 }
+      h && /<source>/ { s = 1 } h && /<\/source>/ { s = 0 }
+      h && s && /<address / {
+        d = b = sl = f = ""
+        if (match($0, /domain=.0x[0-9a-fA-F]+/)) d = substr($0, RSTART + 10, RLENGTH - 10)
+        if (match($0, /bus=.0x[0-9a-fA-F]+/)) b = substr($0, RSTART + 7, RLENGTH - 7)
+        if (match($0, /slot=.0x[0-9a-fA-F]+/)) sl = substr($0, RSTART + 8, RLENGTH - 8)
+        if (match($0, /function=.0x[0-9a-fA-F]+/)) f = substr($0, RSTART + 12, RLENGTH - 12)
+        if (d != "" && b != "" && sl != "" && f != "")
+          printf "%04x:%02x:%02x.%x\n", strtonum("0x" d), strtonum("0x" b), strtonum("0x" sl), strtonum("0x" f)
+      }' "$xml" 2>/dev/null) || continue
+    name=$(sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$xml" | head -n 1)
+    [[ -n $name ]] || name=$(basename -- "$xml" .xml)
+    local want
+    for want in "$@"; do
+      if grep -qxF -- "$want" <<< "$addrs"; then printf '%s\t%s\n' "$name" "$xml"; break; fi
+    done
+  done
+}
+
+gpu_domain_active() { # name : running or being started/stopped by libvirt (status file or live pid)
+  local run pid
+  run=$(host_path /var/run/libvirt/qemu)
+  [[ -e $run/$1.xml ]] && return 0
+  [[ -f $run/$1.pid ]] || return 1
+  pid=$(tr -dc '0-9' < "$run/$1.pid")
+  [[ -n $pid && -d $(host_path "/proc/$pid") ]]
+}
+
+gpu_lock_held() { # path : another process holds a flock/POSIX lock on exactly this file (read from /proc/locks)
+  local f=$1 dev ino key
+  [[ -e $f ]] || return 1
+  read -r dev ino < <(stat -L -c '%d %i' -- "$f") || return 1
+  key=$(printf '%02x:%02x:%s' $(((dev >> 8) & 0xfff)) $(((dev & 0xff) | ((dev >> 12) & 0xfff00))) "$ino")
+  awk -v k="$key" '{ for (i = 1; i <= NF; i++) if ($i == k) found = 1 } END { exit !found }' "$(host_path /proc/locks)"
+}
+
+gpu_holders() { # device paths... : "pid comm cgroup devices" for every process with one of them open
+  local proc fd link pid hit dev
+  [[ $# -gt 0 ]] || return 0
+  for proc in "$(host_path /proc)"/[0-9]*; do
+    pid=${proc##*/} hit=""
+    for fd in "$proc"/fd/*; do
+      link=$(readlink -- "$fd" 2>/dev/null) || continue
+      for dev in "$@"; do [[ $link == "$dev" ]] && hit+="${dev#/dev/},"; done
+    done 2>/dev/null
+    [[ -n $hit ]] || continue
+    printf '%s %s %s %s\n' "$pid" "$(cat "$proc/comm" 2>/dev/null || echo '?')" \
+      "$(sed -n '1s/^0:://p' "$proc/cgroup" 2>/dev/null)" "$(tr ',' '\n' <<< "${hit%,}" | sort -u | paste -sd, -)"
+  done
+}
+
+cmd_gpu_preflight() { # [--pci ADDR] [--json] : read-only
+  local pci="" json=0 sys dev drv group member minor info node render="" card="" owners owner name xml
+  local f held vm_kb avail res=() a
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pci) pci=${2:-}; shift 2 || die $EX_USAGE "--pci needs an address" ;;
+      --json) json=1; shift ;;
+      *) die $EX_USAGE "gpu-preflight [--pci 0000:01:00.0] [--json]" ;;
+    esac
+  done
+  [[ -n $pci ]] || pci=$(cfg_get GPU_PCI '')
+  [[ $pci =~ $GPU_PCI_RE ]] || die $EX_USAGE "gpu-preflight needs a PCI address like 0000:01:00.0 (got '${pci}')"
+  r() { res+=("$1"$'\t'"$2"$'\t'"$3"); }
+  sys=$(sys_root) dev="$sys/bus/pci/devices/$pci"
+  if [[ -d $dev && ! -L $dev/class ]] && [[ $(< "$dev/class") == 0x03* && $(< "$dev/vendor") == 0x10de ]]; then
+    r PASS pci "$pci is an NVIDIA display controller ($(< "$dev/device"))"
+  else
+    r FAIL pci "$pci is absent or not an NVIDIA display controller"
+  fi
+  drv=none
+  [[ -L $dev/driver ]] && drv=$(basename -- "$(readlink -- "$dev/driver")")
+  case "$drv" in
+    nvidia) r PASS driver "bound to the host nvidia driver" ;;
+    vfio-pci) r FAIL driver "bound to vfio-pci: a VM owns it; the plugin never rebinds" ;;
+    none) r FAIL driver "no driver bound (hand-over in progress or failed): never touched" ;;
+    *) r FAIL driver "bound to unexpected driver '$drv'" ;;
+  esac
+  f=$(cat "$dev/driver_override" 2>/dev/null || true)
+  if [[ -z $f || $f == '(null)' || $f == nvidia ]]; then r PASS override "no foreign driver_override"; else r FAIL override "driver_override=$f"; fi
+  group=()
+  if [[ -L $dev/iommu_group ]]; then
+    for member in "$(readlink -f -- "$dev/iommu_group")"/devices/*; do
+      a=$(basename -- "$member"); group+=("$a")
+      f=none; [[ -L $sys/bus/pci/devices/$a/driver ]] && f=$(basename -- "$(readlink -- "$sys/bus/pci/devices/$a/driver")")
+      [[ $f == vfio-pci ]] && r FAIL iommu "group member $a is bound to vfio-pci"
+    done
+    r INFO iommu "IOMMU group $(basename -- "$(readlink -- "$dev/iommu_group")"): ${group[*]}"
+  else
+    group=("$pci")
+    r WARN iommu "no IOMMU group information"
+  fi
+  info=$(host_path "/proc/driver/nvidia/gpus/$pci/information")
+  minor=$(awk -F: '/^Device Minor/ { gsub(/[ \t]/, "", $2); print $2 }' "$info" 2>/dev/null)
+  if [[ $minor =~ ^[0-9]+$ ]] && ! grep -Eq '^GPU Excluded:[[:space:]]*Yes' "$info"; then
+    r PASS nvproc "driver reports device minor $minor"
+  else
+    r FAIL nvproc "no usable /proc/driver/nvidia entry for $pci"; minor=""
+  fi
+  for node in /dev/nvidiactl /dev/nvidia-uvm ${minor:+"/dev/nvidia$minor"}; do
+    if gpu_is_char "$(host_path "$node")"; then r PASS node "$node present"; else r FAIL node "$node missing (the plugin never creates device nodes or loads modules)"; fi
+  done
+  for f in "$dev"/drm/renderD* "$dev"/drm/card*; do
+    [[ -e $f ]] || continue
+    case "${f##*/}" in renderD*) render=/dev/dri/${f##*/} ;; card*) card=/dev/dri/${f##*/} ;; esac
+  done
+  if [[ -n $render ]] && gpu_is_char "$(host_path "$render")"; then r PASS drm "render node $render${card:+, card $card}"; else r FAIL drm "no DRM render node for $pci"; fi
+  f=$(cat "$sys/module/nvidia_drm/parameters/modeset" 2>/dev/null || echo '?')
+  if [[ $f == Y ]]; then r PASS modeset "nvidia_drm.modeset=Y (GBM for headless sway)"; else r WARN modeset "nvidia_drm.modeset=$f: wlroots on NVIDIA needs modeset=Y"; fi
+  owners=$(gpu_libvirt_owners "${group[@]}")
+  if [[ -z $owners ]]; then
+    r INFO vm "no defined VM passes this IOMMU group through"
+  fi
+  while IFS=$'\t' read -r name xml; do
+    [[ -n $name ]] || continue
+    vm_kb=$(sed -n "s:.*<memory unit='KiB'>\([0-9]*\)</memory>.*:\1:p" "$xml" | head -n 1)
+    if gpu_domain_active "$name"; then
+      r FAIL vm "VM '$name' passes this GPU through and is running or being started/stopped"
+    else
+      r PASS vm "VM '$name' passes this GPU through and is shut off${vm_kb:+ (needs $((vm_kb / 1024)) MiB when started)}"
+    fi
+    f=$(host_path "/etc/libvirt/qemu/autostart/$name.xml")
+    if [[ -e $f || -L $f ]]; then
+      r FAIL autostart "VM '$name' owns this GPU and is set to autostart"
+    fi
+  done <<< "$owners"
+  for f in $GPU_TRANSITION_LOCKS; do
+    if gpu_lock_held "$(host_path "$f")"; then r FAIL transition "$f is locked: a GPU/VM hand-over is running"
+    else r PASS transition "$f not locked"; fi
+  done
+  for f in $GPU_TRANSITION_MARKERS; do
+    if [[ -e $(host_path "$f") ]]; then r FAIL transition "$f present: a previous hand-over failed, needs the owner"
+    else r PASS transition "$f absent"; fi
+  done
+  held=$(gpu_holders /dev/nvidiactl /dev/nvidia-uvm ${minor:+"/dev/nvidia$minor"} ${render:+"$render"} ${card:+"$card"})
+  if [[ -n $held ]]; then
+    while IFS= read -r a; do r INFO holder "$a"; done <<< "$held"
+    r WARN holder "the GPU is already in use by the processes above (sharing is possible, an exclusive VM start is not)"
+  else
+    r PASS holder "no process holds the GPU"
+  fi
+  if sandbox && ! ci_real_system; then
+    f=$(host_path /usr/bin/nvidia-container-cli); [[ -f $f && -x $f ]] || f=""
+  else
+    f=$(PATH=$SAFE_PATH command -v nvidia-container-cli || true)
+  fi
+  if [[ -n $f ]]; then r PASS toolkit "nvidia-container-cli at $f"; else r FAIL toolkit "nvidia-container-cli missing: nvidia.runtime cannot inject the host driver"; fi
+  if [[ -L $CURRENT ]]; then
+    if [[ -f $CURRENT/payload/share/lxc/hooks/nvidia && ! -L $CURRENT/payload/share/lxc/hooks/nvidia ]]; then
+      r PASS hook "active bundle ships the LXC nvidia hook"
+    else
+      r FAIL hook "active bundle has no LXC nvidia hook (bundle predates GPU support)"
+    fi
+  else
+    r INFO hook "no active bundle to inspect"
+  fi
+  avail=$(awk '/^MemAvailable:/ { print $2 }' "$(host_path /proc/meminfo)" 2>/dev/null)
+  if [[ $avail =~ ^[0-9]+$ && $avail -ge $GPU_MIN_AVAILABLE_KB ]]; then r PASS memory "MemAvailable $((avail / 1024)) MiB"
+  else r FAIL memory "MemAvailable ${avail:-?} kB below $((GPU_MIN_AVAILABLE_KB / 1024)) MiB"; fi
+  local failed=0
+  for a in "${res[@]}"; do [[ ${a%%$'\t'*} == FAIL ]] && failed=1; done
+  if [[ $json -eq 1 ]]; then
+    printf '%s\n' "${res[@]}" | jq -R -s --arg pci "$pci" --argjson ok "$((1 - failed))" '
+      { schema: 1, pci: $pci, gpu_seat_allowed: ($ok == 1), read_only: true,
+        checks: (split("\n") | map(select(length > 0) | split("\t") | {status: .[0], id: .[1], detail: .[2]})) }'
+  else
+    for a in "${res[@]}"; do IFS=$'\t' read -r f node info <<< "$a"; printf '%s: [%s] %s\n' "$f" "$node" "$info"; done
+    if [[ $failed -eq 0 ]]; then echo "VERDICT: a seat MAY use $pci by device access (read-only check, nothing changed)"
+    else echo "VERDICT: a seat must NOT use $pci now (read-only check, nothing changed)"; fi
+  fi
+  [[ $failed -eq 0 ]] || exit $EX_BLOCKED
+}
+
 # ---------------------------------------------------------------- main ----
 usage() {
   cat >&2 <<'EOF'
 usage: polyseatctl COMMAND [args]
  read-only:  status [--json] | verify [SHA] | health | preflight | diagnose | version
+             gpu-preflight [--pci ADDR] [--json]
              list | metrics | logs [controller|incusd] [N] | config-get
  settings:   config-set KEY=VALUE... | config-reset
  service:    start | stop | restart | boot
@@ -2169,6 +2370,7 @@ main() {
     health) cmd_health; return ;;
     preflight) cmd_preflight; return ;;
     diagnose) cmd_diagnose; return ;;
+    gpu-preflight) cmd_gpu_preflight "${args[@]}"; return ;;
     list) cmd_list; return ;;
     metrics) cmd_metrics; return ;;
     logs) cmd_logs "${args[@]}"; return ;;

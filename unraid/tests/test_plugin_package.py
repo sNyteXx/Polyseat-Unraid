@@ -31,6 +31,32 @@ def code_lines(path: Path) -> list[str]:
             if line.strip() and not line.lstrip().startswith("#")]
 
 
+# Read-only GPU ownership guard (polyseatctl gpu-preflight). These functions may NAME libvirt,
+# vfio and nvidia-* files because they read them; test_gpu_guard_functions_are_read_only proves
+# they contain no write, exec-of-host-tool or sysfs-control primitive at all.
+GPU_READONLY_FUNCTIONS = ("host_path", "gpu_is_char", "gpu_libvirt_owners", "gpu_domain_active",
+                          "gpu_lock_held", "gpu_holders", "cmd_gpu_preflight")
+GPU_READONLY_PATTERNS = (r"\blibvirt", r"\bvfio", r"\bnvidia-")
+
+
+def strip_arithmetic(code: str) -> str:
+    out, i = [], 0
+    while i < len(code):
+        if code.startswith("$((", i):
+            depth, j = 0, i + 1
+            while j < len(code):
+                depth += {"(": 1, ")": -1}.get(code[j], 0)
+                j += 1
+                if depth == 0:
+                    break
+            out.append("0")
+            i = j
+        else:
+            out.append(code[i])
+            i += 1
+    return "".join(out)
+
+
 CANARY_NAMESPACE_LINES = (
     "unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private \\",
     "mount -n -t proc -o nosuid,nodev,noexec proc /proc || private_mount_failure proc",
@@ -313,11 +339,51 @@ class DenylistTests(unittest.TestCase):
                             # `command -v` inspects availability; it does not run mount.
                             if function == "svc_start" and line.strip() == 'for tool in unshare setpriv mount umount setsid renice; do command -v "$tool" >/dev/null || return 1; done':
                                 continue
+                        if (path.name == "polyseatctl" and function in GPU_READONLY_FUNCTIONS
+                                and pattern in GPU_READONLY_PATTERNS):
+                            continue
                         # The controller may *read* or log about these; it may not run them.
                         self.assertRegex(line, r"(log |echo |printf |die |#|\".*\"|'.*')",
                                          f"{path.name}: {line}")
                 if line == "}":
                     function = ""
+
+    def test_gpu_guard_functions_are_read_only(self):
+        text = (PLUGIN / "src/emhttp/scripts/polyseatctl").read_text()
+        shell_write = re.compile(
+            r"(?<![<>&2])>(?![&>]?\s*(&2|/dev/null))"   # any output redirection except to stderr or /dev/null
+            r"|\b(rm|mv|cp|ln|mkdir|rmdir|chmod|chown|touch|tee|truncate|dd|install|mknod|kill|flock|exec|eval)\s"
+            r"|\b(virsh|modprobe|insmod|rmmod|nvidia-smi|nvidia-modprobe|docker|fuser|incus|sh|bash)\b")
+        # Embedded awk/sed/jq programs (single-quoted) may not write files, run commands or pipe.
+        program_write = re.compile(r"system\s*\(|\|\s*\"|\"\s*\||print[f]?[^;}]*>\s*\"|\bw\s+/|fflush|close\(")
+        seen = set()
+        for name in GPU_READONLY_FUNCTIONS:
+            m = re.search(rf"^{name}\(\) \{{(.*?)$", text, re.MULTILINE)
+            self.assertIsNotNone(m, name)
+            first = re.sub(r"\s#.*$", "", m.group(1)).strip()
+            if first.endswith("}"):
+                body = first[:-1]
+            else:
+                rest = re.search(r"\n(.*?)^\}", text[m.end():], re.MULTILINE | re.DOTALL)
+                self.assertIsNotNone(rest, name)
+                body = rest.group(1)
+            seen.add(name)
+            body = "\n".join(line for line in body.splitlines() if not line.strip().startswith("#"))
+            for program in re.findall(r"'[^']*'", body, re.DOTALL):
+                self.assertIsNone(program_write.search(program), f"{name}: {program}")
+            stripped = re.sub(r'"(?:[^"\\]|\\.)*"', '""', re.sub(r"'[^']*'", "''", body, flags=re.DOTALL))
+            stripped = strip_arithmetic(stripped)  # `>>` in $(( )) is a shift, not a redirection
+            for line in stripped.splitlines():
+                code = re.sub(r"\s#.*$", "", line).strip()
+                if code:
+                    self.assertIsNone(shell_write.search(code), f"{name}: {code}")
+            for sysfs in ("unbind", "/bind", "new_id", "remove_id", "rescan", "/reset"):
+                self.assertNotIn(sysfs, body, name)
+        self.assertEqual(seen, set(GPU_READONLY_FUNCTIONS))
+        # The command is dispatched before any lock, state directory or log file is created.
+        dispatch = re.search(r"^\s*gpu-preflight\) cmd_gpu_preflight \"\$\{args\[@\]\}\"; return ;;$", text, re.MULTILINE)
+        mutating = re.search(r"^\s*require_mutation_allowed ", text, re.MULTILINE)
+        self.assertTrue(dispatch and mutating and dispatch.start() < mutating.start())
 
     def test_namespace_exception_is_narrow_and_requires_private_wrapper(self):
         body = "\n".join((CANARY_NAMESPACE_GUARDS[0], "setpriv --bounding-set=-sys_module,-sys_rawio \\",
