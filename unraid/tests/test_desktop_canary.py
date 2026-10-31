@@ -9,6 +9,7 @@ import hashlib
 import re
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -193,11 +194,12 @@ class DesktopPolicyGuardTests(unittest.TestCase):
     def test_budgets_are_two_fixed_tuples(self):
         show = 'echo "$CANARY_CPU_MAX|$CANARY_MEMORY_MAX|$CANARY_PIDS_MAX|$CANARY_DATA_MAX_KB|$CANARY_CPUSET|$CANARY_INSTANCE|$CANARY_GPU_PCI"'
         res = source_ctl(f'{show}; canary_budget_select desktop; {show}; canary_budget_select gpu; {show}; '
-                         'canary_budget_select bogus || echo refused')
+                         f'canary_budget_select steam; {show}; canary_budget_select bogus || echo refused')
         self.assertEqual(res.stdout.splitlines(), [
             "100000 1000000|536870912|256|262144|24-27|polyseat-canary-cpu|",
             "200000 100000|3221225472|2048|3145728|24-27|polyseat-desktop-cpu|",
             "200000 100000|3221225472|2048|3145728|24-27|polyseat-desktop-gpu|0000:01:00.0",
+            "400000 100000|8589934592|4096|8388608|24-27|polyseat-steam-gpu|0000:01:00.0",
             "refused"])
 
 
@@ -424,6 +426,199 @@ class GpuCanaryPolicyTests(unittest.TestCase):
         self.assertEqual(app.check("gpu-smoke"), 2)
 
 
+class SteamCanaryPolicyTests(unittest.TestCase):
+    """steam-smoke (owner decision 2026-10-31): the GPU seat plus compat32 and exactly one LAN NIC, a veth in br0."""
+    INIT = ("init polyseat-desktop polyseat-steam-gpu --storage default --config boot.autostart=false "
+            "--config security.privileged=false --config security.nesting=false --config limits.cpu=4 "
+            "--config limits.memory=8GiB --config limits.processes=4096 --config nvidia.runtime=true "
+            "--config nvidia.driver.capabilities=compute,utility,video,graphics,compat32")
+    NIC = "config device add polyseat-steam-gpu eth0 nic nictype=bridged parent=br0 hwaddr=00:16:3e:50:53:01 name=eth0"
+    ETH0 = {"type": "nic", "nictype": "bridged", "parent": "br0", "hwaddr": "00:16:3e:50:53:01", "name": "eth0"}
+
+    def allowed(self, operation, command):
+        return DesktopAllowListTests.allowed(self, operation, command)
+
+    def test_steam_sequence_is_exact_and_only_for_steam_smoke(self):
+        for command in (self.INIT, self.NIC,
+                        "config device add polyseat-steam-gpu gpu gpu pci=0000:01:00.0 mode=0666",
+                        "start polyseat-steam-gpu", "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest steam",
+                        "stop polyseat-steam-gpu --timeout 30", "delete polyseat-steam-gpu"):
+            with self.subTest(command=command):
+                self.assertTrue(self.allowed(4, command))
+                for other in (1, 2, 3):
+                    self.assertFalse(self.allowed(other, command))
+        for command in (self.NIC.replace("parent=br0", "parent=docker0"),
+                        self.NIC.replace("nictype=bridged", "nictype=macvlan"),
+                        self.NIC.replace("hwaddr=00:16:3e:50:53:01", "hwaddr=00:16:3e:50:53:02"),
+                        self.NIC.replace(" hwaddr=00:16:3e:50:53:01", ""),
+                        self.NIC + " security.mac_filtering=false",
+                        self.NIC.replace("eth0 nic", "eth1 nic").replace("name=eth0", "name=eth1"),
+                        "config device add polyseat-steam-gpu proxy proxy listen=tcp:0.0.0.0:47989 connect=tcp:127.0.0.1:47989",
+                        self.INIT.replace(",compat32", ""), self.INIT.replace("security.nesting=false", "security.nesting=true"),
+                        "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest steam-cpu",
+                        "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest nvidia",
+                        "exec polyseat-steam-gpu -- /usr/bin/steam"):
+            with self.subTest(command=command):
+                self.assertFalse(self.allowed(4, command))
+
+    def steam_instance(self, guard):
+        inst = json.loads(json.dumps(guard.instance))
+        inst["name"] = "polyseat-steam-gpu"
+        for d in (inst["config"], inst["expanded_config"]):
+            d.update({"limits.cpu": "4", "limits.memory": "8GiB", "limits.processes": "4096", "nvidia.runtime": "true",
+                      "nvidia.driver.capabilities": "compute,utility,video,graphics,compat32",
+                      "volatile.eth0.host_name": "veth1a2b3c4d"})
+        gpu = {"type": "gpu", "pci": "0000:01:00.0", "mode": "0666"}
+        for d in (inst["devices"], inst["expanded_devices"]):
+            d.update(gpu=gpu, eth0=dict(self.ETH0))
+        return inst
+
+    def test_policy_guard_accepts_only_the_exact_steam_instance(self):
+        guard = DesktopPolicyGuardTests("test_fixed_desktop_instance_passes")
+        guard.setUp()
+        self.addCleanup(guard.tmp.cleanup)
+        inst = self.steam_instance(guard)
+        self.assertEqual(guard.guard(inst, profile="steam").returncode, 0, guard.guard(inst, profile="steam").stderr)
+        self.assertNotEqual(guard.guard(inst, profile="gpu").returncode, 0)  # the M2 run never has a NIC
+        for mutate in (lambda i: i["devices"]["eth0"].update(parent="docker0"),
+                       lambda i: i["devices"]["eth0"].update(hwaddr="00:16:3e:50:53:02"),
+                       lambda i: i["devices"]["eth0"].update(nictype="macvlan"),
+                       lambda i: i["devices"]["eth0"].update({"security.mac_filtering": "false"}),
+                       lambda i: i["devices"].update(eth1=dict(self.ETH0, name="eth1")),
+                       lambda i: i["config"].update({"nvidia.driver.capabilities": "compute,utility,video,graphics"}),
+                       lambda i: i["config"].update({"limits.memory": "2GiB"}),
+                       lambda i: i["config"].update({"volatile.eth1.host_name": "veth0"}),
+                       lambda i: i["config"].update({"security.nesting": "true"})):
+            bad = json.loads(json.dumps(inst))
+            mutate(bad)
+            with self.subTest(dev=bad["devices"], cfg=bad["config"]):
+                self.assertNotEqual(guard.guard(bad, profile="steam").returncode, 0)
+
+    def test_steam_token_needs_the_image_binding(self):
+        app = DesktopApprovalTests("test_stage_and_smoke_are_bound_to_bundle_and_image")
+        app.setUp()
+        self.addCleanup(app.tmp.cleanup)
+        app.token["actions"] = ["steam-smoke"]
+        app.sign()
+        app.stage_copy(app.image.read_bytes())
+        self.assertEqual(app.check("steam-smoke"), 0)
+        self.assertEqual(app.check("gpu-smoke"), 2)
+        del app.token["seat_image_sha256"]
+        app.sign()
+        self.assertEqual(app.check("steam-smoke"), 2)
+
+    def lan(self, layout):
+        root = Path(tempfile.mkdtemp(prefix="polyseat-lan-"))
+        self.addCleanup(shutil.rmtree, root)
+        net = root / "sys/class/net"
+        for name, (bridge, mac, ports) in layout.items():
+            (net / name).mkdir(parents=True)
+            (net / name / "address").write_text(mac + "\n")
+            if bridge:
+                (net / name / "bridge").mkdir()
+                (net / name / "brif").mkdir()
+                for port in ports:
+                    (net / name / "brif" / port).mkdir()
+        return source_ctl('ROOT="$1"; steam_lan_precheck && echo "OK $(steam_lan_members)"', str(root))
+
+    TOWER_ICD = ('{\n    "file_format_version" : "1.0.1",\n    "ICD": {\n        "library_path": "libGLX_nvidia.so.0",\n'
+                 '        "api_version" : "1.4.329"\n    }\n}\n')  # Tower, read-only 2026-10-31
+
+    def icd(self, content=None, path="etc/vulkan/icd.d/nvidia_icd.json", symlink=False):
+        root = Path(tempfile.mkdtemp(prefix="polyseat-icd-"))
+        self.addCleanup(shutil.rmtree, root)
+        target = root / path
+        target.parent.mkdir(parents=True)
+        if symlink:
+            (root / "real.json").write_text(self.TOWER_ICD)
+            target.symlink_to(root / "real.json")
+        elif content is not None:
+            target.write_text(content)
+        out = root / "evidence"
+        out.mkdir()
+        res = source_ctl('ROOT="$1"; steam_vulkan_icd "$2" && cat "$2/nvidia_icd.json"', str(root), str(out))
+        return res
+
+    def test_host_vulkan_manifest_is_copied_only_in_the_exact_driver_shape(self):
+        res = self.icd(self.TOWER_ICD)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout), {"file_format_version": "1.0.1",
+                                                  "ICD": {"library_path": "libGLX_nvidia.so.0", "api_version": "1.4.329"}})
+        self.assertEqual(self.icd(self.TOWER_ICD, path="usr/share/vulkan/icd.d/nvidia_icd.json").returncode, 0)
+        good = json.loads(self.TOWER_ICD)
+        for bad in (dict(good, ICD=dict(good["ICD"], library_path="/tmp/evil.so")),
+                    dict(good, ICD=dict(good["ICD"], library_path="libvulkan_lvp.so")),
+                    dict(good, extra="x"), dict(good, ICD=dict(good["ICD"], is_portability_driver=True)),
+                    dict(good, ICD=dict(good["ICD"], api_version="1.4.329; rm -rf /"))):
+            with self.subTest(bad=bad):
+                self.assertNotEqual(self.icd(json.dumps(bad)).returncode, 0)
+        self.assertNotEqual(self.icd(None).returncode, 0)  # missing
+        self.assertNotEqual(self.icd(symlink=True).returncode, 0)
+        self.assertNotEqual(self.icd(self.TOWER_ICD + " " * 5000).returncode, 0)  # oversized
+
+    def test_vulkan_push_is_exact(self):
+        ok = ("file push -p --uid 0 --gid 0 --mode 0644 /var/run/polyseat-unraid/steam-evidence/nvidia_icd.json "
+              "polyseat-steam-gpu/usr/share/vulkan/icd.d/nvidia_icd.json")
+        self.assertTrue(self.allowed(4, ok))
+        self.assertFalse(self.allowed(3, ok))
+        for bad in (ok.replace("nvidia_icd.json polyseat", "../../etc/shadow polyseat"),
+                    ok.replace("/usr/share/vulkan/icd.d/nvidia_icd.json", "/etc/sudoers"),
+                    ok.replace("--mode 0644", "--mode 4755"), "file pull polyseat-steam-gpu/etc/shadow /tmp/x"):
+            with self.subTest(bad=bad):
+                self.assertFalse(self.allowed(4, bad))
+
+    def test_lan_precheck_needs_br0_as_a_bridge_and_a_free_mac(self):
+        res = self.lan({"br0": (True, "aa:bb:cc:00:00:01", ["bond0", "vnet15"]), "bond0": (False, "aa:bb:cc:00:00:02", [])})
+        self.assertEqual(res.stdout.strip(), "OK bond0 vnet15", res.stderr)
+        self.assertNotIn("OK", self.lan({"br0": (False, "aa:bb:cc:00:00:01", [])}).stdout)  # not a bridge
+        self.assertNotIn("OK", self.lan({"eth0": (False, "aa:bb:cc:00:00:01", [])}).stdout)  # no br0
+        taken = self.lan({"br0": (True, "aa:bb:cc:00:00:01", []), "veth9": (False, "00:16:3e:50:53:01", [])})
+        self.assertNotIn("OK", taken.stdout)
+        self.assertIn("already used by veth9", taken.stderr)
+
+    def test_steam_run_checks_token_time_gpu_lan_release_and_needs_the_hook(self):
+        body = re.search(r"^cmd_steam_smoke\(\) \(\n(.*?)^\)", CTL.read_text(), re.MULTILINE | re.DOTALL).group(1)
+        for needle in ("remaining >= STEAM_SELFTEST_TIMEOUT + 300", 'gpu_preflight_run "$GPU_CANARY_PCI"',
+                       "steam_lan_precheck ||", "gpu_release_check ||", '[[ ! -e $(host_path "/sys/class/net/$veth") ]]',
+                       'desktop_selftest start "$STEAM_INSTANCE" steam "$dir" "$STEAM_SELFTEST_TIMEOUT"'):
+            self.assertIn(needle, body)
+        self.assertLess(body.index("steam_lan_precheck ||"), body.index("svc_start"))
+        self.assertIn("($CANARY_OPERATION -ne 3 && $CANARY_OPERATION -ne 4) || $LXC_HOOK_READY -eq 1", CTL.read_text())
+
+
+class NftStubTests(unittest.TestCase):
+    """Incus 7.5.1 only knows nftables; Tower has no nft. The canary daemon gets a read-only stub so that a bridged
+    NIC's stop can finish and remove its veth (local Steam rehearsal 2026-10-31), and no rule can ever be written."""
+
+    def tools(self):
+        run = Path(tempfile.mkdtemp(prefix="polyseat-deny-"))
+        self.addCleanup(shutil.rmtree, run)
+        res = source_ctl('RUN_DIR="$1"; canary_deny_tools_prepare && ls "$1/deny-tools"', str(run))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return run / "deny-tools", res.stdout.split()
+
+    def test_only_incus_ruleset_read_is_answered_with_an_empty_ruleset(self):
+        tools, names = self.tools()
+        self.assertEqual(sorted(names), sorted(["modprobe", "insmod", "rmmod", "btrfs", "lvm", "zfs", "zpool",
+                                                "qemu-system-x86_64", "nft"]))
+        read = subprocess.run([str(tools / "nft"), "--terse", "--json", "-nn", "list", "ruleset"],
+                              capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(read.returncode, 0)
+        data = json.loads(read.stdout)
+        self.assertEqual([list(item) for item in data["nftables"]], [["metainfo"]])  # no table, chain or rule
+        for argv in (["create", "table", "incus_test_x"], ["delete", "table", "incus_test_x"], ["list", "ruleset"],
+                     ["-f", "/tmp/rules.nft"], ["flush", "chain", "netdev", "incus", "egress_netprio"],
+                     ["--terse", "--json", "-nn", "list", "ruleset", ";", "flush", "ruleset"]):
+            with self.subTest(argv=argv):
+                res = subprocess.run([str(tools / "nft"), *argv], capture_output=True, text=True,
+                                     env={"PATH": "/usr/bin:/bin"})
+                self.assertEqual(res.returncode, 126)
+                self.assertIn("nftables changes are disabled", res.stderr)
+        mod = subprocess.run([str(tools / "modprobe"), "nf_tables"], capture_output=True, text=True,
+                             env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(mod.returncode, 126)
+
+
 class SupervisorEnvironmentTests(unittest.TestCase):
     """The expiry supervisor runs `env -i ... bash -u` with an explicit function list: every global those
     functions read must be passed, or `-u` kills the supervisor (CI run 41199384911 failed exactly so)."""
@@ -449,12 +644,13 @@ class FailurePathTests(unittest.TestCase):
 
     def test_both_runs_clean_their_instance_before_the_hard_stop(self):
         text = CTL.read_text()
-        for function, instance in (("cmd_desktop_smoke", "DESKTOP_INSTANCE"), ("cmd_gpu_smoke", "GPU_INSTANCE")):
+        for function, instance in (("cmd_desktop_smoke", "DESKTOP_INSTANCE"), ("cmd_gpu_smoke", "GPU_INSTANCE"),
+                                   ("cmd_steam_smoke", "STEAM_INSTANCE")):
             body = re.search(rf"^{function}\(\) \(\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
             self.assertIn(f'canary_failure_cleanup "${instance}"; svc_stop full', body, function)
 
     def test_cleanup_uses_only_commands_the_operation_allows(self):
-        for operation, instance in ((2, "polyseat-desktop-cpu"), (3, "polyseat-desktop-gpu")):
+        for operation, instance in ((2, "polyseat-desktop-cpu"), (3, "polyseat-desktop-gpu"), (4, "polyseat-steam-gpu")):
             for command in (f"stop {instance} --force --timeout 5", f"delete {instance}", "image delete polyseat-desktop"):
                 with self.subTest(op=operation, command=command):
                     self.assertTrue(DesktopAllowListTests.allowed(self, operation, command))

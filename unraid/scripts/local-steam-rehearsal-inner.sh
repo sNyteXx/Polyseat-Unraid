@@ -1,0 +1,89 @@
+#!/bin/bash
+# shellcheck disable=SC2015  # `check && pass || fail`: pass only prints, fail exits; both outcomes are intended
+# Inside the disposable rehearsal container only (see local-steam-rehearsal.sh).
+set -euo pipefail
+[[ -f /.dockerenv && ! -e /etc/unraid-version ]] || { echo 'container only' >&2; exit 2; }
+res=/out/summary.txt; : > "$res"
+pass() { printf 'PASS %s\n' "$1" | tee -a "$res"; }
+fail() { printf 'FAIL %s\n' "$1" | tee -a "$res"; exit 1; }
+trap 'chmod -R a+rX /out 2>/dev/null || true' EXIT
+# The controller's exact NIC (polyseatctl STEAM_NIC_PARENT / STEAM_HWADDR).
+parent=br0 mac=00:16:3e:50:53:01 c=polyseat-steam-rehearsal
+
+slot=/opt/slot; mkdir -p "$slot"; tar -xzf /in/bundle.tar.gz -C "$slot"
+# The bundled liblxc mounts every rootfs here (lxc_rootfs_mount), as the controller prepares it.
+mkdir -p /var/lib/polyseat-lxc/rootfs
+
+# Fixture LAN: br0 + DHCP/DNS (dnsmasq) + NAT to this container's uplink, in place of Tower's br0 and router.
+ip link add "$parent" type bridge && ip addr add 10.77.0.1/24 dev "$parent" && ip link set "$parent" up
+sysctl -qw net.ipv4.ip_forward=1
+iptables -t nat -A POSTROUTING -s 10.77.0.0/24 ! -o "$parent" -j MASQUERADE
+upstream=$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf)
+dnsmasq --interface="$parent" --bind-interfaces --except-interface=lo --dhcp-range=10.77.0.10,10.77.0.50,1h \
+  --dhcp-option=option:router,10.77.0.1 --dhcp-option=option:dns-server,10.77.0.1 --no-resolv \
+  --server="${upstream:-1.1.1.1}" --pid-file=/run/dnsmasq.pid --log-dhcp --log-facility=/out/dnsmasq.log
+pass "fixture LAN: $parent 10.77.0.1/24, dnsmasq DHCP+DNS (upstream ${upstream:-1.1.1.1}), NAT"
+members() { find "/sys/class/net/$parent/brif" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' '; }
+before=$(members)
+
+# The controller's own deny-tools (its read-only nft stub included), first on the daemon's PATH as on Tower.
+run=/run/polyseat-rehearsal; mkdir -p "$run"
+# shellcheck disable=SC1090,SC2034  # the real controller function; RUN_DIR is read by it
+( source <(sed '$d' /in/emhttp/scripts/polyseatctl); RUN_DIR=$run; canary_deny_tools_prepare ) || fail 'controller deny-tools'
+pass "controller deny-tools: $(find "$run/deny-tools" -type f -printf '%f ' | tr -s ' ')"
+
+mkdir -p /sys/fs/cgroup/daemon
+INCUS_DIR=/var/lib/incus-test; export INCUS_DIR
+( echo $BASHPID > /sys/fs/cgroup/daemon/cgroup.procs
+  exec env -i PATH="$run/deny-tools:$slot/payload/tools:/usr/sbin:/usr/bin:/sbin:/bin" HOME=/root LANG=C INCUS_DIR="$INCUS_DIR" \
+    INCUS_EXEC_PATH="$slot/payload/bin/incusd" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
+    "$slot/payload/bin/incusd" --group "" --logfile /out/incusd.log ) > /out/incusd.out 2>&1 &
+inc() { env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root INCUS_DIR="$INCUS_DIR" timeout "${T:-120}" "$slot/payload/bin/incus" "$@"; }
+for _ in $(seq 60); do [[ -S $INCUS_DIR/unix.socket ]] && inc info >/dev/null 2>&1 && break; sleep 1; done
+inc info >/dev/null || fail 'daemon not healthy'
+inc storage create default dir >/dev/null; inc profile device add default root disk path=/ pool=default >/dev/null
+T=600 inc image import /in/seat.tar.xz --alias polyseat-desktop >/dev/null
+# The controller's init for steam-smoke minus the GPU (no NVIDIA here) and minus limits.*: on Tower the canary
+# envelope's outer group is the hard limit and Incus skips them there (rehearsed by the CI desktop canary); here
+# LXC could not delegate the controllers. The NIC line is byte-identical. Memory is measured outside (docker stats).
+T=600 inc init polyseat-desktop "$c" --storage default --config boot.autostart=false --config security.privileged=false \
+  --config security.nesting=false >/dev/null
+inc config device add "$c" eth0 nic nictype=bridged "parent=$parent" "hwaddr=$mac" name=eth0 >/dev/null
+inc image delete polyseat-desktop >/dev/null
+inc query "/1.0/instances/$c" > /out/instance-before-start.json
+pass 'seat image imported; instance with the controller NIC (bridged br0, fixed MAC)'
+
+T=120 inc start "$c" > /out/start.txt 2>&1 || {
+  cp "$INCUS_DIR/logs/$c/lxc.log" /out/lxc-start-failed.log 2>/dev/null || true
+  fail "start failed: $(grep -E 'ERROR' "$INCUS_DIR/logs/$c/lxc.log" 2>/dev/null | head -n 3 | tr '\n' '|' | cut -c1-400)"
+}
+inc query "/1.0/instances/$c" > /out/instance-running.json
+jq -r '.config | to_entries[] | select(.key | startswith("volatile.eth0")) | .key' /out/instance-running.json |
+  sort > /out/volatile-eth0-keys.txt
+pass "running; eth0 volatile keys: $(tr '\n' ' ' < /out/volatile-eth0-keys.txt)"
+pass "br0 members while running: $(members)"
+# The controller's Vulkan-manifest push, same flags (neutral target: no NVIDIA driver here to point Vulkan at).
+printf '%s\n' '{"file_format_version": "1.0.1", "ICD": {"library_path": "libGLX_nvidia.so.0", "api_version": "1.4.329"}}' > /tmp/icd.json
+inc file push -p --uid 0 --gid 0 --mode 0644 /tmp/icd.json "$c/usr/share/polyseat-rehearsal/icd.d/nvidia_icd.json" &&
+  [[ $(inc exec "$c" -- stat -c '%u %a' /usr/share/polyseat-rehearsal/icd.d/nvidia_icd.json) == "0 644" ]] &&
+  pass 'file push -p --uid 0 --gid 0 --mode 0644 works into the running seat' || fail 'file push'
+
+rc=0
+T=1500 inc exec "$c" -- /usr/local/bin/polyseat-selftest steam-cpu > /out/selftest.json 2> /out/selftest.log || rc=$?
+for f in screenshot.png screenshot-desktop.png screenshot-steam.png; do
+  inc exec "$c" -- cat "/var/lib/polyseat-selftest/$f" > "/out/$f" 2>/dev/null || rm -f "/out/$f"
+done
+printf 'incus_dir_kb_after_selftest=%s\n' "$(du -sk "$INCUS_DIR" | cut -f1)" | tee /out/memory.txt
+jq -r '.checks[] | "\(.status) \(.name): \(.detail)"' /out/selftest.json 2>/dev/null | cut -c1-220 | tee /out/checks.txt
+[[ $rc == 0 ]] && jq -e '.verdict == "PASS"' /out/selftest.json >/dev/null && pass 'polyseat-selftest steam-cpu PASS' ||
+  { inc stop "$c" --force >/dev/null 2>&1 || true; fail "polyseat-selftest steam-cpu failed (rc=$rc): $(jq -r .reason /out/selftest.json 2>/dev/null)"; }
+
+T=60 inc stop "$c" --timeout 30 || T=30 inc stop "$c" --force
+after=$(members)
+# Errors of the NIC's start/stop (the daemon-start nftables warning about the refused test table is expected).
+grep -E 'level=error.*(device=eth0|veth|Failed to stop device|netprio)' /out/incusd.log | cut -c1-300 > /out/incusd-nic-errors.txt || true
+[[ ! -s /out/incusd-nic-errors.txt ]] && pass 'stop: no eth0/nft error in incusd.log' || fail "stop: $(head -n1 /out/incusd-nic-errors.txt)"
+[[ $after == "$before" ]] && pass "stopped: br0 members back to '${before}' (host veth removed)" || fail "br0 members after stop: '$after' (before '$before')"
+T=120 inc delete "$c" >/dev/null
+inc admin shutdown >/dev/null 2>&1 || true
+echo DONE | tee -a "$res"

@@ -120,11 +120,11 @@ class CanaryRuntimeTests(unittest.TestCase):
         result = self.shell(r'''
           RUN_DIR="$1"
           canary_deny_tools_prepare || exit 10
-          for tool in modprobe insmod rmmod btrfs lvm zfs zpool qemu-system-x86_64; do
+          for tool in modprobe insmod rmmod btrfs lvm zfs zpool qemu-system-x86_64 nft; do
             "$RUN_DIR/deny-tools/$tool" --help
             [[ $? == 126 ]] || exit 11
           done
-          [[ $(ls "$RUN_DIR/deny-tools" | wc -l) == 8 ]] || exit 13
+          [[ $(ls "$RUN_DIR/deny-tools" | wc -l) == 9 ]] || exit 13
           canary_deny_tools_prepare && exit 12
           exit 0
         ''')
