@@ -140,11 +140,13 @@ SOURCE_DATE_EPOCH=$(git -C "$GITHUB_WORKSPACE" log -1 --format=%ct) python3 -I \
 ssh-keygen -q -Y sign -f "$work/release-key" -n polyseat-unraid-seat-image "$work/seat.manifest.json"
 uuid=$(< /sys/class/dmi/id/product_uuid)
 host_sha=$(printf '%s' "${uuid,,}" | sha256sum | awk '{print $1}')
-mkdir -- "$work/package"
-python3 "$GITHUB_WORKSPACE/unraid/scripts/build-canary-package.py" \
-  --version "$(date -u +%Y.%m.%d).ci$GITHUB_RUN_ID" --out "$work/package" --acknowledge-artifacts-only
-mapfile -t packages < <(find "$work/package" -maxdepth 1 -type f -name '*.txz')
-[[ ${#packages[@]} == 1 ]] || fail 'expected exactly one canary controller package'
+# The exact controller package the CPU canary rehearsal of this run used (same artifact, not a rebuild).
+controller_package="$proof/canary-controller.txz"
+[[ -f $controller_package && ! -L $controller_package ]] || fail 'CPU rehearsal controller package missing'
+controller_sha=$(sha256sum "$controller_package" | awk '{print $1}')
+[[ $(jq -er .controller_sha256 "$proof/canary-rehearsal.json") == "$controller_sha" ]] ||
+  fail 'controller package differs from the one the CPU canary rehearsal bound'
+seat_manifest_sha=$(sha256sum "$work/seat.manifest.json" | awk '{print $1}')
 
 # Two CPUs of the runner (the desktop budget is two CPUs' worth on Tower's four E-cores).
 host_cpuset=$(< /sys/fs/cgroup/cpuset.cpus.effective)
@@ -168,7 +170,7 @@ mkdir -p "$flash" "$fixture/etc" "$fixture/var/lib" "$data"
 chmod 0755 "$fixture/var" "$fixture/var/lib" "$data"
 # RAM-backed like Tower's /var/lib; sized above the controller's monitored 3 GiB data budget.
 mount -t tmpfs -o size=4g,nosuid,nodev,mode=0755 tmpfs "$data"
-tar --extract --xz --file "${packages[0]}" --directory "$fixture" --no-same-owner
+tar --extract --xz --file "$controller_package" --directory "$fixture" --no-same-owner
 python3 - "$ctl_path" "$host_cpuset" "$ci_cpuset" "$workload" "$watchdog" "$tower_path" <<'PY'
 from pathlib import Path
 import re
@@ -185,7 +187,9 @@ for name, value in zip(('CANARY_HOST_CPUSET', 'CANARY_CPUSET', 'CANARY_CGROUP',
 path.write_text(text)
 PY
 jq -n --arg file "$(sha256sum "$ctl_path" | awk '{print $1}')" --arg cpus "$ci_cpuset" --arg host "$host_cpuset" \
-  '{ci_controller_sha256:$file,overrides:{CANARY_CPUSET:$cpus,CANARY_HOST_CPUSET:$host}}' > "$evidence/render.json"
+  --arg workload "$workload" --arg watchdog "$watchdog" --arg safe "$tower_path" \
+  '{ci_controller_sha256:$file,overrides:{CANARY_CPUSET:$cpus,CANARY_HOST_CPUSET:$host,CANARY_CGROUP:$workload,
+    CANARY_WATCHDOG_CGROUP:$watchdog,SAFE_PATH:$safe}}' > "$evidence/render.json"
 printf 'version="7.3.3"\n' > "$fixture/etc/unraid-version"
 printf 'SERVICE="disabled"\nDATA_DIR="/var/lib/polyseat-unraid-canary"\nACCEPT_NO_LSM="yes"\n' > "$flash/polyseat-unraid.cfg"
 printf 'polyseat-unraid-release namespaces="polyseat-unraid-bundle,polyseat-unraid-seat-image" %s\n' \
@@ -255,10 +259,13 @@ done
 step host-state-unchanged
 
 jq -n --arg commit "$commit" --arg archive "$archive_sha" --arg seat "$seat_sha" --arg fixture "$fixture_done" \
+  --arg controller "$controller_sha" --arg seat_manifest "$seat_manifest_sha" \
+  --slurpfile manifest "$work/seat.manifest.json" --slurpfile render "$evidence/render.json" \
   --rawfile steps "$evidence/steps.txt" --rawfile peak "$evidence/sampler-peak.txt" \
   --slurpfile st "$evidence/controller-evidence/selftest-start.json" \
   --slurpfile rs "$evidence/controller-evidence/selftest-restart.json" \
-  '{schema:1,commit:$commit,archive_sha256:$archive,seat_image_sha256:$seat,platform:"disposable-linux",
+  '{schema:1,commit:$commit,archive_sha256:$archive,controller_sha256:$controller,seat_image_sha256:$seat,
+    seat_manifest_sha256:$seat_manifest,seat_manifest:$manifest[0],ci_rendering:$render[0],platform:"disposable-linux",
     status:"passed",steps:($steps|split("\n")|map(select(length>0))),measurements:$peak,
     selftest:{start:$st[0],restart:$rs[0]},
     caveat:"Desktop canary gate and lifecycle on disposable Linux; not an Unraid test or production approval"}' \
