@@ -6,4 +6,9 @@ encoder = @ENCODER@
 origin_web_ui_allowed = pc
 # Never ask the router for port forwards; seats are LAN-only (unraid/docs/streaming-network.md).
 upnp = disabled
+# No input devices yet: Sunshine creates them with uinput on the HOST (a virtual keyboard reaches Unraid's text
+# console); that needs the input broker first. The seat has no /dev/uinput either.
+keyboard = disabled
+mouse = disabled
+controller = disabled
 log_path = /home/player/.config/sunshine/sunshine.log

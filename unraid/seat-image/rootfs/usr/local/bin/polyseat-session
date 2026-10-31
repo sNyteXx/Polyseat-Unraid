@@ -1,0 +1,122 @@
+#!/bin/bash
+# polyseat-session start [nvidia|cpu] | status | pin NNNN | stop
+#
+# One interactive LAN session in the Steam seat, driven by the controller (incus exec, as root inside the seat).
+# Owner decision 2026-10-31 (M3):
+# - The seat is on the LAN via br0 only while the session runs; Sunshine's stream ports serve the LAN only (no port
+#   forward, no UPnP), and its web UI answers localhost only.
+# - Pairing: Moonlight shows a PIN, the owner relays it, and `pin` hands it to Sunshine for exactly one waiting
+#   request (a wrong PIN destroys the request it was aimed at, so with several waiting nothing is paired).
+# - No input devices yet. Sunshine would create them with uinput on the HOST, where a virtual keyboard reaches
+#   Unraid's text console; that needs upstream's input broker first. Steam signs in by QR code (Steam Mobile app).
+#
+# stdout: one JSON object per call. Secrets (the random Sunshine web credentials) stay in a root-only file here.
+set -u
+PLAYER=player PUID=1000
+RT=/run/user/$PUID
+HOME_DIR=/home/$PLAYER
+STATE=/var/lib/polyseat-session
+CRED=$STATE/sunshine-credentials
+SUNSHINE_URL=https://127.0.0.1:47990
+STEAM_UNIT=polyseat-steam-session.service
+SUNSHINE_LOG=$HOME_DIR/.config/sunshine/sunshine.log
+
+[ "$(id -u)" = 0 ] || { echo '{"ok": false, "error": "polyseat-session must run as root inside the seat"}'; exit 2; }
+umask 077
+
+as_player() {
+  runuser -u "$PLAYER" -- env HOME="$HOME_DIR" XDG_RUNTIME_DIR="$RT" DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/bus" "$@"
+}
+uctl() { as_player timeout 40 systemctl --user "$@"; }
+fail() { jq -nc --arg e "$1" '{ok: false, error: $e}'; exit 1; }
+sock() { find "$RT" -maxdepth 1 -type s -name "$1" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-; }
+lan_ip() { ip -4 -o addr show dev eth0 scope global 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1; }
+api() { # METHOD PATH [JSON] : Sunshine's own API on localhost, with this session's credentials
+  [ -s "$CRED" ] || return 1
+  curl -sk --max-time "${API_TIMEOUT:-10}" -u "$(cat "$CRED")" -X "$1" -H 'Content-Type: application/json' \
+    ${3:+--data "$3"} "$SUNSHINE_URL$2"
+}
+
+cmd_start() {
+  local profile=${1:-nvidia} ip pass xdisp wdisp vendor
+  case "$profile" in nvidia) vendor=nvidia ;; cpu) vendor=mesa ;; *) fail "profile must be nvidia or cpu" ;; esac
+  [ -e /sys/class/net/eth0 ] || fail "no eth0: the seat was given no NIC"
+  mkdir -p "$STATE" && chmod 0700 "$STATE"
+  # LAN (the image keeps networkd and resolved masked; only this running copy unmasks them).
+  systemctl unmask systemd-networkd.socket systemd-networkd.service systemd-resolved.service >/dev/null 2>&1
+  ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+  systemctl start systemd-networkd.socket systemd-networkd.service systemd-resolved.service || fail "networkd did not start"
+  for _ in $(seq 60); do ip=$(lan_ip); [ -n "$ip" ] && break; sleep 1; done
+  [ -n "${ip:-}" ] || fail "no DHCP address on eth0"
+  for _ in $(seq 60); do systemctl is-active --quiet "user@$PUID.service" && [ -S "$RT/bus" ] && break; sleep 0.5; done
+  [ -S "$RT/bus" ] || fail "the player's user manager is not up"
+  polyseat-profile "$profile" >/dev/null 2>&1 || fail "polyseat-profile $profile failed"
+  # Random web credentials for this session only: needed for /api/pin; the web UI itself is localhost-only.
+  pass=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24)
+  printf 'polyseat:%s' "$pass" > "$CRED"
+  as_player /usr/bin/sunshine --creds polyseat "$pass" >/dev/null 2>&1 || fail "sunshine --creds failed"
+  uctl start polyseat-sway.service || fail "sway did not start"
+  for _ in $(seq 60); do [ -n "$(sock 'wayland-[0-9]*')" ] && break; sleep 0.5; done
+  wdisp=$(basename "$(sock 'wayland-[0-9]*')")
+  as_player sh -c ": > '$SUNSHINE_LOG'"
+  uctl start polyseat-sunshine.service || fail "Sunshine did not start"
+  for _ in $(seq 90); do grep -Eq 'Found H\.264 encoder' "$SUNSHINE_LOG" 2>/dev/null && break; sleep 0.5; done
+  xdisp=$(find /tmp/.X11-unix -maxdepth 1 -name 'X[0-9]*' -printf '%f\n' 2>/dev/null | sed -n 's/^X\([0-9]*\)$/:\1/p' | sort | head -1)
+  as_player timeout 40 systemd-run --user --quiet --collect --unit="$STEAM_UNIT" -E DISPLAY="$xdisp" \
+    -E WAYLAND_DISPLAY="$wdisp" -E __GLX_VENDOR_LIBRARY_NAME="$vendor" -E LANG=en_US.UTF-8 /usr/bin/steam ||
+    fail "Steam did not start"
+  cmd_status
+}
+
+cmd_status() {
+  local paired pending encoder steam users
+  paired=$(api GET /api/clients/list 2>/dev/null | jq -r '(.named_certs // []) | length' 2>/dev/null)
+  pending=$(api GET /api/pin 2>/dev/null | jq -r '(.pairings // []) | length' 2>/dev/null)
+  encoder=$(grep -Eo 'Found H\.264 encoder: [^ ]+ \[[a-z0-9]+\]' "$SUNSHINE_LOG" 2>/dev/null | tail -n 1)
+  steam=$(uctl is-active "$STEAM_UNIT" 2>/dev/null)
+  users=$(grep -c '"AccountName"' "$HOME_DIR/.local/share/Steam/config/loginusers.vdf" 2>/dev/null)
+  jq -nc --arg ip "$(lan_ip)" --arg sunshine "$(uctl is-active polyseat-sunshine.service 2>/dev/null)" \
+    --arg encoder "$encoder" --arg paired "${paired:-?}" --arg pending "${pending:-?}" --arg steam "${steam:-inactive}" \
+    --arg users "${users:-0}" \
+    '{ok: true, ip: $ip, sunshine: $sunshine, encoder: $encoder, paired_clients: $paired, pending_pairings: $pending,
+      steam: $steam, steam_signed_in_accounts: $users}'
+}
+
+cmd_pin() {
+  local pin=${1:-} list count id out
+  [[ $pin =~ ^[0-9]{4}$ ]] || fail "the PIN must be four digits"
+  list=$(api GET /api/pin) || fail "Sunshine's API did not answer"
+  count=$(jq -r '(.pairings // []) | length' <<< "$list" 2>/dev/null)
+  case "$count" in
+    1) id=$(jq -r '.pairings[0].id' <<< "$list") ;;
+    0) fail "no device is waiting: Moonlight has to be showing the PIN while it is entered" ;;
+    *) fail "${count:-?} devices are waiting; a PIN belongs to exactly one of them, so nothing was paired" ;;
+  esac
+  [[ $id =~ ^[0-9a-fA-F]{32}$ ]] || fail "unexpected pairing id from Sunshine"
+  # Sunshine answers only once Moonlight has finished the handshake (or gave up).
+  out=$(API_TIMEOUT=30 api POST /api/pin "$(jq -nc --arg p "$pin" --arg i "$id" '{pin: $p, name: "moonlight", pairing_id: $i}')") ||
+    fail "Sunshine did not answer the pairing"
+  if jq -e '.status == true' <<< "$out" >/dev/null 2>&1; then
+    jq -nc '{ok: true, paired: true}'
+  else
+    fail "not paired: the PIN was wrong or Moonlight stopped waiting"
+  fi
+}
+
+cmd_stop() {
+  local _
+  as_player timeout 30 steam -shutdown >/dev/null 2>&1
+  for _ in $(seq 40); do pgrep -u "$PUID" -f 'steamwebhelper|/ubuntu12_(32|64)/' >/dev/null || break; sleep 0.5; done
+  uctl stop "$STEAM_UNIT" polyseat-sunshine.service polyseat-sway.service >/dev/null 2>&1
+  rm -f "$CRED"
+  if pgrep -u "$PUID" -f 'steamwebhelper|/ubuntu12_(32|64)/|sunshine|sway' >/dev/null; then fail "processes left after stop"; fi
+  jq -nc '{ok: true, stopped: true}'
+}
+
+case "${1:-}" in
+  start) cmd_start "${2:-nvidia}" ;;
+  status) cmd_status ;;
+  pin) cmd_pin "${2:-}" ;;
+  stop) cmd_stop ;;
+  *) echo '{"ok": false, "error": "usage: polyseat-session start [nvidia|cpu] | status | pin NNNN | stop"}'; exit 2 ;;
+esac

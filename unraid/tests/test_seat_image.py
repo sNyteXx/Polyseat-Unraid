@@ -262,6 +262,26 @@ class Selftest(unittest.TestCase):
         self.assertIn("STEAM_PACKAGES='steam lib32-libglvnd lib32-mesa lib32-vulkan-icd-loader ttf-liberation zenity", provision)
         self.assertIn("STEAM_ASSUME='--assume-installed vulkan-driver --assume-installed lib32-vulkan-driver'", provision)
 
+    def test_session_script_contract(self):
+        text = (OVERLAY / "usr/local/bin/polyseat-session").read_text()
+        self.assertTrue(text.startswith("#!/bin/bash\n"))
+        self.assertTrue(os.access(OVERLAY / "usr/local/bin/polyseat-session", os.X_OK))
+        for needle in ('[[ $pin =~ ^[0-9]{4}$ ]]', "[[ $id =~ ^[0-9a-fA-F]{32}$ ]]", '1) id=$(jq -r \'.pairings[0].id\'',
+                       "nothing was paired", "SUNSHINE_URL=https://127.0.0.1:47990", "umask 077",
+                       "sunshine --creds polyseat", '[ -e /sys/class/net/eth0 ] || fail', 'rm -f "$CRED"'):
+            self.assertIn(needle, text)
+        # Only Sunshine's own API on localhost: no other URL, no package manager.
+        self.assertEqual(sorted(set(re.findall(r"https?://[^\s\"']+", text))), ["https://127.0.0.1:47990"])
+        for forbidden in ("pacman", "wget", "apt", "uinput"):
+            self.assertNotRegex(text, rf"(?m)^[^#]*\b{re.escape(forbidden)}", forbidden)
+
+    def test_no_input_devices_and_a_stable_lan_address(self):
+        conf = (OVERLAY / "usr/share/polyseat/sunshine.conf.in").read_text()
+        for line in ("keyboard = disabled", "mouse = disabled", "controller = disabled", "upnp = disabled",
+                     "origin_web_ui_allowed = pc"):
+            self.assertIn(line + "\n", conf)
+        self.assertIn("ClientIdentifier=mac\n", (OVERLAY / "etc/systemd/network/20-polyseat-lan.network").read_text())
+
     def test_smoke_script_uses_the_fixed_names_and_config(self):
         text = SMOKE.read_text()
         for needle in ("CT=polyseat-desktop-cpu", "ALIAS=polyseat-desktop", "boot.autostart=false",

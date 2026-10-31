@@ -604,7 +604,7 @@ class SteamCanaryPolicyTests(unittest.TestCase):
 
     def test_storage_is_checked_before_start_and_never_removed(self):
         text = CTL.read_text()
-        body = re.search(r"^cmd_steam_smoke\(\) \(\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
+        body = re.search(r"^steam_seat_run\(\) \([^\n]*\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
         self.assertLess(body.index("steam_storage_precheck ||"), body.index("svc_start"))
         pre = re.search(r"^steam_storage_precheck\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL).group(0)
         for needle in ('[[ $src == "$STEAM_STORAGE_DATASET zfs" ]]', "zfs get -Hp -o value quota", "STEAM_STORAGE_MIN_FREE_KB"):
@@ -622,13 +622,115 @@ class SteamCanaryPolicyTests(unittest.TestCase):
         self.assertIn("already used by veth9", taken.stderr)
 
     def test_steam_run_checks_token_time_gpu_lan_release_and_needs_the_hook(self):
-        body = re.search(r"^cmd_steam_smoke\(\) \(\n(.*?)^\)", CTL.read_text(), re.MULTILINE | re.DOTALL).group(1)
-        for needle in ("remaining >= STEAM_SELFTEST_TIMEOUT + 300", 'gpu_preflight_run "$GPU_CANARY_PCI"',
+        body = re.search(r"^steam_seat_run\(\) \([^\n]*\n(.*?)^\)", CTL.read_text(), re.MULTILINE | re.DOTALL).group(1)
+        for needle in ("(( remaining >= need ))", 'gpu_preflight_run "$GPU_CANARY_PCI"',
                        "steam_lan_precheck ||", "gpu_release_check ||", '[[ ! -e $(host_path "/sys/class/net/$veth") ]]',
                        'desktop_selftest start "$STEAM_INSTANCE" steam "$dir" "$STEAM_SELFTEST_TIMEOUT"'):
             self.assertIn(needle, body)
         self.assertLess(body.index("steam_lan_precheck ||"), body.index("svc_start"))
-        self.assertIn("($CANARY_OPERATION -ne 3 && $CANARY_OPERATION -ne 4) || $LXC_HOOK_READY -eq 1", CTL.read_text())
+        self.assertIn("($CANARY_OPERATION -ne 3 && $CANARY_OPERATION -ne 4 && $CANARY_OPERATION -ne 5) || $LXC_HOOK_READY -eq 1", CTL.read_text())
+
+
+class SteamSessionTests(unittest.TestCase):
+    """M3 (owner, 2026-10-31): one bounded LAN session; PIN and stop reach it through root-only files."""
+    SESSION = "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-session"
+
+    def allowed(self, operation, command):
+        return DesktopAllowListTests.allowed(self, operation, command)
+
+    def test_session_commands_are_exact_and_only_for_the_session_operation(self):
+        for command in (f"{self.SESSION} start nvidia", f"{self.SESSION} status", f"{self.SESSION} stop",
+                        f"{self.SESSION} pin 0427", SteamCanaryPolicyTests.NIC, SteamCanaryPolicyTests.DISK,
+                        SteamCanaryPolicyTests.INIT):
+            with self.subTest(command=command):
+                self.assertTrue(self.allowed(5, command))
+        for command in (f"{self.SESSION} start nvidia", f"{self.SESSION} pin 0427"):
+            self.assertFalse(self.allowed(4, command))  # the smoke test never opens a session
+        for command in (f"{self.SESSION} pin 427", f"{self.SESSION} pin 04271", f"{self.SESSION} pin 04a7",
+                        f"{self.SESSION} pin '0427;id'", f"{self.SESSION} start cpu", f"{self.SESSION} start",
+                        "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest steam",
+                        "exec polyseat-steam-gpu -- /bin/sh -c id"):
+            with self.subTest(command=command):
+                self.assertFalse(self.allowed(5, command))
+
+    def run_dir(self):
+        d = Path(tempfile.mkdtemp(prefix="polyseat-session-"))
+        self.addCleanup(shutil.rmtree, d)
+        return d
+
+    def op(self, run, *args, answer=None):
+        # The session's side of the handoff: answer the PIN file once it appears.
+        script = ('POLYSEAT_RELEASE_GATE=canary; RUN_DIR="$1"; shift; '
+                  'if [[ -n ${ANSWER:-} ]]; then (for _ in $(seq 50); do [[ -f $RUN_DIR/session-pin ]] && '
+                  '{ printf "%s\\n" "$(cat "$RUN_DIR/session-pin")" > "$RUN_DIR/seen-pin"; rm -f "$RUN_DIR/session-pin"; '
+                  'printf "%s\\n" "$ANSWER" > "$RUN_DIR/session-pin.result"; break; }; sleep 0.1; done) & fi; '
+                  'cmd="$1"; shift; "$cmd" "$@"')
+        env = {"PATH": "/usr/bin:/bin"}
+        if answer:
+            env["ANSWER"] = answer
+        return source_ctl(script, str(run), *args, env=env)
+
+    def test_pin_status_and_stop_need_a_running_session(self):
+        run = self.run_dir()
+        for args in (("cmd_steam_session_pin", "0427"), ("cmd_steam_session_status",), ("cmd_steam_session_stop",)):
+            with self.subTest(args=args):
+                self.assertNotEqual(self.op(run, *args).returncode, 0)
+        self.assertFalse((run / "session-pin").exists())
+        self.assertFalse((run / "session-stop").exists())
+
+    def test_pin_is_four_digits_handed_over_and_answered(self):
+        run = self.run_dir()
+        (run / "session-status.json").write_text('{"ok": true, "ip": "192.168.178.150"}\n')
+        for bad in ("427", "04271", "abcd", "04 7"):
+            with self.subTest(bad=bad):
+                self.assertNotEqual(self.op(run, "cmd_steam_session_pin", bad).returncode, 0)
+                self.assertFalse((run / "session-pin").exists())
+        res = self.op(run, "cmd_steam_session_pin", "0427", answer='{"ok": true, "paired": true}')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('"paired": true', res.stdout)
+        self.assertEqual((run / "seen-pin").read_text().strip(), "0427")
+        res = self.op(run, "cmd_steam_session_pin", "1111", answer='{"ok": false, "error": "not paired"}')
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(self.op(run, "cmd_steam_session_status").stdout.strip(), '{"ok": true, "ip": "192.168.178.150"}')
+        self.assertEqual(self.op(run, "cmd_steam_session_stop").returncode, 0)
+        self.assertTrue((run / "session-stop").exists())
+        self.assertEqual(oct((run / "session-stop").stat().st_mode & 0o777), "0o600")
+
+    def test_operator_commands_need_no_token_and_do_not_queue_behind_the_session(self):
+        # The session itself holds the lock and its token for up to 30 minutes.
+        for cmd in ("steam-session-pin", "steam-session-status", "steam-session-stop"):
+            with self.subTest(cmd=cmd):
+                res = source_ctl('POLYSEAT_RELEASE_GATE=canary ROOT=""; id() { printf "0\\n"; }; '
+                                 'canary_approval_for() { exit 99; }; require_mutation_allowed "$1"', cmd)
+                self.assertEqual(res.returncode, 0, res.stderr)
+        main = CTL.read_text().split("\nmain() {", 1)[1]
+        early = main[:main.index("  acquire_lock\n")]
+        for fn in ("cmd_steam_session_pin", "cmd_steam_session_status", "cmd_steam_session_stop"):
+            self.assertIn(fn, early)
+        self.assertNotIn("cmd_steam_session_pin", main[main.index("  acquire_lock\n"):])
+        self.assertLess(early.index('if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then\n    # The running session'),
+                        early.index("cmd_steam_session_pin"))
+        # The session start itself still needs its token and the lock.
+        res = source_ctl('POLYSEAT_RELEASE_GATE=canary ROOT=""; id() { printf "0\\n"; }; '
+                         'canary_approval_for() { exit 99; }; require_mutation_allowed steam-session')
+        self.assertEqual(res.returncode, 99)
+
+    def test_session_token_needs_the_image_binding(self):
+        app = DesktopApprovalTests("test_stage_and_smoke_are_bound_to_bundle_and_image")
+        app.setUp()
+        self.addCleanup(app.tmp.cleanup)
+        app.token["actions"] = ["steam-session"]
+        app.sign()
+        app.stage_copy(app.image.read_bytes())
+        self.assertEqual(app.check("steam-session"), 0)
+        self.assertEqual(app.check("steam-smoke"), 2)
+
+    def test_session_loop_respects_vm_priority_budget_and_token_time(self):
+        body = re.search(r"^steam_seat_run\(\) \([^\n]*\n(.*?)^\)", CTL.read_text(), re.MULTILINE | re.DOTALL).group(1)
+        loop = body[body.index("while (( $(date -u +%s) < deadline ))"):body.index("done", body.index("while (( $(date"))]
+        for needle in ('gpu_guard_quick "$GPU_CANARY_PCI"', "canary_budget_check", "session-stop", "session-pin"):
+            self.assertIn(needle, loop)
+        self.assertIn("deadline=$(( $(jq -er .expires_at \"$CANARY_APPROVAL\") - STEAM_SESSION_TEARDOWN_SECONDS ))", body)
 
 
 class NftStubTests(unittest.TestCase):
@@ -691,12 +793,13 @@ class FailurePathTests(unittest.TestCase):
     def test_both_runs_clean_their_instance_before_the_hard_stop(self):
         text = CTL.read_text()
         for function, instance in (("cmd_desktop_smoke", "DESKTOP_INSTANCE"), ("cmd_gpu_smoke", "GPU_INSTANCE"),
-                                   ("cmd_steam_smoke", "STEAM_INSTANCE")):
-            body = re.search(rf"^{function}\(\) \(\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
+                                   ("steam_seat_run", "STEAM_INSTANCE")):
+            body = re.search(rf"^{function}\(\) \([^\n]*\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
             self.assertIn(f'canary_failure_cleanup "${instance}"; svc_stop full', body, function)
 
     def test_cleanup_uses_only_commands_the_operation_allows(self):
-        for operation, instance in ((2, "polyseat-desktop-cpu"), (3, "polyseat-desktop-gpu"), (4, "polyseat-steam-gpu")):
+        for operation, instance in ((2, "polyseat-desktop-cpu"), (3, "polyseat-desktop-gpu"), (4, "polyseat-steam-gpu"),
+                                    (5, "polyseat-steam-gpu")):
             for command in (f"stop {instance} --force --timeout 5", f"delete {instance}", "image delete polyseat-desktop"):
                 with self.subTest(op=operation, command=command):
                     self.assertTrue(DesktopAllowListTests.allowed(self, operation, command))

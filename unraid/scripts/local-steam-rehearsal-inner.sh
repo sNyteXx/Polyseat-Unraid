@@ -93,6 +93,19 @@ jq -r '.checks[] | "\(.status) \(.name): \(.detail)"' /out/selftest.json 2>/dev/
 [[ $rc == 0 ]] && jq -e '.verdict == "PASS"' /out/selftest.json >/dev/null && pass 'polyseat-selftest steam-cpu PASS' ||
   { inc stop "$c" --force >/dev/null 2>&1 || true; fail "polyseat-selftest steam-cpu failed (rc=$rc): $(jq -r .reason /out/selftest.json 2>/dev/null)"; }
 
+# M3 session plumbing (software profile here): LAN, Sunshine with this session's credentials, Steam; the PIN path
+# reaches Sunshine's API (no Moonlight here, so it must answer that no device is waiting); stop leaves nothing.
+T=300 inc exec "$c" -- /usr/local/bin/polyseat-session start cpu > /out/session-start.json 2>/out/session-start.err || true
+jq -e '.ok == true and (.ip | startswith("10.77.0.")) and .sunshine == "active" and .steam == "active"' /out/session-start.json >/dev/null &&
+  pass "session start: $(jq -c '{ip, sunshine, encoder, steam}' /out/session-start.json)" || fail "session start: $(head -c 300 /out/session-start.json)"
+T=60 inc exec "$c" -- /usr/local/bin/polyseat-session pin 0427 > /out/session-pin.json 2>&1 || true
+grep -q 'no device is waiting' /out/session-pin.json &&
+  pass 'session pin: Sunshine API reached with the session credentials (no device waiting)' || fail "session pin: $(head -c 300 /out/session-pin.json)"
+T=60 inc exec "$c" -- /usr/local/bin/polyseat-session pin 042 > /out/session-pin-bad.json 2>&1 || true
+grep -q 'four digits' /out/session-pin-bad.json && pass 'session pin: a malformed PIN is refused' || fail 'session pin: malformed PIN'
+T=120 inc exec "$c" -- /usr/local/bin/polyseat-session stop > /out/session-stop.json 2>&1 || true
+jq -e '.ok == true and .stopped == true' /out/session-stop.json >/dev/null && pass 'session stop: Steam, Sunshine and sway gone, credentials removed' ||
+  fail "session stop: $(head -c 300 /out/session-stop.json)"
 # Steam's own files must have landed on the host storage, not in the seat's rootfs.
 [[ -f $st/.polyseat-seat-runs && -e $st/steam.sh && $(stat -c %u "$st/steam.sh") == 1001000 ]] &&
   pass "Steam's files are on the persistent storage ($(du -sh "$st" | cut -f1), owned by 1001000)" ||

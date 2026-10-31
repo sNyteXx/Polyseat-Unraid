@@ -10,3 +10,5 @@ IPv6AcceptRA=no
 
 [DHCPv4]
 UseDomains=no
+# The fixed seat MAC as client id: the router gives the seat the same address every time (Moonlight finds it).
+ClientIdentifier=mac
