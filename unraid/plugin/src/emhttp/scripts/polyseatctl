@@ -1254,7 +1254,7 @@ canary_leak_check() {
     exe=$(readlink -- "$proc/exe" 2>/dev/null) || exe=""
     exe=${exe% (deleted)}
     if [[ -n $exe && $exe == "$SLOTS"/* ]]; then found+=" $pid"; continue; fi
-    mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
+    mapfile -d '' -t argv 2>/dev/null < "$proc/cmdline" || continue  # silence first: the process may be gone
     for element in "${argv[@]}"; do
       case "$element" in
         canary-watchdog | canary-guardian | polyseat-canary-launch) found+=" $pid"; break ;;

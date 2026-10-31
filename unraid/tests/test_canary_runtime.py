@@ -622,5 +622,16 @@ class CanaryWatchdogTests(unittest.TestCase):
         self.assertEqual(self.observe_abort("pressure"), "resource-policy-or-budget")
 
 
+class ProcReadNoiseTests(unittest.TestCase):
+    """Tower runs 6-8 logged "/proc/<pid>/cmdline: No such file or directory" during the leak check: the input
+    redirection was evaluated before `2>/dev/null`, so a vanished process still printed to stderr."""
+
+    def test_proc_reads_silence_stderr_before_the_input_redirection(self):
+        import re
+        text = (ROOT / "unraid/plugin/src/emhttp/scripts/polyseatctl").read_text()
+        self.assertEqual(re.findall(r'<\s*"\$(?:proc|\{proc\})/[^"]*"\s+2>\s*/dev/null', text), [])
+        self.assertIn("""mapfile -d '' -t argv 2>/dev/null < "$proc/cmdline" || continue""", text)
+
+
 if __name__ == "__main__":
     unittest.main()
