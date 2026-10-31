@@ -24,6 +24,8 @@ if pgrep -x incusd >/dev/null; then fail 'another Incus daemon already exists'; 
 
 proof="$GITHUB_WORKSPACE/incus-build-proof"
 source_ctl="$GITHUB_WORKSPACE/unraid/plugin/src/emhttp/scripts/polyseatctl"
+# shellcheck source=unraid/scripts/lib/ci-runner-noise.sh
+source "$GITHUB_WORKSPACE/unraid/scripts/lib/ci-runner-noise.sh"
 [[ -d $proof && ! -L $proof && -f $proof/bundle.env && -f $source_ctl ]] || fail 'real build outputs missing'
 grep -q '^POLYSEAT_RELEASE_GATE="closed"' "$source_ctl" || fail 'committed release gate is not closed'
 archive_sha=$(sed -n 's/^BUNDLE_SHA256=//p' "$proof/bundle.env")
@@ -72,7 +74,7 @@ ctl() {
 step() { printf 'PASS: %s\n' "$1"; printf '%s\n' "$1" >> "$evidence/steps.txt"; }
 
 host_state() {
-  local snapshot="$evidence/host-$1" key path
+  local snapshot="$evidence/host-$1" key path vfs
   mkdir -- "$snapshot"
   iptables-save | sed -E '/^#/d; s/\[[0-9]+:[0-9]+\]/[0:0]/g' > "$snapshot/iptables"
   ip6tables-save | sed -E '/^#/d; s/\[[0-9]+:[0-9]+\]/[0:0]/g' > "$snapshot/ip6tables"
@@ -81,7 +83,10 @@ host_state() {
     path="/proc/sys/${key//./\/}"
     if [[ -f $path ]]; then printf '%s=%s\n' "$key" "$(< "$path")"; else printf '%s=ABSENT\n' "$key"; fi
   done > "$snapshot/sysctl"
-  ip -j link show | jq -S '[.[] | {ifname,mtu,master,link_type,address}] | sort_by(.ifname)' > "$snapshot/links"
+  vfs=$(runner_vf_names /sys/class/net)  # runner noise, see lib/ci-runner-noise.sh; recorded, not compared
+  printf '%s\n' "$vfs" > "$snapshot/excluded-runner-vfs"
+  ip -j link show | jq -S --argjson skip "$vfs" '[.[] | select(.ifname as $n | any($skip[]; . == $n) | not) |
+    {ifname,mtu,master,link_type,address}] | sort_by(.ifname)' > "$snapshot/links"
   ss -H -lnt | awk '{print "tcp",$4,$5}' | sort > "$snapshot/tcp-listeners"
   ss -H -lnu | awk '{print "udp",$4,$5}' | sort > "$snapshot/udp-listeners"
   awk '{print $5}' /proc/self/mountinfo | sort > "$snapshot/mountpoints"

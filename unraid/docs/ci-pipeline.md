@@ -36,6 +36,14 @@ controller must equal the runtime's, and the ABI check is re-run on the reused p
 missing record → full rebuild (never a red build because of the cache). Each run records
 `runtime-provenance.json` (`reused`, producing run, checks) into its proof and test artifact.
 
+Found by the first reuse run (41220919953): the CPU canary now starts about a minute into the job instead of after
+the ~4 minute source build, and Azure's Accelerated Networking VF (`enP23362s1`, enslaved to `eth0`) hot-plugged
+between its before and after snapshots ("unscoped host change: addresses"). It is runner noise, not a canary
+effect. The fix keeps the race visible: `unraid/scripts/lib/ci-runner-noise.sh` leaves out of the address/link
+snapshots of both canary rehearsals only an interface named `enP<n>s<n>`, enslaved to `eth0`, with driver
+`mlx4_core`/`mlx5_core`/`mana`, and records it in `excluded-runner-vfs`. Any other interface change still fails.
+A fresh build hid the race only by its timing.
+
 Skipped on a verified reuse: only the Incus/LXC/raft/cowsql/squashfs-tools source build and the GoBGP regression
 test of that unchanged source. Everything else still runs on every full run: CPU canary rehearsal (signed gate,
 TTL, supervisor loss, Tower PATH, exec inventory), controller E2E with the real bundle, CPU smoke, proof checksums,

@@ -199,3 +199,52 @@ class CanaryE2EContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunnerNoiseTests(unittest.TestCase):
+    """Run 41220919953: an Azure Accelerated Networking VF hot-plugged under eth0 during the CPU canary. Only that
+    exact shape is left out of the host snapshots; every other interface change still fails the rehearsal."""
+
+    LIB = SCRIPT_PATH.parent / "lib" / "ci-runner-noise.sh"
+
+    def names(self, net):
+        result = subprocess.run(["bash", "-c", 'source "$1"; runner_vf_names "$2"', "x", str(self.LIB), str(net)],
+                                capture_output=True, text=True, check=True, timeout=10)
+        return result.stdout.strip()
+
+    def test_only_an_eth0_enslaved_mellanox_or_mana_vf_is_excluded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            net = Path(tmp) / "net"
+            drivers = Path(tmp) / "drivers"
+            for name in ("eth0", "eth1"):
+                (net / name).mkdir(parents=True)
+
+            def vf(name, master, driver):
+                d = net / name
+                (d / "device").mkdir(parents=True)
+                if master:
+                    (d / "master").symlink_to(f"../{master}")
+                if driver:
+                    (drivers / driver).mkdir(parents=True, exist_ok=True)
+                    (d / "device/driver").symlink_to(drivers / driver)
+
+            vf("enP23362s1", "eth0", "mlx5_core")   # the runner's VF: excluded
+            vf("enP7s1", "eth0", "mana")              # newer VM sizes: excluded
+            vf("enP1s1", "eth1", "mlx5_core")         # other master
+            vf("enP2s2", None, "mlx5_core")           # not enslaved
+            vf("enP3s3", "eth0", "e1000e")            # other driver
+            vf("enP4s4", "eth0", None)                # no driver
+            vf("enPxs1", "eth0", "mlx5_core")         # name shape
+            vf("veth0", "eth0", "mlx5_core")          # not an enP name
+            self.assertEqual(self.names(net), '["enP23362s1","enP7s1"]')
+            self.assertEqual(self.names(Path(tmp) / "absent"), "[]")
+
+    def test_both_rehearsals_filter_and_record_the_same_way(self):
+        for script in ("ci-e2e-canary.sh", "ci-e2e-desktop-canary.sh"):
+            text = (SCRIPT_PATH.parent / script).read_text()
+            with self.subTest(script=script):
+                self.assertIn('source "$GITHUB_WORKSPACE/unraid/scripts/lib/ci-runner-noise.sh"', text)
+                self.assertIn('printf \'%s\\n\' "$vfs" > "$snapshot/excluded-runner-vfs"', text)
+                self.assertEqual(text.count("select(.ifname as $n | any($skip[]; . == $n) | not)"),
+                                 2 if script == "ci-e2e-canary.sh" else 1)
+                self.assertNotIn("ip -j link show | jq -S '[.[] | {ifname", text)
