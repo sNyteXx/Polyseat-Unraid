@@ -836,7 +836,7 @@ class PersistentStateTests(unittest.TestCase):
         d = self.workspace()
         self.assertEqual(self.prepare(d).returncode, 0)
         stopped = {"name": self.SEAT, "status": "Stopped", "autostart": "false"}
-        for instances, mode in (([dict(stopped, status="Running")], 0o600), ([dict(stopped, autostart="")], 0o600),
+        for instances, mode in (([dict(stopped, status="Running")], 0o600), ([dict(stopped, status="Running", autostart="")], 0o600),
                                 ([dict(stopped, autostart="true")], 0o600), ([dict(stopped, name="Not A Seat")], 0o600),
                                 ([stopped, stopped], 0o600), ([stopped], 0o644)):
             with self.subTest(instances=instances, mode=oct(mode)):
@@ -1151,9 +1151,12 @@ class PlayTests(unittest.TestCase):
         for command in ("profile device add default eth0 nic nictype=bridged parent=br0 name=eth0",
                         "storage create default dir source=/mnt/cache/polyseat/incus/incus/storage-pools/default",
                         "stop seat1 --timeout 60", "stop my-seat-2 --force --timeout 5", "admin shutdown --timeout 60",
-                        "query /1.0/profiles/default", "query /1.0/instances?recursion=1"):
+                        "query /1.0/profiles/default", "query /1.0/instances?recursion=1", "config set seat1 boot.autostart=false"):
             with self.subTest(command=command):
                 self.assertTrue(self.allowed(command))
+        for command in ("config set seat1 boot.autostart=true", "config set seat1 raw.lxc=x", "config set seat1 security.privileged=true"):
+            with self.subTest(command=command):
+                self.assertFalse(self.allowed(command))
         for command in ("delete seat1", "start seat1", "stop Seat1 --timeout 60", "stop seat1;id --timeout 60",
                         "profile device add default eth0 nic nictype=macvlan parent=br0 name=eth0",
                         "exec seat1 -- /bin/sh", "config set seat1 raw.lxc=x", "network create polyseatbr0"):
@@ -1270,6 +1273,11 @@ class PlayTests(unittest.TestCase):
                                                    {"name": "polyseat-persist-cpu", "status": "Stopped", "autostart": "false"}])
         self.assertEqual(PersistentStateTests.prepare(self, d).returncode, 0)
         PersistentStateTests.clean_stop(self, d, [{"name": "Seat 1", "status": "Stopped", "autostart": "false"}])
+        self.assertNotEqual(PersistentStateTests.prepare(self, d).returncode, 0)
+        # A stopped seat whose build ended early has no boot.autostart; Incus starts it only if it ran at shutdown.
+        PersistentStateTests.clean_stop(self, d, [{"name": "seat1", "status": "Stopped", "autostart": ""}])
+        self.assertEqual(PersistentStateTests.prepare(self, d).returncode, 0)
+        PersistentStateTests.clean_stop(self, d, [{"name": "seat1", "status": "Stopped", "autostart": "true"}])
         self.assertNotEqual(PersistentStateTests.prepare(self, d).returncode, 0)
 
     def test_the_play_session_order(self):

@@ -574,6 +574,20 @@ func (p *Provisioner) stack() stack { return stackFor(p.GPU) }
 // ------------------------------------------------------------------ packages
 
 func (p *Provisioner) stepPackages(ctx context.Context) error {
+	// pacman 7 downloads as its own unprivileged user inside a Landlock
+	// sandbox. A kernel built without Landlock (Unraid's is one) refuses that
+	// sandbox, pacman then cannot switch to the user, and every download fails
+	// as "a mirror stopped mid transfer". The seat shares the host's kernel, so
+	// the host decides; pacman's own switch for exactly this case turns it off.
+	if !landlockAvailable() {
+		if _, err := p.sh(ctx, `grep -q '^DisableSandbox' /etc/pacman.conf || `+
+			`sed -i '/^\[options\]$/a DisableSandbox' /etc/pacman.conf`); err != nil {
+			return err
+		}
+
+		p.Log("this kernel has no Landlock, so pacman downloads without its sandbox")
+	}
+
 	// The seats built during the M1 spike carry the CachyOS repository, which
 	// was how Sunshine got in before it came from the upstream release. Leaving
 	// it would mean two sources for the same package and seats that differ

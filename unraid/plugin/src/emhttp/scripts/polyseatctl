@@ -1148,6 +1148,7 @@ canary_command_allowed() {
       'query /1.0/storage-pools/default' | 'query /1.0/profiles/default' | 'admin shutdown --timeout 60') return 0 ;;
     esac
     [[ $# -eq 4 && $1 == stop && $2 =~ $PLAY_NAME_RE && "$3 $4" == '--timeout 60' ]] && return 0
+    [[ $# -eq 4 && $1 == config && $2 == set && $3 =~ $PLAY_NAME_RE && $4 == boot.autostart=false ]] && return 0
     [[ $# -eq 5 && $1 == stop && $2 =~ $PLAY_NAME_RE && "$3 $4 $5" == '--force --timeout 5' ]] && return 0
     return 1
   fi
@@ -2554,7 +2555,7 @@ persist_state_prepare() { # active sha : creates the workspace once; afterwards 
   stop=$DATA_REAL/clean-stop.json
   { [[ -f $stop && ! -L $stop && $(stat -c '%u %a' -- "$stop") == '0 600' ]] &&
     jq -e --arg re "$PLAY_NAME_RE" '.schema == 1 and (.instances | type == "array" and (map(.name) | unique | length) == length and
-      all(.[]; (.name | test($re)) and .status == "Stopped" and .autostart == "false"))' "$stop" >/dev/null 2>&1; } ||
+      all(.[]; (.name | test($re)) and .status == "Stopped" and (.autostart == "false" or .autostart == "")))' "$stop" >/dev/null 2>&1; } ||
     { log error "persist: the previous run recorded no clean stop; inspection required, nothing was started"; return 1; }
   [[ -d $INCUS_DIR && ! -L $INCUS_DIR ]] || { log error "persist: the Incus directory is missing"; return 1; }
   # Consumed before the daemon starts: a crash from here on leaves no record, so the next run refuses again.
@@ -2977,7 +2978,8 @@ play_instances() { # prints [{name, status, autostart}]; with "stopped" fails un
   is=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || return 1
   jq -ec --arg re "$PLAY_NAME_RE" --arg want "${1:-}" '[(if type == "object" and .type == "sync" then .metadata else . end)[] |
       {name, status, autostart: (.config["boot.autostart"] // "")}] |
-    select(all(.[]; (.name | test($re)) and .autostart == "false" and ($want != "stopped" or .status == "Stopped")))' <<< "$is"
+    select(all(.[]; (.name | test($re)) and (.autostart == "false" or (.autostart == "" and .status == "Stopped")) and
+      ($want != "stopped" or .status == "Stopped")))' <<< "$is"
 }
 
 play_real() { ! sandbox || ci_real_system; }  # modules and udev only on a real system
@@ -3035,12 +3037,19 @@ play_host_off() { # exactly what play_host_on recorded, nothing else
 }
 
 play_stop_seats() { # every running seat, through Incus (polyseatd leaves them running when it stops)
-  local seat
-  for seat in $(play_instances | jq -r '.[] | select(.status != "Stopped") | .name'); do
+  local seat is
+  is=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || return 1
+  for seat in $(jq -r '(if type == "object" and .type == "sync" then .metadata else . end)[] | select(.status != "Stopped") | .name' <<< "$is"); do
     [[ $seat =~ $PLAY_NAME_RE ]] || continue
     log info "play: stopping seat $seat"
     INCUS_CMD_TIMEOUT=75 run_incus stop "$seat" --timeout 60 ||
       INCUS_CMD_TIMEOUT=20 run_incus stop "$seat" --force --timeout 5 || log error "play: seat $seat did not stop"
+  done
+  # A seat whose build stopped early has no boot.autostart yet (upstream sets it later): pin it off explicitly.
+  for seat in $(jq -r '(if type == "object" and .type == "sync" then .metadata else . end)[] |
+      select((.config["boot.autostart"] // "") != "false") | .name' <<< "$is"); do
+    [[ $seat =~ $PLAY_NAME_RE ]] || continue
+    INCUS_CMD_TIMEOUT=20 run_incus config set "$seat" boot.autostart=false || log error "play: cannot pin boot.autostart off for $seat"
   done
 }
 
