@@ -281,3 +281,136 @@ func TestTheRepairLeavesTheSharedLibraryAlone(t *testing.T) {
 		}
 	}
 }
+
+// inGameScreensaver reads the switch back out the way Steam would, and says
+// whether it was there at all.
+func inGameScreensaver(t *testing.T, data []byte) (string, bool) {
+	t.Helper()
+
+	root, err := parseVDF(string(data))
+	if err != nil {
+		t.Fatalf("the result does not parse: %v", err)
+	}
+
+	node := root
+
+	for _, key := range []string{"InstallConfigStore", customizationKey, screensaverKey, whileInGameKey} {
+		if node = node.child(key); node == nil {
+			return "", false
+		}
+	}
+
+	return strings.Trim(string(data)[node.valueStart:node.valueEnd], `"`), true
+}
+
+func TestScreensaverIsTurnedOffAtEveryDepth(t *testing.T) {
+	const head = `"InstallConfigStore"` + "\n{\n\t\"Software\"\n\t{\n\t\t\"Valve\"\n\t\t{\n" +
+		"\t\t\t\"Steam\"\n\t\t\t{\n\t\t\t}\n\t\t}\n\t}\n"
+
+	for name, body := range map[string]string{
+		"no customization": head + "}\n",
+		"no screensaver":   head + "\t\"Customization\"\n\t{\n\t\t\"StartupMovie\"\n\t\t{\n\t\t}\n\t}\n}\n",
+		"no switch":        head + "\t\"Customization\"\n\t{\n\t\t\"Screensaver\"\n\t\t{\n\t\t}\n\t}\n}\n",
+		"switched on":      head + "\t\"Customization\"\n\t{\n\t\t\"Screensaver\"\n\t\t{\n\t\t\t\"WhileInGame\"\t\t\"1\"\n\t\t}\n\t}\n}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			after, changed, err := SetScreensaverOff([]byte(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !changed {
+				t.Error("it did not report a change")
+			}
+
+			if got, ok := inGameScreensaver(t, after); !ok || got != "0" {
+				t.Errorf("the switch reads %q, present %v", got, ok)
+			}
+
+			again, changed, err := SetScreensaverOff(after)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if changed || string(again) != string(after) {
+				t.Error("a second pass changed something")
+			}
+		})
+	}
+}
+
+// The file Steam actually writes, four blocks of account state and all.
+func TestScreensaverLeavesTheRestOfTheFileAlone(t *testing.T) {
+	before := steamConfig(t, "config-with-old-mapping.vdf")
+
+	after, _, err := SetScreensaverOff(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, ok := inGameScreensaver(t, after); !ok || got != "0" {
+		t.Fatalf("the switch reads %q, present %v", got, ok)
+	}
+
+	if len(after) <= len(before) {
+		t.Fatal("nothing was added")
+	}
+
+	at := strings.Index(string(after), `"Customization"`)
+	if at < 0 {
+		t.Fatal("no block was added")
+	}
+
+	end := strings.Index(string(after)[at:], "\n\t}") + at + len("\n\t}")
+
+	// Taking the inserted block back out has to give the original file, byte
+	// for byte, apart from the line break it started with.
+	if got := string(after)[:at-2] + string(after)[end:]; got != string(before) {
+		t.Error("something outside the new block changed")
+	}
+}
+
+// A seat being built has no file and may have no Proton yet, and the next pass
+// has to be able to add the default to what this wrote.
+func TestScreensaverWritesAFileTheCompatToolCanStillEdit(t *testing.T) {
+	after, changed, err := SetScreensaverOff(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !changed {
+		t.Error("it did not report a change")
+	}
+
+	both, _, err := SetCompatTool(after, protonName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := mappedTool(t, both); got != protonName {
+		t.Errorf("the default is %q", got)
+	}
+
+	if got, ok := inGameScreensaver(t, both); !ok || got != "0" {
+		t.Errorf("the switch reads %q, present %v", got, ok)
+	}
+}
+
+func TestScreensaverRefusesWhatItCannotUnderstand(t *testing.T) {
+	for name, body := range map[string]string{
+		"an unbalanced brace": `"InstallConfigStore"` + "\n{\n",
+		"not a configuration": `"Something"` + "\n{\n}\n",
+		"a pair in the path":  `"InstallConfigStore"` + "\n{\n\t\"Customization\"\t\t\"1\"\n}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			after, changed, err := SetScreensaverOff([]byte(body))
+			if err == nil {
+				t.Error("it did not refuse")
+			}
+
+			if changed || string(after) != body {
+				t.Error("the input did not come back untouched")
+			}
+		})
+	}
+}

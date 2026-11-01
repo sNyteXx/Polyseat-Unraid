@@ -10,6 +10,36 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.46.0
+
+**Steam's screensaver stays off a running game.** Steam counts input and a
+cutscene has none, so five minutes into one the screensaver came up over the
+game. The switch is `WhileInGame` in Steam's `config.vdf`, on by default and kept
+per installation, so every seat had it on. It is now turned off along with the
+default Proton, in a seat being built before its Steam first starts as well as
+on the six hourly pass, and a seat where it was turned on gets it turned off
+again. The idle screensaver over Steam's own menus stays.
+
+No seat needs building again. A running seat picks it up on the next pass that
+finds its Steam idle, which closes Steam for a moment the way that pass already
+does. Steam was measured reading the switch in a seat nobody has signed in to, and
+keeping it across a restart, but the first sign in has not been tried, and neither
+has a cutscene longer than five minutes.
+
+## 0.45.0
+
+**A shortcut to a game reaches Moonlight too.** Eden writes a desktop entry per
+game, and those showed up in the seat's grid while Moonlight's list, which comes
+from Steam, Lutris and `~/Applications`, never heard of them. An entry in
+`~/.local/share/applications` with `Game` in its categories is now a card with
+the entry's icon, unless it is hidden, its program is gone, or it starts a Steam
+or Lutris title that already has a card. The entry stays the one row in the grid.
+
+No seat needs building again, the cards appear within a minute of the daemon
+being updated. The scan was run against two real seats and found the right games
+with the whole path to the ROM, and the command is tested against a copy of the
+splitting Sunshine does, but no game has been started from Moonlight this way.
+
 ## 0.44.0
 
 **The on-screen keyboard is smaller, dark, and in the language of the seat.**

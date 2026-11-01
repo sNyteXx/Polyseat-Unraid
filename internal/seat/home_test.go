@@ -161,7 +161,7 @@ func TestSteamsDefaultToolReplacesALinkRatherThanWritingThroughIt(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if err := p.setCompatTool(context.Background()); err != nil {
+	if err := p.writeSteamConfig(context.Background(), true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -193,7 +193,7 @@ func TestSteamsConfigurationIsLeftAloneWhenItCannotBeRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := p.setCompatTool(context.Background()); err != nil {
+	if err := p.writeSteamConfig(context.Background(), true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -206,7 +206,7 @@ func TestSteamsConfigurationIsLeftAloneWhenItCannotBeRead(t *testing.T) {
 func TestSteamsDefaultToolGoesIntoASeatWithNoSteamYet(t *testing.T) {
 	p, home := homeProvisioner(t)
 
-	if err := p.setCompatTool(context.Background()); err != nil {
+	if err := p.writeSteamConfig(context.Background(), true); err != nil {
 		t.Fatal(err)
 	}
 
