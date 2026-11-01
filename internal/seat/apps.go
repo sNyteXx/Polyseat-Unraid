@@ -464,7 +464,7 @@ func polyseatApps(launchers []installed, games []Game) ([]app, []string) {
 	names := []string{"Desktop", "Steam Big Picture"}
 	taken := map[string]bool{"desktop": true, "steam big picture": true}
 
-	add := func(name, launch, image string) {
+	add := func(name, launch, image string, inGamescope bool) {
 		// A game called Desktop, or one whose name matches a launcher, would
 		// otherwise put two entries with the same name in Moonlight and make
 		// which of them runs a matter of luck.
@@ -475,14 +475,22 @@ func polyseatApps(launchers []installed, games []Game) ([]app, []string) {
 
 		taken[key] = true
 
+		// A Steam game started this way is started by the Steam that runs
+		// inside gamescope, so it appears there, on the other workspace, and
+		// the entry has to go there too, first, like Steam Big Picture's. Left
+		// out, the game started and the player looked at the desktop's
+		// terminal while it ran unseen (Unraid seat, Once Human, 2026-11-01).
+		// A Lutris or flatpak title has no such parent and stays on the
+		// desktop, so its entry only hides the launcher.
+		prepCmd := []prep{{Do: hideLauncher}}
+		if inGamescope {
+			prepCmd = []prep{{Do: toGamescope}, {Do: hideLauncher}}
+		}
+
 		ours = append(ours, app{
-			Name:     name,
-			Detached: []string{"setsid " + launch},
-			// A Steam game started this way is started by the Steam that runs
-			// inside gamescope, so it appears there. A Lutris or flatpak title
-			// has no such parent and stays on the desktop, which is why the
-			// switch is part of the launcher's entry and not of this one.
-			PrepCmd:   []prep{{Do: hideLauncher}},
+			Name:      name,
+			Detached:  []string{"setsid " + launch},
+			PrepCmd:   prepCmd,
 			ImagePath: image,
 			Polyseat:  true,
 		})
@@ -491,13 +499,13 @@ func polyseatApps(launchers []installed, games []Game) ([]app, []string) {
 	}
 
 	for _, l := range launchers {
-		add(l.Name, l.command, l.image)
+		add(l.Name, l.command, l.image, false)
 	}
 
 	// The games themselves, so that a client with a controller can start one
 	// without first starting a launcher and steering through it.
 	for _, g := range games {
-		add(g.Name, g.Launch, g.Image)
+		add(g.Name, g.Launch, g.Image, g.Steam != "")
 	}
 
 	return ours, names

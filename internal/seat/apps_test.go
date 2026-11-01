@@ -823,6 +823,33 @@ func TestTheWorkspaceSwitchComesFirst(t *testing.T) {
 	}
 }
 
+// A Steam game's own entry runs it in the Steam inside gamescope, so it has to
+// switch to that workspace first, exactly as Steam Big Picture's does. A Lutris
+// title stays on the desktop and must not be sent away from it.
+func TestASteamGameEntryGoesToGamescopeFirst(t *testing.T) {
+	apps, _ := polyseatApps(nil, []Game{
+		{Name: "Once Human", Launch: "steam steam://rungameid/2139460", Steam: "2139460", Source: "steam"},
+		{Name: "Some Lutris Game", Launch: "lutris lutris:rungameid/7", Source: "lutris"},
+	})
+
+	byName := map[string]app{}
+	for _, a := range apps {
+		byName[a.Name] = a
+	}
+
+	steam := byName["Once Human"]
+	if len(steam.PrepCmd) < 2 || steam.PrepCmd[0].Do != toGamescope || steam.PrepCmd[1].Do != hideLauncher {
+		t.Errorf("the Steam game's entry does not switch to gamescope first: %+v", steam.PrepCmd)
+	}
+
+	lutris := byName["Some Lutris Game"]
+	for _, c := range lutris.PrepCmd {
+		if strings.Contains(c.Do, "polyseat-workspace") {
+			t.Errorf("a Lutris title was sent off the desktop: %+v", lutris.PrepCmd)
+		}
+	}
+}
+
 // inSeat is what a scan's argv runs once sudo has become the player: the part
 // from timeout onward, which is what these tests run on this machine as
 // whoever runs them. The prefix is checked rather than skipped blindly, so a
