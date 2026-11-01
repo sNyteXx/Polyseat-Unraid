@@ -43,7 +43,7 @@ $mytiles['polyseat-unraid']['column2'] = <<<EOT
    <div class="psu-tile-status">
     <span class="psu-pill {$psu_pill}" data-bind="state-pill">{$psu_text}</span>
     <span class="psu-pill warn" data-bind="gate-pill">...</span>
-    <span class="psu-pill muted">CPU-only</span>
+    <span class="psu-pill muted" data-bind="play-pill">...</span>
    </div>
    <div class="psu-tile-stats">
     <div class="psu-stat"><b>Daemon</b><span data-bind="daemon">-</span></div>

@@ -31,7 +31,7 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
      <div class="psu-actions" style="margin-bottom:10px">
       <span class="psu-pill muted" data-bind="state-pill">...</span>
       <span class="psu-pill warn" data-bind="gate-pill">...</span>
-      <span class="psu-pill muted">CPU-only test mode</span>
+      <span class="psu-pill muted" data-bind="play-pill">...</span>
      </div>
      <dl class="psu-kv">
       <dt>Bundle</dt><dd data-bind="version">-</dd>
@@ -61,10 +61,20 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
   </div>
 
   <div role="tabpanel" id="psu-p-sessions" class="psu-panel" hidden>
-   <div class="psu-card"><h3>Sessions &amp; seats</h3>
-    <p>Seats and streaming sessions become available only after the release gate is opened and the GPU and
-     streaming acceptance gates have passed. This build is CPU-only and does not create seats.</p>
-    <span class="psu-pill muted">Not available yet</span>
+   <div class="psu-card"><h3>Polyseat</h3>
+    <div class="psu-actions" style="margin-bottom:10px">
+     <span class="psu-pill muted" data-bind="play-pill">...</span>
+    </div>
+    <dl class="psu-kv">
+     <dt>Address</dt><dd data-bind="play-url">-</dd>
+     <dt>Seats</dt><dd data-bind="play-seats">-</dd>
+     <dt>Approval left</dt><dd data-bind="play-remaining">-</dd>
+    </dl>
+    <div class="psu-actions" style="margin-top:12px">
+     <a class="psu-btn primary" data-bind="play-open" target="_blank" rel="noopener noreferrer" hidden>Open Polyseat</a>
+    </div>
+    <p class="psu-muted">Seats, pairing and streaming are managed in Polyseat's own interface, which opens in a new tab.
+     A play session is started and stopped on the console with a signed approval; this page only shows its state.</p>
    </div>
   </div>
 

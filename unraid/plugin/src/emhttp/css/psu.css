@@ -93,6 +93,16 @@
 .psu button.psu-btn.primary { background: var(--psu-accent); border-color: var(--psu-accent); color: #1d1b1b; font-weight: 600; }
 .psu button.psu-btn.danger { border-color: var(--psu-crit); color: var(--psu-crit-text); }
 .psu button.psu-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* a link that looks like a button (Open Polyseat) */
+.psu a.psu-btn {
+  display: inline-block; text-decoration: none; cursor: pointer; text-align: center;
+  padding: 7px 16px; border-radius: 6px; border: 1px solid var(--psu-border);
+  background: var(--psu-card); color: var(--psu-fg); line-height: 1.3;
+}
+.psu a.psu-btn:hover { border-color: var(--psu-accent); }
+.psu a.psu-btn:focus-visible { outline: 2px solid var(--psu-accent); outline-offset: 2px; }
+.psu a.psu-btn.primary { background: var(--psu-accent); border-color: var(--psu-accent); color: #1d1b1b; font-weight: 600; }
+.psu a.psu-btn[hidden] { display: none; }
 .psu .psu-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .psu input.psu-input, .psu select.psu-input {
   font: inherit; width: 100%; max-width: 100%; height: auto; margin: 0; padding: 7px 10px; border-radius: 6px;
@@ -170,11 +180,11 @@
   .psu table.psu-table tr { border: 1px solid var(--psu-border); border-radius: var(--psu-radius); margin-bottom: 10px; padding: 4px 0; }
   .psu table.psu-table td { border: 0; padding: 4px 12px; }
   .psu table.psu-table td[data-label]::before { content: attr(data-label) ": "; color: var(--psu-muted); }
-  .psu .psu-actions button.psu-btn { flex: 1 1 100%; }
+  .psu .psu-actions button.psu-btn, .psu .psu-actions a.psu-btn { flex: 1 1 100%; }
   .psu .psu-tab { padding: 9px 12px; }
 }
 @media (hover: none) and (pointer: coarse) {
-  .psu button.psu-btn, .psu .psu-tab { min-height: 44px; }
+  .psu button.psu-btn, .psu a.psu-btn, .psu .psu-tab { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .psu .psu-bar > i { transition: none; }

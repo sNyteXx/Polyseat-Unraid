@@ -72,6 +72,37 @@
     return false;
   };
 
+  /* Only a LAN address polyseatd serves can be opened; anything else from the API is dropped. */
+  PSU.playUrl = function (url) {
+    return typeof url === 'string' && /^https:\/\/[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]{1,5}$/.test(url) ? url : '';
+  };
+
+  PSU.fmtDuration = function (seconds) {
+    if (seconds === null || seconds === undefined || isNaN(seconds)) { return '-'; }
+    if (seconds <= 0) { return 'ended'; }
+    var min = Math.floor(seconds / 60);
+    if (min < 1) { return 'under 1 min'; }
+    return min >= 60 ? Math.floor(min / 60) + ' h ' + (min % 60) + ' min' : min + ' min';
+  };
+
+  /* resp is the API reply of action=play: data is null while no play session runs. Mirrors psu_play_view() in lib.php. */
+  PSU.playView = function (resp) {
+    var none = { text: 'No play session', cls: 'muted', url: '', seats: '-', remaining: '-' };
+    if (!resp || !resp.ok) { return { text: 'Play status unavailable', cls: 'warn', url: '', seats: '-', remaining: '-' }; }
+    var d = resp.data;
+    if (!d) { return none; }
+    var seats = '-';
+    if (Array.isArray(d.seats)) {
+      seats = d.seats.length
+        ? d.seats.length + ': ' + d.seats.map(function (s) { return s.name + ' (' + s.status + ')'; }).join(', ')
+        : 'none yet';
+    }
+    var now = typeof resp.now === 'number' ? resp.now : Math.floor(Date.now() / 1000);
+    var left = typeof d.expires_at === 'number' ? PSU.fmtDuration(d.expires_at - now) : '-';
+    if (!d.alive) { return { text: 'Polyseat is down', cls: 'crit', url: '', seats: seats, remaining: left }; }
+    return { text: 'Play session running', cls: 'ok', url: PSU.playUrl(d.url), seats: seats, remaining: left };
+  };
+
   PSU.errorText = function (resp) {
     var map = {
       origin: 'The request was rejected (origin check). Reload the page and try again.',
@@ -180,6 +211,20 @@
     setText(scope, 'state-text', sv.text);
   }
 
+  function paintPlay(scope, resp) {
+    var v = PSU.playView(resp);
+    var pills = scope.querySelectorAll('[data-bind="play-pill"]');
+    for (var i = 0; i < pills.length; i++) { setPill(pills[i], v); }
+    setText(scope, 'play-url', v.url || '-');
+    setText(scope, 'play-seats', v.seats);
+    setText(scope, 'play-remaining', v.remaining);
+    var open = scope.querySelector('[data-bind="play-open"]');
+    if (open) {
+      if (v.url) { open.setAttribute('href', v.url); } else { open.removeAttribute('href'); }
+      open.hidden = !v.url;
+    }
+  }
+
   function paintMetrics(scope, m) {
     if (!m) { return; }
     var memUsed = m.memory.total_kb - m.memory.available_kb;
@@ -202,10 +247,11 @@
     var timer = null;
     function tick() {
       if (document.hidden) { return; }
-      Promise.all([PSU.api('status'), PSU.api('metrics')]).then(function (r) {
+      Promise.all([PSU.api('status'), PSU.api('metrics'), PSU.api('play')]).then(function (r) {
         if (r[0].ok) { paintStatus(scope, r[0].data); cfg.gate = r[0].data.release_gate; scope.dispatchEvent(new CustomEvent('psu:status', { detail: r[0].data })); }
         else { paintStatus(scope, null); }
         if (r[1].ok) { paintMetrics(scope, r[1].data); }
+        paintPlay(scope, r[2]);
       });
     }
     document.addEventListener('visibilitychange', function () { if (!document.hidden) { tick(); } });
@@ -310,11 +356,12 @@
     var lastStatus = null;
 
     function refreshAll() {
-      Promise.all([PSU.api('status'), PSU.api('metrics'), PSU.api('list')]).then(function (r) {
+      Promise.all([PSU.api('status'), PSU.api('metrics'), PSU.api('list'), PSU.api('play')]).then(function (r) {
         if (r[0].ok) { lastStatus = r[0].data; paintStatus(scope, lastStatus); cfg.gate = lastStatus.release_gate; applyLocks(); }
         else { paintStatus(scope, null); }
         if (r[1].ok) { paintMetrics(scope, r[1].data); }
         renderBundles(scope, r[2], lastStatus);
+        paintPlay(scope, r[3]);
       });
     }
 

@@ -26,8 +26,8 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed', 's
     <button type="button" class="psu-btn" data-action="reset">Reset to defaults</button>
     <span class="psu-muted" data-bind="dirty-note"></span>
    </div>
-   <p class="psu-muted">Changes take effect the next time the service starts. The data directory and ID range
-    cannot change while the service runs.</p>
+   <p class="psu-muted">Changes take effect the next time the service starts; the play limits and the game library
+    apply to the next play session. The data directory, ID range and play settings cannot change while the service runs.</p>
   </form>
 <?php endif; ?>
  </div>

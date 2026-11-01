@@ -161,8 +161,38 @@ class JsTests(unittest.TestCase):
           const s = {json.dumps(schema)};
           const t = (k, v) => PSU.validateSetting(s[k], v);
           console.log(JSON.stringify([t('SERVICE','enabled'), t('SERVICE','x'), t('HEALTH_TIMEOUT','60'), t('HEALTH_TIMEOUT','9'),
-            t('DATA_DIR','/mnt/cache/a'), t('DATA_DIR','/etc'), t('DATA_DIR',''), t('NOPE','1')]));""")
-        self.assertEqual(out, [True, False, True, False, True, False, True, False])
+            t('DATA_DIR','/mnt/cache/a'), t('DATA_DIR','/etc'), t('DATA_DIR',''), t('NOPE','1'),
+            t('PLAY_CPU_PERCENT','0'), t('PLAY_CPU_PERCENT','100'), t('PLAY_CPU_PERCENT','101'), t('PLAY_CPU_PERCENT','5.5'),
+            t('PLAY_MEMORY_MB','4194304'), t('PLAY_MEMORY_MB','4194305'), t('PLAY_MEMORY_MB',''),
+            t('LIBRARY_PATH','/mnt/download/polyseat-games'), t('LIBRARY_PATH','/etc'), t('LIBRARY_PATH','')]));""")
+        self.assertEqual(out, [True, False, True, False, True, False, True, False,
+                               True, True, False, False, True, False, False, True, False, True])
+
+    def test_play_card_helpers(self):
+        out = self.run_node(f"""
+          const PSU = require({json.dumps(str(JS))});
+          const up = {{ok: true, now: 1000, data: {{url: 'https://192.168.178.24:47800', alive: true, expires_at: 1000 + 3 * 3600 + 120,
+                      seats: [{{name: 'seat1', status: 'Running'}}, {{name: 'seat2', status: 'Stopped'}}]}}}};
+          console.log(JSON.stringify({{
+            url: ['https://192.168.178.24:47800', 'javascript:alert(1)', 'http://192.168.1.1:47800', 'https://evil.example:47800',
+                  'https://192.168.1.1:47800/x', 'https://192.168.1.1:47800" onclick="x', null].map(PSU.playUrl),
+            dur: [PSU.fmtDuration(0), PSU.fmtDuration(-5), PSU.fmtDuration(30), PSU.fmtDuration(600), PSU.fmtDuration(3 * 3600 + 120), PSU.fmtDuration(null)],
+            up: PSU.playView(up),
+            down: PSU.playView({{ok: true, now: 1, data: {{alive: false, url: 'https://192.168.1.1:47800', seats: [], expires_at: null}}}}),
+            none: PSU.playView({{ok: true, data: null}}),
+            bad: PSU.playView({{ok: false, error: 'unavailable'}}), nothing: PSU.playView(undefined),
+            evil: PSU.playView({{ok: true, now: 1, data: {{alive: true, url: 'javascript:alert(1)', seats: null}}}}),
+            empty: PSU.playView({{ok: true, now: 1, data: {{alive: true, url: 'https://10.0.0.1:47800', seats: []}}}}).seats
+          }}));""")
+        self.assertEqual(out["url"], ["https://192.168.178.24:47800", "", "", "", "", "", ""])
+        self.assertEqual(out["dur"], ["ended", "ended", "under 1 min", "10 min", "3 h 2 min", "-"])
+        self.assertEqual(out["up"], {"text": "Play session running", "cls": "ok", "url": "https://192.168.178.24:47800",
+                                     "seats": "2: seat1 (Running), seat2 (Stopped)", "remaining": "3 h 2 min"})
+        self.assertEqual((out["down"]["cls"], out["down"]["url"]), ("crit", ""))     # nothing to open while it is down
+        self.assertEqual((out["none"]["text"], out["none"]["cls"]), ("No play session", "muted"))
+        self.assertEqual((out["bad"]["cls"], out["nothing"]["cls"]), ("warn", "warn"))
+        self.assertEqual((out["evil"]["url"], out["evil"]["seats"]), ("", "-"))
+        self.assertEqual(out["empty"], "none yet")
 
     def test_no_dynamic_html_sinks_or_external_requests(self):
         import re
