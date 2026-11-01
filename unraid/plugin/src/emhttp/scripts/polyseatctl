@@ -107,6 +107,9 @@ PERSIST_FRESH=0
 # LAN address of the host bridge only. The package build pins the exact daemon bundle (polyseat-daemon.tar:
 # polyseatd, upstream's input helpers and their interpreter) here; empty = no daemon.
 POLYSEATD_SHA256=""
+# Fast lane (owner, 2026-11-01: "mehr lokal selber machen"): a daemon bundle the release key signed under this namespace
+# is accepted as well, so a polyseatd fix reaches a test host without a new controller. allowed_signers must list it.
+POLYSEATD_NAMESPACE="polyseat-unraid-daemon"
 POLYSEATD_STATE="$PERSIST_MOUNT/polyseatd"
 # Games (owner 2026-11-01): upstream's shared library on the download pool, its own dataset with a 500 GB quota. The
 # pool and every seat's copies live in it, so ZFS block cloning keeps one copy per game however many seats have it.
@@ -2668,28 +2671,46 @@ polyseatd_bundle_remove() { # dir : the exact entries a staging recorded, deepes
       else rm -f -- "$dir/$entry"; fi
     done < <(LC_ALL=C sort -r -- "$dir/.entries")
   fi
-  rm -f -- "$dir/.entries" "$dir/.bundle-sha256" "$dir/polyseatd" "$dir/.incoming"
+  rm -f -- "$dir/.entries" "$dir/.bundle-sha256" "$dir/.bundle-signed" "$dir/polyseatd" "$dir/.incoming"
   rmdir -- "$dir" 2>/dev/null || true
 }
 
-polyseatd_verify() { # the staged bundle is exactly the one the signed controller pins, every file per its MANIFEST
-  [[ $POLYSEATD_SHA256 =~ ^[0-9a-f]{64}$ ]] || { log error "polyseatd: this controller pins no daemon"; return 1; }
+verify_daemon_signature() { # file sig : the release key signed this exact daemon bundle (the fast lane)
+  [[ -f $SIGNERS && ! -L $SIGNERS && -f $1 && ! -L $1 && -f $2 && ! -L $2 ]] || return 1
+  local -a revoke=()
+  if [[ -e $REVOKED || -L $REVOKED ]]; then
+    [[ -f $REVOKED && ! -L $REVOKED ]] || return 1
+    revoke=(-r "$REVOKED")
+  fi
+  ssh-keygen -Y verify -f "$SIGNERS" -I "$SIGN_IDENTITY" -n "$POLYSEATD_NAMESPACE" "${revoke[@]}" \
+    -s "$2" < "$1" >/dev/null 2>&1
+}
+
+polyseatd_verify() { # the staged bundle is the pinned or a signed one (as daemon-stage recorded), every file per its MANIFEST
+  local sha=""
   [[ -d $POLYSEATD_DIR && ! -L $POLYSEATD_DIR && $(stat -c '%u %a' -- "$POLYSEATD_DIR") == '0 700' &&
      -f $POLYSEATD_BIN && ! -L $POLYSEATD_BIN && $(stat -c '%u %a' -- "$POLYSEATD_BIN") == '0 755' &&
-     -f $POLYSEATD_DIR/.bundle-sha256 && $(< "$POLYSEATD_DIR/.bundle-sha256") == "$POLYSEATD_SHA256" ]] ||
+     -f $POLYSEATD_DIR/.bundle-sha256 && ! -L $POLYSEATD_DIR/.bundle-sha256 ]] && sha=$(< "$POLYSEATD_DIR/.bundle-sha256") ||
     { log error "polyseatd: no staged daemon bundle (daemon-stage first)"; return 1; }
+  [[ $sha =~ ^[0-9a-f]{64}$ ]] && { [[ $sha == "$POLYSEATD_SHA256" ]] ||
+    [[ -f $POLYSEATD_DIR/.bundle-signed && ! -L $POLYSEATD_DIR/.bundle-signed && $(< "$POLYSEATD_DIR/.bundle-signed") == "$sha" ]]; } ||
+    { log error "polyseatd: the staged bundle is neither the pinned nor a signed one"; return 1; }
   (cd -- "$POLYSEATD_DIR" && sha256sum --check --strict --quiet MANIFEST >/dev/null 2>&1) ||
     { log error "polyseatd: the staged bundle differs from its MANIFEST"; return 1; }
 }
 
-cmd_daemon_stage() ( # FILE : the pinned daemon bundle, checked, unpacked into RAM, every file verified
-  local src=${1:-} new type name target
+cmd_daemon_stage() ( # FILE : the pinned or a signed (FILE.sig) daemon bundle, checked, unpacked into RAM, every file verified
+  local src=${1:-} new type name target sha signed=0
   [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 1 ]] || die $EX_BLOCKED "daemon-stage needs a canary build and one file"
   require_approval daemon-stage
   require_no_journal
-  [[ $POLYSEATD_SHA256 =~ ^[0-9a-f]{64}$ ]] || die $EX_BLOCKED "this controller pins no polyseatd"
   [[ -f $src && ! -L $src ]] || die $EX_BLOCKED "daemon bundle unavailable"
-  [[ $(sha256sum < "$src" | cut -c1-64) == "$POLYSEATD_SHA256" ]] || die $EX_VERIFY "the daemon bundle differs from the controller's pin"
+  sha=$(sha256sum < "$src" | cut -c1-64)
+  if [[ $sha != "$POLYSEATD_SHA256" ]]; then
+    verify_daemon_signature "$src" "$src.sig" ||
+      die $EX_VERIFY "the daemon bundle is neither the controller's pin nor signed by the release key"
+    signed=1
+  fi
   # Only plain files, directories and links within their own directory, under the bundle's five trees.
   # GNU tar -tv: MODE OWNER SIZE DATE TIME NAME [-> TARGET]; names with spaces are refused by the pattern anyway.
   while read -r type _ _ _ _ name _ target; do
@@ -2708,12 +2729,13 @@ cmd_daemon_stage() ( # FILE : the pinned daemon bundle, checked, unpacked into R
   { (umask 077; mkdir -- "$new") && chmod 0700 -- "$new"; } || die $EX_BLOCKED "cannot create the staging directory"
   LC_ALL=C tar -tf "$src" | sed 's#/$##' > "$new/.entries" || die $EX_BLOCKED "cannot list the bundle"
   tar -xf "$src" -C "$new" --no-same-owner --same-permissions || { polyseatd_bundle_remove "$new"; die $EX_VERIFY "cannot unpack the bundle"; }
-  printf '%s\n' "$POLYSEATD_SHA256" > "$new/.bundle-sha256"
+  printf '%s\n' "$sha" > "$new/.bundle-sha256"
+  if [[ $signed -eq 1 ]]; then printf '%s\n' "$sha" > "$new/.bundle-signed"; fi
   polyseatd_bundle_remove "$POLYSEATD_DIR"
   [[ ! -e $POLYSEATD_DIR ]] || die $EX_BLOCKED "the old daemon directory could not be removed"
   mv -- "$new" "$POLYSEATD_DIR" || die $EX_BLOCKED "cannot activate the bundle"
   polyseatd_verify || die $EX_VERIFY "staged daemon bundle failed verification"
-  log info "polyseatd $POLYSEATD_SHA256 staged in RAM"
+  log info "polyseatd $sha staged in RAM ($([[ $signed -eq 1 ]] && echo signed || echo pinned))"
 )
 
 polyseatd_lan_ip() { # the host bridge's single IPv4 address: the interface is reachable on the LAN and nowhere else

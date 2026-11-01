@@ -956,7 +956,7 @@ class PolyseatdTests(unittest.TestCase):
         for out in ("", one + one.replace(".24/", ".25/")):
             self.assertNotEqual(source_ctl(script, env={"PATH": "/usr/bin:/bin", "IPOUT": out}).returncode, 0)
 
-    def fixture(self, pin=PIN, staged=True, creds=True, listeners=""):
+    def fixture(self, pin=PIN, staged=True, creds=True, listeners="", signed=False):
         d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-psd"))
         self.addCleanup(shutil.rmtree, d)
         daemon = d / "var/lib/polyseat-unraid-daemon"
@@ -967,6 +967,8 @@ class PolyseatdTests(unittest.TestCase):
             (daemon / "bin/polyseatd").chmod(0o755)
             (daemon / "MANIFEST").write_text(hashlib.sha256(b"pinned-daemon").hexdigest() + "  bin/polyseatd\n")
             (daemon / ".bundle-sha256").write_text(hashlib.sha256(b"bundle").hexdigest() + "\n")
+            if signed:
+                (daemon / ".bundle-signed").write_text(hashlib.sha256(b"bundle").hexdigest() + "\n")
         state = d / "mnt/cache/polyseat/polyseatd"
         state.mkdir(parents=True)
         state.chmod(0o700)
@@ -991,7 +993,9 @@ class PolyseatdTests(unittest.TestCase):
 
     def test_precheck_needs_the_pin_the_staged_binary_a_password_and_a_free_port(self):
         self.assertEqual(self.fixture().returncode, 0, self.fixture().stderr)
-        for kwargs, needle in (({"pin": ""}, "pins no daemon"), ({"pin": "cd" * 32}, "no staged daemon bundle"),
+        self.assertEqual(self.fixture(pin="", signed=True).returncode, 0)  # the fast lane: staged from a signed bundle
+        for kwargs, needle in (({"pin": ""}, "neither the pinned nor a signed one"),
+                               ({"pin": "cd" * 32}, "neither the pinned nor a signed one"),
                                ({"staged": False}, "no staged daemon"), ({"creds": False}, "no password set"),
                                ({"listeners": "18B2A8C0:BAB8"}, "already in use")):
             with self.subTest(**kwargs):
@@ -999,8 +1003,9 @@ class PolyseatdTests(unittest.TestCase):
                 self.assertNotEqual(res.returncode, 0)
                 self.assertIn(needle, res.stderr)
 
-    def stage(self, members):
-        """members: (name, kind, data-or-target); returns (rc, stderr, staged dir)."""
+    def stage(self, members, pin=True, namespace=None, sign_other=False):
+        """members: (name, kind, data-or-target); returns (rc, stderr, staged dir). Without the pin, a signature under
+        `namespace` (the fast lane) is all the controller has to go on."""
         import io, tarfile
         d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-stage"))
         self.addCleanup(shutil.rmtree, d)
@@ -1019,15 +1024,28 @@ class PolyseatdTests(unittest.TestCase):
                     info.size, info.mode = len(data), 0o755
                     tar.addfile(info, io.BytesIO(data))
         (d / "bundle.tar").write_bytes(raw.getvalue())
+        if namespace:
+            key = d / "key"
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+            pub = (d / "key.pub").read_text().split()
+            (d / "allowed_signers").write_text(
+                f'polyseat-unraid-release namespaces="polyseat-unraid-bundle,{namespace}" {pub[0]} {pub[1]}\n')
+            signed = d / ("other" if sign_other else "bundle.tar")
+            if sign_other:
+                signed.write_bytes(b"another bundle")
+            subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", str(key), "-n", namespace, str(signed)], check=True)
+            if sign_other:
+                (d / "other.sig").rename(d / "bundle.tar.sig")
         script = r"""
           POLYSEAT_RELEASE_GATE=canary; init_paths 2>/dev/null; ROOT="$1"
           POLYSEATD_DIR="$1/var/lib/polyseat-unraid-daemon" POLYSEATD_BIN="$POLYSEATD_DIR/bin/polyseatd"
-          POLYSEATD_SHA256=$(sha256sum < "$1/bundle.tar" | cut -c1-64)
+          POLYSEATD_SHA256=$(sha256sum < "$1/bundle.tar" | cut -c1-64); SIGNERS="$1/allowed_signers" REVOKED="$1/revoked"
+          [[ $2 == pin ]] || POLYSEATD_SHA256=""
           require_approval() { :; }; require_no_journal() { :; }
           me=$(id -u); stat() { local out; out=$(command stat "$@") || return; printf '%s\n' "${out//$me /0 }"; }
           mkdir -p "$1/var/lib"; cmd_daemon_stage "$1/bundle.tar"
         """
-        res = source_ctl(script, str(d))
+        res = source_ctl(script, str(d), "pin" if pin else "")
         return res.returncode, res.stderr, d / "var/lib/polyseat-unraid-daemon"
 
     def test_daemon_stage_unpacks_only_a_clean_bundle_and_verifies_every_file(self):
@@ -1051,10 +1069,28 @@ class PolyseatdTests(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("differs from its MANIFEST", err)
 
+    def test_daemon_stage_takes_a_bundle_the_release_key_signed_for_daemons_only(self):
+        good = b"#!/bin/sh\n"
+        base = [("MANIFEST", "file", hashlib.sha256(good).hexdigest().encode() + b"  bin/polyseatd\n"),
+                ("bin", "dir", None), ("bin/polyseatd", "file", good)]
+        rc, err, staged = self.stage(base, pin=False, namespace="polyseat-unraid-daemon")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((staged / ".bundle-signed").read_text(), (staged / ".bundle-sha256").read_text())
+        rc, err, staged = self.stage(base, pin=True)
+        self.assertEqual(rc, 0, err)
+        self.assertFalse((staged / ".bundle-signed").exists())
+        for kwargs in ({}, {"namespace": "polyseat-unraid-seat-image"},
+                       {"namespace": "polyseat-unraid-daemon", "sign_other": True}):
+            with self.subTest(**kwargs):
+                rc, err, staged = self.stage(base, pin=False, **kwargs)
+                self.assertNotEqual(rc, 0)
+                self.assertIn("neither the controller's pin nor signed", err)
+                self.assertFalse(staged.exists())
+
     def test_daemon_stage_needs_the_pin_and_removal_is_exact(self):
         text = CTL.read_text()
         body = re.search(r"^cmd_daemon_stage\(\) \([^\n]*\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
-        self.assertLess(body.index("differs from the controller's pin"), body.index('tar -xf "$src"'))
+        self.assertLess(body.index("neither the controller's pin nor signed"), body.index('tar -xf "$src"'))
         self.assertIn("require_approval daemon-stage", body)
         self.assertIn('polyseatd_bundle_remove "$POLYSEATD_DIR"', text.split("cmd_uninstall()", 1)[1])
 
