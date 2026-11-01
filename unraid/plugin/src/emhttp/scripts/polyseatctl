@@ -175,6 +175,16 @@ init_paths() {
   SEAT_EVIDENCE="$RUN_DIR/desktop-evidence"
   PIDFILE="$RUN_DIR/incusd.pid"
   LOCKFILE="$RUN_DIR/lock"
+  # Owner mode: what play-start performs, from fixed names on the flash drive, under the host-local approval it writes.
+  OWNER_SEAT_DIR="$FLASH_DIR/seat"
+  OWNER_SEAT_IMAGE="$OWNER_SEAT_DIR/polyseat-desktop.tar.xz"
+  OWNER_SEAT_MANIFEST="$OWNER_SEAT_DIR/seat.manifest.json"
+  OWNER_DAEMON_DIR="$FLASH_DIR/daemon"
+  OWNER_DAEMON="$OWNER_DAEMON_DIR/polyseat-daemon.tar"
+  OWNER_APPROVAL="$RUN_DIR/owner-approval.json"
+  # Every reader of the approval's end (budget, watchdog, session loops) looks at $CANARY_APPROVAL; in owner mode that
+  # is the host-local file, so none of them needs to know the difference. The signed token is not consulted at all.
+  if [[ $POLYSEAT_APPROVAL_MODE == owner ]]; then CANARY_APPROVAL=$OWNER_APPROVAL; fi
 }
 
 sandbox() { [[ -n "$ROOT" ]]; }
@@ -301,7 +311,85 @@ canary_host_sha256() {
   printf '%s' "${uuid,,}" | sha256sum | awk '{print $1}'
 }
 
+canary_config_set_allowed() { # KEY=VALUE... : the settings a canary build may change; nothing else widens
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      SERVICE=disabled | "DATA_DIR=$CANARY_DATA_DIR" | ACCEPT_NO_LSM=yes | ACCEPT_NO_LSM=no) ;;
+      # The owner's play session settings; values are the schema's, nothing else widens.
+      PLAY_CPU_PERCENT=* | PLAY_MEMORY_MB=* | PLAY_IDLE_STOP_MINUTES=* | LIBRARY_PATH=* | PLAY_SESSION_HOURS=* | \
+      PLAY_CPU_PERFORMANCE=* | PLAY_SEAT_CPUS=*)
+        schema_validate "${arg%%=*}" "${arg#*=}" || die $EX_BLOCKED "canary refuses an invalid play setting" ;;
+      *) die $EX_BLOCKED "canary accepts only fixed DATA_DIR, disabled SERVICE, LSM acknowledgement and the play settings" ;;
+    esac
+  done
+}
+
+# Owner mode (owner decision 2026-11-01: an Unraid admin clicking in the WebUI replaces the signed per-session token).
+# play-start writes ONE host-local approval to $OWNER_APPROVAL (root 0600 in the RAM run directory, so a reboot ends it)
+# and only for the exact SHA-256s it is about to use. It is checked here like the signed token is: this host's identity,
+# the bundle, the seat image and the daemon bundle by hash, one fixed action set, a hard expiry. What it replaces is
+# the signature; the gate, the budgets, the watchdog, the GPU admission and every other guard are the same.
+OWNER_ACTIONS='["activate","daemon-stage","polyseatd-play","seat-image-stage","stage"]'
+
+file_sha256() { sha256sum -- "$1" | awk '{print $1}'; }
+
+owner_approval_for() { # command args... (root only, owner-mode builds only)
+  local action=$1 now host_sha target="" image_sha
+  shift
+  [[ $POLYSEAT_APPROVAL_MODE == owner ]] || die $EX_BLOCKED "owner approvals exist only in an owner-mode build"
+  [[ -d $RUN_DIR && ! -L $RUN_DIR ]] && check_private_file "$OWNER_APPROVAL" ||
+    die $EX_BLOCKED "no owner approval: a play session is started from the WebUI (play-start)"
+  now=$(date -u +%s)
+  host_sha=$(canary_host_sha256) || die $EX_BLOCKED "cannot fingerprint canary host"
+  jq -e --argjson now "$now" --arg host "$host_sha" --arg action "$action" --argjson window "$(play_max_window)" \
+    --argjson actions "$OWNER_ACTIONS" '
+    (keys == ["actions", "archive_sha256", "daemon_sha256", "expires_at", "host_sha256", "issued_at", "mode", "schema",
+              "seat_image_sha256"]) and
+    .schema == 1 and .mode == "owner" and .host_sha256 == $host and
+    all(.archive_sha256, .daemon_sha256, .seat_image_sha256; type == "string" and test("^[0-9a-f]{64}$")) and
+    (.issued_at | type == "number" and . == floor) and
+    (.expires_at | type == "number" and . == floor) and
+    .issued_at <= $now and $now < .expires_at and (.expires_at - .issued_at) <= $window and
+    .actions == $actions and ($actions | index($action)) != null' "$OWNER_APPROVAL" >/dev/null 2>&1 ||
+    die $EX_BLOCKED "owner approval expired, wrong host, invalid scope or bad schema"
+  case "$action" in
+    stage)
+      [[ -f ${1:-} && ! -L ${1:-} ]] || die $EX_BLOCKED "owner stage archive unavailable"
+      target=$(file_sha256 "$1")
+      [[ $target == "$(jq -r .archive_sha256 "$OWNER_APPROVAL")" ]] ||
+        die $EX_BLOCKED "owner approval is bound to another bundle SHA-256" ;;
+    activate)
+      [[ ${1:-} == "$(jq -r .archive_sha256 "$OWNER_APPROVAL")" ]] ||
+        die $EX_BLOCKED "owner approval is bound to another bundle SHA-256" ;;
+    seat-image-stage | daemon-stage | polyseatd-play)
+      # The runtime bundle AND the exact seat image and daemon bytes are bound, as the signed token binds bundle and image.
+      read_pointer
+      [[ $PTR_CURRENT == "$(jq -r .archive_sha256 "$OWNER_APPROVAL")" ]] ||
+        die $EX_BLOCKED "owner approval is bound to another bundle SHA-256"
+      case "$action" in
+        seat-image-stage)
+          [[ -f ${1:-} && ! -L ${1:-} ]] || die $EX_BLOCKED "seat image unavailable"
+          image_sha=$(file_sha256 "$1") ;;
+        daemon-stage)
+          [[ -f ${1:-} && ! -L ${1:-} ]] || die $EX_BLOCKED "daemon bundle unavailable"
+          [[ $(file_sha256 "$1") == "$(jq -r .daemon_sha256 "$OWNER_APPROVAL")" ]] ||
+            die $EX_BLOCKED "owner approval is bound to another daemon bundle SHA-256" ;;
+        polyseatd-play)
+          [[ -f $SEAT_IMAGE && ! -L $SEAT_IMAGE ]] || die $EX_BLOCKED "no staged seat image"
+          image_sha=$(file_sha256 "$SEAT_IMAGE")
+          [[ -f $POLYSEATD_DIR/.bundle-sha256 && ! -L $POLYSEATD_DIR/.bundle-sha256 &&
+             $(< "$POLYSEATD_DIR/.bundle-sha256") == "$(jq -r .daemon_sha256 "$OWNER_APPROVAL")" ]] ||
+            die $EX_BLOCKED "owner approval is bound to another daemon bundle SHA-256" ;;
+      esac
+      [[ $action == daemon-stage || $image_sha == "$(jq -r .seat_image_sha256 "$OWNER_APPROVAL")" ]] ||
+        die $EX_BLOCKED "owner approval is bound to another seat image SHA-256" ;;
+    *) die $EX_BLOCKED "owner approval does not cover '$action'" ;;
+  esac
+}
+
 canary_approval_for() { # command args... (root only, non-sandbox)
+  if [[ $POLYSEAT_APPROVAL_MODE == owner ]]; then owner_approval_for "$@"; return; fi
   local action=$1 token_sha target="" now host_sha
   shift
   [[ -f $CANARY_APPROVAL && ! -L $CANARY_APPROVAL &&
@@ -368,18 +456,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
         die $EX_BLOCKED "canary approval is bound to another seat image SHA-256" ;;
     config-set | config-reset)
       # The canary must never become an unattended boot service.
-      if [[ $action == config-set ]]; then
-        local arg
-        for arg in "$@"; do
-          case "$arg" in
-            SERVICE=disabled | "DATA_DIR=$CANARY_DATA_DIR" | ACCEPT_NO_LSM=yes | ACCEPT_NO_LSM=no) ;;
-            # The owner's play session settings; values are the schema's, nothing else widens.
-            PLAY_CPU_PERCENT=* | PLAY_MEMORY_MB=* | PLAY_IDLE_STOP_MINUTES=* | LIBRARY_PATH=*)
-              schema_validate "${arg%%=*}" "${arg#*=}" || die $EX_BLOCKED "canary refuses an invalid play setting" ;;
-            *) die $EX_BLOCKED "canary accepts only fixed DATA_DIR, disabled SERVICE, LSM acknowledgement and the play settings" ;;
-          esac
-        done
-      fi
+      [[ $action != config-set ]] || canary_config_set_allowed "$@"
       [[ -f $STATE_DIR/pointer.json ]] && { read_pointer; target=$PTR_CURRENT; }
       ;;
     *) die $EX_BLOCKED "canary action is outside the minimal test scope" ;;
@@ -389,6 +466,12 @@ canary_approval_for() { # command args... (root only, non-sandbox)
 }
 
 require_mutation_allowed() {
+  # "owner" is a property of a canary-gate package; any other combination is a build mistake and mutates nothing.
+  case "$POLYSEAT_APPROVAL_MODE:$POLYSEAT_RELEASE_GATE" in
+    signed:*) ;;
+    owner:canary) ;;
+    *) die $EX_BLOCKED "approval mode '$POLYSEAT_APPROVAL_MODE' is not allowed with release gate '$POLYSEAT_RELEASE_GATE'" ;;
+  esac
   if sandbox; then
     [[ $ROOT =~ ^/tmp/polyseat-ctl-[A-Za-z0-9_-]{6,}$ ]] ||
       die $EX_BLOCKED "sandbox root must be a direct /tmp/polyseat-ctl-* directory"
@@ -412,6 +495,17 @@ require_mutation_allowed() {
         # They only talk to a running session, which holds the lock and its own approved token, through root-private
         # files in $RUN_DIR; they never reach Incus or the host.
         steam-session-pin | steam-session-status | steam-session-stop | polyseatd-status | polyseatd-stop) ;;
+        play-status | play-stop) ;;  # the same two, under their owner-facing names
+        # play-start writes the owner approval itself, so there is none to check yet; it exists in owner builds only.
+        play-start) [[ $POLYSEAT_APPROVAL_MODE == owner ]] || die $EX_BLOCKED "play-start exists only in an owner-mode build" ;;
+        # Owner mode: the admin's click (same-origin POST, CSRF token) is the approval of a settings change, not a
+        # session; the canary whitelist still applies. boot only verifies and logs there (cmd_boot).
+        config-set | config-reset | boot)
+          if [[ $POLYSEAT_APPROVAL_MODE == owner ]]; then
+            [[ ${1:-} != config-set ]] || canary_config_set_allowed "${@:2}"
+          else
+            canary_approval_for "$@"
+          fi ;;
         *) canary_approval_for "$@" ;;
       esac
       ;;
@@ -1553,7 +1647,7 @@ canary_watchdog_start() {
   expiry=$(jq -er '.expires_at' "$CANARY_APPROVAL") || return 1
   now=$(date -u +%s) mono=$(canary_monotonic_seconds) || return 1
   remaining=$((expiry - now))
-  [[ $remaining -gt 0 && $remaining -le $(( CANARY_OPERATION == 8 ? PLAY_MAX_WINDOW : 1800 )) ]] || return 1
+  [[ $remaining -gt 0 && $remaining -le $(( CANARY_OPERATION == 8 ? $(play_max_window) : 1800 )) ]] || return 1
   # setsid via a function-exported bash keeps the supervisor independent of
   # SSH/interactive sessions. No child inherits controller lock descriptor 9.
   # shellcheck disable=SC2016  # arguments expand only in the child Bash
@@ -3004,6 +3098,10 @@ cmd_polyseatd_stop() {
 # keyboard, mouse and gamepads. The host pieces input needs exist only while a play session runs, and are put back
 # exactly afterwards: the console guard (owner GO), upstream's udev rule, its device-owner helper, the uhid module.
 PLAY_MAX_WINDOW=21600  # a signed play token may cover six hours; every other canary token at most 30 minutes
+# Owner mode (PLAY_SESSION_HOURS 1..24, default 6): no human re-signs a token per session, so the owner's own setting is
+# the bound, and its schema maximum is the most a session may ever last. The signed cap above is untouched.
+PLAY_OWNER_MAX_WINDOW=86400
+play_max_window() { if [[ $POLYSEAT_APPROVAL_MODE == owner ]]; then echo "$PLAY_OWNER_MAX_WINDOW"; else echo "$PLAY_MAX_WINDOW"; fi; }
 # Owner 2026-11-01: a play session uses as much CPU and memory as it needs. What stays: the VMs' priority on the GPU,
 # and the stop when the host itself would run out of memory (MemAvailable below CANARY_HOST_MIN_AVAILABLE_KB).
 # The owner may cap both (PLAY_CPU_PERCENT of the whole host, PLAY_MEMORY_MB; 0 = unlimited, the default).
@@ -3705,11 +3803,12 @@ cmd_status() {
   if [[ $json -eq 1 ]]; then
     jq -n --arg state "$state" --arg cur "$PTR_CURRENT" --arg prev "$PTR_PREVIOUS" --arg ver "$version" \
       --arg ctl "$CTL_VERSION" --arg gate "$POLYSEAT_RELEASE_GATE" --arg data "$(cfg_get DATA_DIR "")" \
-      '{state:$state,current:$cur,previous:$prev,version:$ver,controller:$ctl,release_gate:$gate,data_dir:$data}'
+      --arg mode "$POLYSEAT_APPROVAL_MODE" \
+      '{state:$state,current:$cur,previous:$prev,version:$ver,controller:$ctl,release_gate:$gate,approval_mode:$mode,data_dir:$data}'
   else
-    printf 'state=%s\ncurrent=%s\nprevious=%s\nversion=%s\ncontroller=%s\nrelease_gate=%s\nservice_setting=%s\ndata_dir=%s\n' \
+    printf 'state=%s\ncurrent=%s\nprevious=%s\nversion=%s\ncontroller=%s\nrelease_gate=%s\napproval_mode=%s\nservice_setting=%s\ndata_dir=%s\n' \
       "$state" "${PTR_CURRENT:-}" "${PTR_PREVIOUS:-}" "$version" "$CTL_VERSION" "$POLYSEAT_RELEASE_GATE" \
-      "$(cfg_get SERVICE disabled)" "$(cfg_get DATA_DIR "")"
+      "$POLYSEAT_APPROVAL_MODE" "$(cfg_get SERVICE disabled)" "$(cfg_get DATA_DIR "")"
   fi
   [[ $state != CORRUPT ]] || exit $EX_CORRUPT
 }
