@@ -11,6 +11,9 @@ produce rather than with invented ones.
     python3 -m unittest discover -s spike/m2-input-broker
 """
 
+import contextlib
+import io
+import json
 import os
 import tempfile
 import unittest
@@ -293,6 +296,174 @@ class SealingReachesWhatTheHostAlreadyHolds(unittest.TestCase):
             f"{broker.SEALED}/devices/virtual/input/input9"))
         self.assertTrue(os.path.isdir(
             f"{broker.SEALED}/{self.PAD}/input/input300/js2"))
+
+
+class APhysicalDevicesWorld(unittest.TestCase):
+    """A sysfs built in a directory with a Razer receiver in it, and the
+    assignment file beside it. Shared by everything that tests the assignment
+    of physical devices."""
+
+    RAZER = "devices/pci0000:00/0000:00:14.0/usb1/1-2"
+
+    # (event node, interface number, name, kind). One receiver, four evdev nodes
+    # on three interfaces, as the Naga Pro presents itself.
+    NODES = (("event7", 0, "Razer Razer Naga Pro Mouse", "mouse"),
+             ("event8", 1, "Razer Razer Naga Pro Keyboard", "keyboard"),
+             ("event9", 1, "Razer Razer Naga Pro", "keyboard"),
+             ("event10", 2, "Razer Razer Naga Pro Consumer Control", "keyboard"))
+
+    def put(self, path, text):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text + "\n")
+
+    def usb_device(self, rel, vendor, product, nodes, first_input=20):
+        """A USB device at `rel` with one input device per node entry."""
+        top = f"{self.sys_root}/{rel}"
+        self.put(f"{top}/idVendor", vendor)
+        self.put(f"{top}/idProduct", product)
+        for i, (node, iface, name, kind) in enumerate(nodes):
+            inp = f"{top}/{os.path.basename(rel)}:1.{iface}/0003:{vendor}:{product}.00{i}/input/input{first_input + i}"
+            self.put(f"{top}/{os.path.basename(rel)}:1.{iface}/bInterfaceNumber", f"{iface:02x}")
+            self.put(f"{inp}/{node}/dev", f"13:{int(node[5:]) + 64}")
+            self.put(f"{inp}/name", name)
+            self.put(f"{inp}/capabilities/ev", "17" if kind == "mouse" else "3")
+            self.put(f"{inp}/capabilities/key",
+                     "10000 0 0 0 0" if kind == "mouse" else "0 0 0 0 10000")
+            os.symlink(f"{inp}/{node}", f"{self.sys_root}/class/input/{node}")
+            os.symlink(inp, f"{inp}/{node}/device")
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.sys_root = os.path.join(self.dir.name, "sys")
+        os.makedirs(f"{self.sys_root}/class/input")
+        self.usb_device(self.RAZER, "1532", "00a4", self.NODES)
+
+        self.assign = os.path.join(self.dir.name, "assign.json")
+        self._saved = (broker.SYS_ROOT, broker.SYS_INPUT, broker.ASSIGN_FILE,
+                       broker._assign_said)
+        broker.SYS_ROOT = self.sys_root
+        broker.SYS_INPUT = f"{self.sys_root}/class/input"
+        broker.ASSIGN_FILE = self.assign
+        broker._assign_said = None
+
+    def tearDown(self):
+        (broker.SYS_ROOT, broker.SYS_INPUT, broker.ASSIGN_FILE,
+         broker._assign_said) = self._saved
+        self.dir.cleanup()
+
+    def write(self, data):
+        with open(self.assign, "w") as fh:
+            fh.write(data if isinstance(data, str) else json.dumps(data))
+
+    def razer(self, seat="seat1", **extra):
+        return dict({"vendor": "1532", "product": "00a4", "seat": seat}, **extra)
+
+
+class TheAssignmentFile(APhysicalDevicesWorld):
+    """load_assignments(): strict, and failing towards 'nothing assigned'."""
+
+    def test_a_valid_entry_is_loaded(self):
+        self.write([self.razer()])
+        self.assertEqual(broker.load_assignments(),
+                         {("1532", "00a4"): ("seat1", None)})
+
+    def test_interfaces_restrict_the_assignment(self):
+        self.write([self.razer(interfaces=[0])])
+        self.assertEqual(broker.load_assignments(),
+                         {("1532", "00a4"): ("seat1", frozenset({0}))})
+
+    def test_a_missing_file_assigns_nothing_and_says_so_once(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(broker.load_assignments(), {})
+            self.assertEqual(broker.load_assignments(), {})
+        self.assertEqual(out.getvalue().count("does not exist"), 1)
+
+    def test_garbage_assigns_nothing_and_does_not_raise(self):
+        for text in ("", "{", "null", '{"vendor": "1532"}', "[1]", '["x"]'):
+            broker._assign_said = None
+            self.write(text)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(broker.load_assignments(), {}, text)
+
+    def test_an_unreadable_file_assigns_nothing(self):
+        os.mkdir(self.assign)       # open() on a directory is an OSError
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(broker.load_assignments(), {})
+
+    def test_every_field_is_checked(self):
+        bad = [self.razer(vendor="1532 "), self.razer(vendor="1532x"),
+               self.razer(vendor="ABCD"), self.razer(vendor=1532),
+               self.razer(product="a4"), self.razer(product=None),
+               {"vendor": "1532", "seat": "seat1"},          # no product
+               {"product": "00a4", "seat": "seat1"},         # no vendor
+               {"vendor": "1532", "product": "00a4"},        # no seat
+               self.razer(seat="Seat1"), self.razer(seat="a"),
+               self.razer(seat="seat1; rm -rf"), self.razer(seat=""),
+               self.razer(interfaces=[]), self.razer(interfaces="0"),
+               self.razer(interfaces=[True]), self.razer(interfaces=[-1]),
+               self.razer(extra="x")]
+        for entry in bad:
+            with self.subTest(entry=entry), contextlib.redirect_stdout(io.StringIO()):
+                self.write([entry])
+                self.assertEqual(broker.load_assignments(), {})
+
+    def test_one_bad_entry_spoils_the_whole_file(self):
+        self.write([self.razer(), self.razer(seat="NOPE", product="0001")])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(broker.load_assignments(), {})
+
+    def test_the_same_device_for_two_seats_assigns_to_neither(self):
+        self.write([self.razer("seat1"), self.razer("seat2")])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(broker.load_assignments(), {})
+        self.assertIn("listed more than once", out.getvalue())
+
+    def test_a_fixed_file_is_reported_again_when_it_breaks_again(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.write("{")
+            broker.load_assignments()
+            self.write([self.razer()])
+            broker.load_assignments()
+            self.write("{")
+            broker.load_assignments()
+        self.assertEqual(out.getvalue().count("unreadable or not JSON"), 2)
+
+
+class WhichUsbDeviceAnInputNodeIs(APhysicalDevicesWorld):
+    def real(self, node):
+        return os.path.realpath(f"{broker.SYS_INPUT}/{node}")
+
+    def test_the_ids_and_the_interface_are_found_by_walking_up(self):
+        self.assertEqual(broker.usb_identity(self.real("event7")),
+                         ("1532", "00a4", 0))
+        self.assertEqual(broker.usb_identity(self.real("event10")),
+                         ("1532", "00a4", 2))
+
+    def test_a_node_without_a_usb_ancestor_has_no_identity(self):
+        inp = f"{self.sys_root}/devices/virtual/input/input99"
+        self.put(f"{inp}/event30/dev", "13:94")
+        os.symlink(f"{inp}/event30", f"{self.sys_root}/class/input/event30")
+        self.assertIsNone(broker.usb_identity(self.real("event30")))
+
+    def test_only_the_seat_it_is_assigned_to_gets_an_answer(self):
+        table = {("1532", "00a4"): ("seat1", None)}
+        real = self.real("event7")
+        self.assertEqual(broker.assigned_to(real, "seat1", table), "1532:00a4")
+        self.assertIsNone(broker.assigned_to(real, "seat2", table))
+        self.assertIsNone(broker.assigned_to(real, "seat1", {}))
+
+    def test_the_exact_product_is_required(self):
+        real = self.real("event7")
+        self.assertIsNone(broker.assigned_to(
+            real, "seat1", {("1532", "00a5"): ("seat1", None)}))
+        self.assertIsNone(broker.assigned_to(
+            real, "seat1", {("1533", "00a4"): ("seat1", None)}))
+
+    def test_interfaces_pick_nodes(self):
+        table = {("1532", "00a4"): ("seat1", frozenset({0}))}
+        self.assertIsNotNone(broker.assigned_to(self.real("event7"), "seat1", table))
+        self.assertIsNone(broker.assigned_to(self.real("event8"), "seat1", table))
 
 
 if __name__ == "__main__":
