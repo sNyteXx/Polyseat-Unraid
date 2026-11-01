@@ -65,6 +65,11 @@ class Harness(unittest.TestCase):
                "NVIDIA_VISIBLE_DEVICES": "GPU-3cf9157a-c7d3-cbe4-f153-82f96a08a660",
                "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video,graphics",
                "SECRET_TOKEN": "must-not-be-logged", "HOOK_LOG": str(self.log)}
+        # Step 4: the supervisor's fresh "allow"; GpuAdmissionTests covers everything else.
+        admission = self.d / "gpu-admission"
+        if not admission.exists() or admission.read_text().startswith("allow"):
+            admission.write_text(f"allow {int(time.time())} 0000:01:00.0\n")
+        env["POLYSEAT_GPU_ADMISSION"] = str(admission)
         env.update(extra)
         return {k: v for k, v in env.items() if v is not None}
 
@@ -239,3 +244,59 @@ class Level2Rehearsal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GpuAdmissionTests(unittest.TestCase):
+    """Step 4: every start of a GPU container passes the hook, polyseatd's included; only a fresh "allow" from the
+    supervisor's VM-priority check lets it touch the GPU."""
+
+    def setUp(self):
+        self.h = WrapperTests("test_exit_status_is_preserved_and_recorded")
+        self.h.setUp()
+        self.addCleanup(self.h.tmp.cleanup)
+        (self.h.hooks / "nvidia.upstream").write_text("#!/bin/bash\necho UPSTREAM-RAN\n")
+        (self.h.hooks / "nvidia.upstream").chmod(0o755)
+
+    def run_with(self, content):
+        admission = self.h.d / "gpu-admission-under-test"  # not the harness' own always-fresh file
+        if content is None:
+            admission.unlink(missing_ok=True)
+            env = {"POLYSEAT_GPU_ADMISSION": str(admission)}
+        else:
+            admission.write_text(content)
+            env = {"POLYSEAT_GPU_ADMISSION": str(admission)}
+        start = time.monotonic()
+        res = self.h.run_hook(**env)
+        return res, time.monotonic() - start
+
+    def test_only_a_fresh_allow_runs_the_hook(self):
+        now = int(time.time())
+        res, _ = self.run_with(f"allow {now} 0000:01:00.0\n")
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertIn("UPSTREAM-RAN", (self.h.log / "hook.out").read_text())
+        for content in (f"deny {now} 0000:01:00.0\n", f"allow {now - 60} 0000:01:00.0\n",
+                        f"allow {now + 60} 0000:01:00.0\n", "allow notanumber x\n", "", None):
+            with self.subTest(content=content):
+                (self.h.log / "hook.out").unlink(missing_ok=True)
+                res, took = self.run_with(content)
+                self.assertEqual(res.returncode, 1)
+                self.assertIn("the GPU is not admitted", res.stdout)
+                self.assertNotIn("UPSTREAM-RAN", res.stdout + (self.h.log / "hook.out").read_text())
+                self.assertLess(took, 8)
+
+    def test_the_supervisor_writes_allow_only_while_the_gpu_check_passes(self):
+        ctl = Path(__file__).resolve().parents[1] / "plugin/src/emhttp/scripts/polyseatctl"
+        body = ctl.read_text()
+        loop = body[body.index("canary_watchdog_loop() {"):body.index("canary_watchdog_start() {")]
+        self.assertIn("if [[ $aborted -eq 0 && -n ${CANARY_GPU_PCI:-} ]]; then canary_gpu_admission_write allow", loop)
+        self.assertIn("trap 'canary_gpu_admission_write deny;", loop)
+        self.assertLess(loop.index("gpu_guard_quick"), loop.index("canary_gpu_admission_write allow"))
+        out = self.h.d / "adm"
+        res = subprocess.run(["bash", "-c", "source <(sed '$d' \"$1\"); GPU_ADMISSION=$2 CANARY_GPU_PCI=0000:01:00.0 "
+                              "canary_gpu_admission_write allow", "t", str(ctl), str(out)],
+                             env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        verdict, stamp, pci = out.read_text().split()
+        self.assertEqual((verdict, pci), ("allow", "0000:01:00.0"))
+        self.assertLess(abs(int(stamp) - time.time()), 5)
+        self.assertEqual(oct(out.stat().st_mode & 0o777), "0o644")

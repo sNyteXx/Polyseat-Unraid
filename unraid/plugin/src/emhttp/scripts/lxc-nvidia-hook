@@ -7,7 +7,7 @@
 # and namespaces, the hook's complete stdout+stderr, its exit status, and nvidia-container-cli's own debug log.
 # The log directory is created by the controller, owned by the container root uid, mode 0700.
 #
-# It never changes the hook's exit status. It adds `--debug FILE`, which the upstream hook accepts, so the CLI
+# Apart from the GPU admission below, it never changes the hook's exit status. It adds `--debug FILE`, which the upstream hook accepts, so the CLI
 # writes its log to a directory that uid can write (the hook's own default, the instance directory, is root-only,
 # and libnvidia-container 1.20.1 asserts that its debug log opens). And it puts the shim in cli/ (lxc-nvidia-cli)
 # first on the hook's PATH, which runs the real CLI with --no-pivot: pivot_root fails on Unraid's initramfs root.
@@ -15,6 +15,27 @@ set -u
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 log=${POLYSEAT_HOOK_LOG_DIR:-$(cd -- "$here/.." && pwd)/hook-log}
 cap=262144
+
+# GPU admission (step 4): every start of a GPU container passes here, polyseatd's own starts included. The
+# controller's supervisor rewrites gpu-admission every second from its VM-priority check ("allow EPOCH PCI");
+# without a fresh "allow" this start fails before the GPU is touched. Waits up to 5 s for the supervisor's next write.
+admission=${POLYSEAT_GPU_ADMISSION:-$(cd -- "$here/.." && pwd)/gpu-admission}
+admitted=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if read -r verdict stamp _ < "$admission" 2>/dev/null && [ "$verdict" = allow ] &&
+     case $stamp in '' | *[!0-9]*) false ;; *) true ;; esac &&
+     [ $(( $(date +%s) - stamp )) -ge -2 ] && [ $(( $(date +%s) - stamp )) -le 5 ]; then
+    admitted=1
+    break
+  fi
+  sleep 0.5
+done
+if [ "$admitted" != 1 ]; then
+  msg="polyseat: the GPU is not admitted (a VM has priority, or the Polyseat supervisor is not running); start refused"
+  echo "$msg" >&2
+  if [ -d "$log" ] && [ -w "$log" ]; then printf '%s\n' "$msg" > "$log/hook.out"; printf '1\n' > "$log/status"; fi
+  exit 1
+fi
 
 # Resolved like the upstream hook does (it appends the standard directories); without a CLI the hook reports it.
 if [ -x "$here/cli/nvidia-container-cli" ] &&

@@ -919,7 +919,7 @@ ensure_lxc_rootfs_mount() { # manifest
 
 remove_lxc_rootfs_mount() {
   local f
-  for f in "hooks/nvidia" "hooks/nvidia.upstream" "hooks/cli/nvidia-container-cli" "hook-log/env.txt" \
+  for f in "gpu-admission" "gpu-admission.new" "hooks/nvidia" "hooks/nvidia.upstream" "hooks/cli/nvidia-container-cli" "hook-log/env.txt" \
            "hook-log/hook.out" "hook-log/status" "hook-log/nvidia-container-cli.log"; do
     rm -f -- "$(lxc_mount_real "$LXC_STATE_PARENT/$f")"
   done
@@ -1430,12 +1430,22 @@ canary_host_pressure_check() {
     awk -v maximum="$CANARY_HOST_MAX_LOAD" '{ exit !($1 <= maximum) }' /proc/loadavg
 }
 
+# Step 4: every start of a GPU container passes the LXC nvidia hook, polyseatd's own starts included. The supervisor
+# rewrites this file every second from its VM-priority check; the hook admits a start only on a fresh "allow".
+canary_gpu_admission_write() { # allow|deny
+  local file=${GPU_ADMISSION:-}
+  [[ -n $file && ! -L $file && ! -L $file.new ]] || return 0
+  printf '%s %s %s\n' "$1" "$(date -u +%s)" "${CANARY_GPU_PCI:-none}" > "$file.new" && chmod 0644 -- "$file.new" &&
+    mv -f -- "$file.new" "$file"
+}
+
 canary_watchdog_loop() { # epoch deadline, monotonic deadline
   local expiry=$1 deadline=$2 pid=$BASHPID started aborted=0
   printf '%s\n' "$pid" > "$CANARY_WATCHDOG_CGROUP/cgroup.procs" || return 1
   renice -n 19 -p "$pid" >/dev/null || return 1
-  trap 'printf "1\n" > "$CANARY_CGROUP/cgroup.kill" 2>/dev/null || true' EXIT
+  trap 'canary_gpu_admission_write deny; printf "1\n" > "$CANARY_CGROUP/cgroup.kill" 2>/dev/null || true' EXIT
   trap 'exit 1' TERM HUP INT
+  canary_gpu_admission_write deny
   started=$(canary_process_starttime "$pid") || return 1
   write_json_atomic "$CANARY_SESSION" "$(jq -n --argjson p "$pid" --arg s "$started" \
     --argjson e "$expiry" --argjson d "$deadline" \
@@ -1459,6 +1469,8 @@ canary_watchdog_loop() { # epoch deadline, monotonic deadline
       printf 'resource-policy-or-budget\n' > "$CANARY_SESSION.reason"
       aborted=1
     fi
+    if [[ $aborted -eq 0 && -n ${CANARY_GPU_PCI:-} ]]; then canary_gpu_admission_write allow
+    else canary_gpu_admission_write deny; fi
     if [[ $aborted -eq 1 ]]; then
       # Keep reaping until explicit cleanup removes the tree. This also
       # catches a launcher crossing the exact expiry instant, or lost SSH.
@@ -1490,9 +1502,11 @@ canary_watchdog_start() {
     CANARY_HOST_MIN_AVAILABLE_KB="$CANARY_HOST_MIN_AVAILABLE_KB" CANARY_HOST_MAX_LOAD="$CANARY_HOST_MAX_LOAD" \
     CANARY_OPERATION="$CANARY_OPERATION" DESKTOP_MEMORY_MAX="$DESKTOP_MEMORY_MAX" CANARY_GPU_PCI="$CANARY_GPU_PCI" \
     STEAM_MEMORY_MAX="$STEAM_MEMORY_MAX" PERSIST_MIN_FREE_KB="$PERSIST_MIN_FREE_KB" \
+    GPU_ADMISSION="$(lxc_mount_real "$LXC_STATE_PARENT")/gpu-admission" \
     GPU_TRANSITION_LOCKS="$GPU_TRANSITION_LOCKS" GPU_TRANSITION_MARKERS="$GPU_TRANSITION_MARKERS" \
     setsid bash -u -o pipefail -c "$(declare -f canary_watchdog_loop canary_process_starttime write_json_atomic sync_path \
       canary_monotonic_seconds canary_cgroup_check canary_budget_check canary_host_pressure_check log sandbox \
+      canary_gpu_admission_write \
       gpu_guard_quick gpu_domain_active gpu_libvirt_owners gpu_lock_held host_path sys_root ci_real_system)"$'\n''canary_watchdog_loop "$@"' \
     canary-watchdog "$expiry" "$((mono + remaining))" \
     >/dev/null 2>&1 </dev/null 9>&- &

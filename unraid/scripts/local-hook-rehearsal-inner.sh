@@ -65,6 +65,16 @@ attempt() { # label rc msg -> start exit code
   return "$rc"
 }
 
+# GPU admission (step 4): the controller's own writer, as its supervisor runs it, keeps a fresh "allow".
+# shellcheck disable=SC1090  # the controller under test, without its main call
+admit() { ( source <(sed '$d' /in/emhttp/scripts/polyseatctl); GPU_ADMISSION=/var/lib/polyseat-lxc/gpu-admission \
+  CANARY_GPU_PCI=0000:01:00.0 canary_gpu_admission_write "$1" ); }
+( while :; do admit allow; sleep 1; done ) &
+admitter=$!
+for _ in $(seq 20); do [[ -s /var/lib/polyseat-lxc/gpu-admission ]] && break; sleep 0.2; done
+[[ $(stat -c '%U %a' /var/lib/polyseat-lxc/gpu-admission) == 'root 644' ]] && pass "GPU admission: $(cat /var/lib/polyseat-lxc/gpu-admission)" ||
+  fail 'GPU admission file'
+
 # A: the run-5 failure, reproduced: hook unreachable for the container root uid (0700 on the path).
 chmod 0700 /var/lib/polyseat-lxc/hooks
 if attempt A-unreachable 0 ok; then fail 'A: start succeeded with an unreachable hook'; fi
@@ -107,6 +117,18 @@ if [[ -x /realcli/usr/bin/nvidia-container-cli ]]; then
   [[ -s /out/D-real-cli-debug.log ]] && pass "D: CLI debug log opened at the writable path ($(wc -c < /out/D-real-cli-debug.log) bytes)" ||
     fail 'D: CLI debug log missing'
 fi
+# E: no GPU admission (a VM took the GPU, or no supervisor): the start fails before the CLI runs.
+kill "$admitter" 2>/dev/null; wait "$admitter" 2>/dev/null || true
+for mode in deny stale missing; do
+  case $mode in
+    deny) admit deny ;;
+    stale) printf 'allow %s 0000:01:00.0\n' "$(( $(date +%s) - 60 ))" > /var/lib/polyseat-lxc/gpu-admission ;;
+    missing) rm -f /var/lib/polyseat-lxc/gpu-admission ;;
+  esac
+  if attempt "E-$mode" 0 'stub: configured'; then fail "E: started with GPU admission $mode"; fi
+  grep -q 'the GPU is not admitted' "/out/E-$mode-hook.out" && [[ ! -s /out/E-$mode-stub-argv ]] &&
+    pass "E: GPU admission $mode -> start refused before the CLI ran" || fail "E: $mode"
+done
 inc delete c1 --force >/dev/null 2>&1 || true
 [[ -s /out/C-cli-fails-hook.out ]] && pass 'C: evidence kept after the instance was deleted' || fail 'C: evidence after delete'
 inc admin shutdown >/dev/null 2>&1 || true

@@ -114,6 +114,15 @@ clean stop of the previous run.**
 | Measured locally (disposable container, real runtime) | at start polyseatd changes nothing in Incus. `/api/setup` gets 409 when a password exists, a wrong login 401, `/api/state` without login 401, the five host actions 403. Its uhid observer backs off on the missing python3 (input is a later step) |
 | Proof | unit tests; CI run D in `persist-canary` (fixture `br0` 10.77.0.1, every HTTP check from outside, localhost not served); then Tower |
 
+## Step 4 design: GPU admission at every container start
+
+| | |
+|---|---|
+| Seam | the LXC nvidia hook wrapper. Every start of a GPU container passes it, including starts polyseatd makes on its own (autostart, provisioning restarts) that never go through the controller |
+| Signal | the supervisor's watchdog already checks GPU ownership every second (VM state, VFIO, holders, hand-over locks). It now also writes `/var/lib/polyseat-lxc/gpu-admission` (root 0644): `allow EPOCH PCI` while the check passes for an operation that may use the GPU, `deny` otherwise and when it exits |
+| Hook | waits up to 5 s for a fresh `allow` (timestamp within 5 s, numeric, not in the future). Otherwise the start fails before the NVIDIA CLI or the GPU is touched, with the reason in the hook log |
+| Proof | unit tests (fresh, deny, stale, future, malformed, missing). Real-LXC rehearsal (`local-hook-rehearsal.sh`, CI `desktop-canary`): case E refuses `deny`, stale and missing before the CLI runs. Tower: a GPU run through the admitted path |
+
 Unchanged throughout:
 - no main merge, no release, no unreviewed `.plg`;
 - every Tower step needs its own gate;
