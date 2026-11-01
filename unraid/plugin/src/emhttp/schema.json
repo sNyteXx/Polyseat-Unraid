@@ -129,5 +129,43 @@
     "label": "Pin the seats to CPUs (empty = no pinning). One list for all seats, e.g. 0-15 (P-cores of an i7-14700K), or per seat, e.g. seat1=0-7;seat2=8-15. Only processes inside a seat's container are pinned. Checked against the host's CPUs when saved and when a session starts.",
     "locked_while_running": true,
     "title": "Seat CPUs"
+  },
+  "WORKLOADS_ENABLED": {
+    "type": "enum",
+    "values": [
+      "yes",
+      "no"
+    ],
+    "default": "no",
+    "tab": "workloads",
+    "label": "Start the permanent workloads daemon (a second Incus, for the owner's own containers) when the array starts. A play session never starts by itself.",
+    "title": "Start workloads at array start"
+  },
+  "WORKLOADS_INSTANCES": {
+    "type": "string",
+    "pattern": "^[a-z0-9][a-z0-9-]{0,62}(?: [a-z0-9][a-z0-9-]{0,62}){0,15}$",
+    "default": "",
+    "tab": "workloads",
+    "label": "The Incus instances the workloads daemon may run, names separated by spaces (e.g. ubuntudev). Any other instance, and any listed one that leaves the policy in docs/workloads.md, is stopped and kept from autostarting.",
+    "title": "Allowed instances"
+  },
+  "WORKLOADS_MEMORY_MB": {
+    "type": "int",
+    "min": 0,
+    "max": 4194304,
+    "default": "0",
+    "tab": "workloads",
+    "label": "Memory the workloads daemon and its containers may use together, in MB (0 = unlimited). A cap on the whole group: limits.* on an instance are not enforced one by one. Applies to the next start.",
+    "locked_while_running": true,
+    "title": "Workloads memory limit (MB)"
+  },
+  "WORKLOADS_CPUS": {
+    "type": "string",
+    "pattern": "^[0-9]{1,4}(?:-[0-9]{1,4})?(?:,[0-9]{1,4}(?:-[0-9]{1,4})?)*$",
+    "default": "",
+    "tab": "workloads",
+    "label": "The CPUs the workloads daemon and its containers may use, e.g. 0-15 or 0-7,16-19 (empty = all). Checked against the host's CPUs when saved and at start. Applies to the next start.",
+    "locked_while_running": true,
+    "title": "Workloads CPUs"
   }
 }

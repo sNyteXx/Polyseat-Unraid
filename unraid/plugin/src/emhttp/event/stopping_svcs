@@ -3,8 +3,13 @@
 # A running session is asked to stop and waited for (bounded): its seats stop in upstream's order, Incus records a
 # clean stop and the host is restored (sysrq, console keyboard, udev rule, energy profile) while the pools are still there.
 # Only after that, or after the bound, the emergency stop runs, exactly as before.
+# The permanent workloads daemon (owner builds) is independent of all that, so it stops alongside: each instance gets its
+# own clean stop (up to 2 minutes), then Incus shuts down and records its clean stop. Bounded, and logged by the controller.
 CTL=/usr/local/emhttp/plugins/polyseat-unraid/scripts/polyseatctl
 [[ -x $CTL ]] || exit 0
+"$CTL" workloads-stop --wait 600 > /dev/null 2>&1 &
+workloads=$!
 "$CTL" play-stop --wait 300 > /dev/null 2>&1
 "$CTL" stop > /dev/null 2>&1
+wait "$workloads"
 exit 0

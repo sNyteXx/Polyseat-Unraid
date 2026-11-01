@@ -118,6 +118,12 @@ PLAY_UHID_LINES = {
 }
 
 
+# The permanent workloads daemon (owner builds): the host loads the fixed module set docker and tailscale need before
+# the daemon starts (test_workloads pins the set and the one call site). It names the tool once, as a constant; the call
+# is `"$WL_MODPROBE" -- "$mod"`, which is not the word the denylist looks for.
+WORKLOADS_MODPROBE_LINES = {("", 'WL_MODPROBE="/sbin/modprobe"')}
+
+
 # The one systemctl the controller may name: upstream's session stop, run INSIDE a seat through `incus exec` as its
 # player (manager.go haltContainer). Unraid has no systemd; the host is never asked.
 PLAY_SESSION_STOP_LINE = ('PLAY_SESSION_STOP="sudo -u player env XDG_RUNTIME_DIR=/run/user/1000 '
@@ -420,6 +426,9 @@ class DenylistTests(unittest.TestCase):
                         if (path.name == "polyseatctl" and pattern == r"\bmodprobe\b" and function in PLAY_UHID_LINES
                                 and line.strip() == PLAY_UHID_LINES[function]):
                             continue
+                        if (path.name == "polyseatctl" and pattern == r"\bmodprobe\b"
+                                and (function, line.strip()) in WORKLOADS_MODPROBE_LINES):
+                            continue
                         # The controller may *read* or log about these; it may not run them.
                         if pattern == r"\bmodprobe\b":
                             self.assertRegex(line, r"^\s*(CANARY_DENIED_TOOLS=|#)", f"{path.name}: {line}")
@@ -509,6 +518,9 @@ class DenylistTests(unittest.TestCase):
         for name, expected in (("disks_mounted", "boot"), ("stopping_svcs", "stop")):
             body = (PLUGIN / "src/emhttp/event" / name).read_text()
             self.assertIn(f'"$CTL" {expected}', body)
+            # the only other verb either script may call: the permanent workloads daemon's stop, in the stop event
+            others = set(re.findall(r'"\$CTL" ([a-z-]+)', "\n".join(code_lines(PLUGIN / "src/emhttp/event" / name))))
+            self.assertEqual(others, {expected} | ({"play-stop", "workloads-stop"} if name == "stopping_svcs" else set()))
             check = run("bash", "-n", PLUGIN / "src/emhttp/event" / name)
             self.assertEqual(check.returncode, 0, check.stderr)
         self.assertNotIn("--approve", (PLUGIN / "src/emhttp/event/disks_mounted").read_text())

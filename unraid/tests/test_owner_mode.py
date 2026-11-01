@@ -921,6 +921,10 @@ class DispatchAndEventTests(unittest.TestCase):
         base = Path(CTL).parents[1] / "event"
         stopping = (base / "stopping_svcs").read_text()
         self.assertLess(stopping.index('"$CTL" play-stop --wait 300'), stopping.index('"$CTL" stop'))
+        # the permanent workloads daemon stops alongside, bounded, and the event waits for it before it returns
+        self.assertIn('"$CTL" workloads-stop --wait 600 > /dev/null 2>&1 &', stopping)
+        self.assertLess(stopping.index("workloads-stop"), stopping.index('"$CTL" play-stop'))
+        self.assertLess(stopping.index('"$CTL" stop'), stopping.index('wait "$workloads"'))
         mounted = (base / "disks_mounted").read_text()
         for forbidden in ("play-start", "polyseatd-play", "--approve", "activate"):
             self.assertNotIn(forbidden, mounted)
