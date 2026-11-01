@@ -1052,7 +1052,7 @@ class CommandLineTests(Fixture):
         res = self.bash(r'''
           setsid() { printf '%s\n' "$*" >> "$D/setsid"; }
           wl_launch_detached run''', api=False, check=0)
-        self.assertRegex((self.dir / "setsid").read_text(), r"^-f \S+polyseatctl workloads-run run\n$")
+        self.assertRegex((self.dir / "setsid").read_text(), r"^-f /bin/bash \S+/workloads-ctl/scripts/polyseatctl workloads-run run\n$")
         text = CTL.read_text()
         launch = re.search(r"^wl_launch_detached\(\) \{.*?^\}", text, re.M | re.S).group(0)
         self.assertIn("POLYSEAT_DETACHED=1 setsid -f", launch)

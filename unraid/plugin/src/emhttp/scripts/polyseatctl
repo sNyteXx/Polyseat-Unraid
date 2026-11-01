@@ -3278,6 +3278,9 @@ PLAY_HELPER_DIR="/usr/local/lib/polyseat"
 # Upstream's session stop, run as the seat's player before the container stops (manager.go haltContainer, playerPrefix).
 PLAY_SESSION_STOP="sudo -u player env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user stop polyseat-sway.service"
 PLAY_NAME_RE='^[a-z0-9][a-z0-9-]{0,62}$'
+# How long the legacy `stop` of an owner build waits for a running session's graceful end (two seats at 40 s + 90 s each, and
+# the Incus clean stop, fit in it); the same bound event/stopping_svcs gives play-stop.
+OWNER_STOP_WAIT=300
 
 polyseatd_config() { # ip out : the bundle's own template with this host's values; host actions must stay off
   local tpl=$POLYSEATD_DIR/etc/polyseatd.json.in idle
@@ -3365,12 +3368,22 @@ play_real() { ! sandbox || ci_real_system; }  # modules and udev only on a real 
 PLAY_PRIORITY_NICE=-12
 PLAY_PRIORITY_COMMS='^(sway|wineserver|gamescope.*|Xwayland)$'
 
+# The seat a process belongs to: its cgroup is a payload group BELOW the play session's own group. The permanent workloads
+# daemon (a second incusd, always up) has payload groups of the same shape (lxc.payload.<container> below
+# polyseat-unraid-workloads); those are the owner's containers and are never reniced, pinned or otherwise touched by play.
+# Prints the seat name; fails for any other process.
+play_payload_seat() { # the content of /proc/PID/cgroup
+  local re="^0::/${CANARY_CGROUP##*/}/([^[:space:]]*/)?lxc\\.payload\\.([a-z0-9][a-z0-9-]*)(/[^[:space:]]*)?\$"
+  [[ $1 =~ $re ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[2]}"
+}
+
 play_seat_priorities() { # every thread of those processes in a seat's payload cgroup, never anything else
   local proc=${PLAY_PROC:-/proc} p t cg comm nice
   [[ -n ${PLAY_PROC:-} ]] || play_real || return 0
   for p in "$proc"/[0-9]*; do
     cg=$(cat -- "$p/cgroup" 2>/dev/null) || continue
-    [[ $cg =~ lxc\.payload\.[a-z0-9][a-z0-9-]* ]] || continue
+    play_payload_seat "$cg" >/dev/null || continue
     comm=$(cat -- "$p/comm" 2>/dev/null) || continue
     [[ $comm =~ $PLAY_PRIORITY_COMMS ]] || continue
     for t in "$p"/task/[0-9]*; do
@@ -3443,8 +3456,7 @@ play_seat_pin() { # every thread of every process in a seat's payload cgroup get
   [[ -n ${PLAY_PROC:-} ]] || play_real || return 0
   for p in "$proc"/[0-9]*; do
     cg=$(cat -- "$p/cgroup" 2>/dev/null) || continue
-    [[ $cg =~ lxc\.payload\.([a-z0-9][a-z0-9-]*) ]] || continue
-    seat=${BASH_REMATCH[1]}
+    seat=$(play_payload_seat "$cg") || continue
     want=${PLAY_PIN_SEAT[$seat]:-$PLAY_PIN_ALL}
     [[ -n $want ]] || continue
     for t in "$p"/task/[0-9]*; do
@@ -3795,6 +3807,12 @@ cmd_play_start() ( # owner mode: verify and stage what is on the flash, approve 
   done
   { verify_bundle_files "$sha" && check_host_compat "$(bundle_manifest "$sha")"; } ||
     die $EX_VERIFY "runtime bundle $sha failed verification; nothing was started"
+  # The workloads daemon (always up when the owner uses it) executes from the active runtime slot: a different bundle would
+  # replace that slot under it. Said here, where the admin reads it, instead of as a failed activation further down.
+  read_pointer
+  if [[ $PTR_CURRENT != "$sha" ]] && wl_running; then
+    die $EX_BLOCKED "the runtime bundle on the flash ($sha) is not the active one, and the workloads daemon runs from the active one; stop the workloads daemon first (Workloads card), then start the session"
+  fi
   seat_sha=$(file_sha256 "$OWNER_SEAT_IMAGE") daemon_sha=$(file_sha256 "$OWNER_DAEMON")
   hours=$(cfg_get PLAY_SESSION_HOURS 6)
   schema_validate PLAY_SESSION_HOURS "$hours" || die $EX_BLOCKED "PLAY_SESSION_HOURS '$hours' is not usable; nothing was started"
@@ -3994,8 +4012,12 @@ play_recover_check_processes() { # nothing that proves a session could still run
     [[ $pid == "$$" || $pid == "$BASHPID" ]] && continue
     comm=$(cat -- "$p/comm" 2>/dev/null) || comm=""
     cg=$(cat -- "$p/cgroup" 2>/dev/null) || cg=""
+    # The permanent workloads daemon runs next to every play session, and its incusd, its monitors and its containers are
+    # no leftover of one: everything in its group (and in the groups below it) is its own business, not play's.
+    # (Workloads leave nothing behind outside that group; the leak check below still sees a process that has left it.)
+    [[ $cg == "0::/$CANARY_OTHER_CGROUP" || $cg == "0::/$CANARY_OTHER_CGROUP/"* ]] && continue
     shown=$(head -n 1 <<< "$cg" | tr -c '[:alnum:]/:._-' '?' | head -c 100)
-    # Any incusd, ours or not: the forks of a running container carry the name too. polyseatd is the daemon on the LAN.
+    # Any other incusd, ours or not: the forks of a running container carry the name too. polyseatd is the daemon on the LAN.
     case "$comm" in
       incusd | polyseatd) play_recover_fail "$comm is still running (pid $pid)"; bad=1 ;;
     esac
@@ -4708,7 +4730,7 @@ cmd_workloads_run() ( # internal: the supervisor, started detached by workloads-
   WL_SINCE=$(date -u +%s)
   trap 'stop=1' TERM HUP INT
   # shellcheck disable=SC2154  # rc is assigned inside the trap itself
-  trap 'rc=$?; wl_run_exit "$rc" "$ended" "$started"; exit "$rc"' EXIT
+  trap 'rc=$?; wl_run_exit "$rc" "$ended" "$started"; wl_ctl_remove; exit "$rc"' EXIT
   read_pointer
   active_sha=$PTR_CURRENT
   if [[ $mode == adopt ]]; then
@@ -4791,10 +4813,34 @@ cmd_workloads_run() ( # internal: the supervisor, started detached by workloads-
   exit "$rc"
 )
 
+# The supervisor lives as long as the array does, and the package can be upgraded under it (upgradepkg replaces polyseatctl and
+# schema.json on the flash-backed RAM root). A running bash reads its script lazily and the controller reads schema.json on
+# every setting it validates, so a supervisor that kept using the installed files could run half of one release and half of
+# the next. It therefore runs from a private copy in RAM, made (and compared byte for byte) when it is launched, and removed when
+# it ends: the old release finishes the old daemon's life, the new release is what the next start copies.
+wl_ctl_remove() { # exactly what wl_ctl_copy made; nothing recursive
+  rm -f -- "$RUN_DIR/workloads-ctl/scripts/polyseatctl" "$RUN_DIR/workloads-ctl/schema.json"
+  rmdir -- "$RUN_DIR/workloads-ctl/scripts" "$RUN_DIR/workloads-ctl" 2>/dev/null || true
+}
+
+wl_ctl_copy() { # prints the copy of the controller the supervisor executes; fails unless it is byte-identical to the installed one
+  local dir=$RUN_DIR/workloads-ctl src_dir
+  src_dir=$(dirname -- "$CTL_SELF")
+  [[ ! -L $dir && ! -L $dir/scripts ]] || { log error "workloads: refusing a symlinked $dir"; return 1; }
+  wl_ctl_remove
+  (umask 077; mkdir -p -- "$dir/scripts") || { log error "workloads: cannot create $dir"; return 1; }
+  { install -m 0700 -- "$CTL_SELF" "$dir/scripts/polyseatctl" && install -m 0600 -- "$src_dir/../schema.json" "$dir/schema.json" &&
+    cmp -s -- "$CTL_SELF" "$dir/scripts/polyseatctl" && cmp -s -- "$src_dir/../schema.json" "$dir/schema.json"; } ||
+    { log error "workloads: cannot make a RAM copy of the controller for the supervisor"; wl_ctl_remove; return 1; }
+  printf '%s\n' "$dir/scripts/polyseatctl"
+}
+
 wl_launch_detached() { # mode : the supervisor in its own session, the controller log for output, holding the lock (descriptor 8) we hold
-  local out="$LOG_DIR/$PLUGIN.log"
+  local out="$LOG_DIR/$PLUGIN.log" copy
   [[ -d $LOG_DIR && ! -L $LOG_DIR && ! -L $out ]] || { log error "workloads: the controller log is not usable"; return 1; }
-  POLYSEAT_DETACHED=1 setsid -f "$CTL_SELF" workloads-run "$1" >> "$out" 2>&1 < /dev/null 9>&-
+  copy=$(wl_ctl_copy) || return 1
+  # /run is mounted noexec on Unraid: the copy is read by bash, not executed.
+  POLYSEAT_DETACHED=1 setsid -f /bin/bash "$copy" workloads-run "$1" >> "$out" 2>&1 < /dev/null 9>&-
 }
 
 cmd_workloads_start() { # [--boot] : check everything, launch the supervisor (detached, holding the lock), return
@@ -5184,6 +5230,7 @@ cmd_uninstall() {
   rmdir -- "$RUN_DIR/client" "$WL_CLIENT_DIR" 2>/dev/null || true
   rm -f -- "$WL_STATUS" "$WL_STOPFILE" "$WL_PIDFILE"
   wl_lxc_remove
+  wl_ctl_remove
   rmdir -- "$SLOTS" "$RAM_DIR" 2>/dev/null || true
   rmdir -- "$BUNDLE_DIR" "$STATE_DIR" 2>/dev/null || true
   log info "uninstalled; settings and DATA_DIR were not touched"
@@ -5713,7 +5760,7 @@ usage: polyseatctl COMMAND [args]
              gpu-preflight [--pci ADDR] [--json]
              list | metrics | logs [controller|incusd] [N] | config-get
  settings:   config-set KEY=VALUE... | config-reset
- service:    start | stop | restart | boot
+ service:    start | stop [--emergency] | restart | boot  (owner build: stop first ends a running play session like play-stop --wait 300)
  canary:     canary-smoke --approve (fixed local image; one-shot CPU-only run)
              seat-image-stage IMAGE MANIFEST SIG --approve | desktop-smoke --approve (M1, NIC-less)
              gpu-smoke --approve (M2: + host-owned GPU by device access; VM keeps priority)
@@ -5765,7 +5812,19 @@ main() {
     *) usage ;;
   esac
   require_mutation_allowed "$cmd" "${args[@]}"
+  if [[ $cmd == stop ]]; then
+    [[ ${#args[@]} -eq 0 || ( ${#args[@]} -eq 1 && ${args[0]} == --emergency ) ]] || usage
+  fi
   if [[ $POLYSEAT_RELEASE_GATE == canary && $cmd == stop ]]; then
+    # Owner mode: this verb is what the old service Stop button and any older caller still invoke. While a play session
+    # runs it must not be the hard stop (the cgroup kill leaves no clean-stop record and costs the owner a recovery): the
+    # session is asked to end the way play-stop ends it and is waited for. Only a session that does not end in time (or an
+    # explicit --emergency, which event/stopping_svcs uses after its own bounded play-stop) falls through to the emergency
+    # path below. A signed build keeps the emergency stop as it was.
+    if [[ $POLYSEAT_APPROVAL_MODE == owner && ${#args[@]} -eq 0 ]]; then
+      cmd_play_stop --wait "$OWNER_STOP_WAIT" ||
+        log error "stop: the play session did not end within ${OWNER_STOP_WAIT}s; the emergency stop follows"
+    fi
     # Emergency stop must not queue behind the operation it is meant to stop.
     if [[ -d $RUN_DIR && ! -L $RUN_DIR ]]; then
       printf 'stop requested\n' > "$RUN_DIR/canary-emergency-stop"

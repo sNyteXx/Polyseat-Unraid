@@ -866,8 +866,10 @@ class CpuSettingsTests(unittest.TestCase):
         self.assertLess(start.index("play_pin_precheck ||"), start.index("owner_approval_for polyseatd-play"))
         pin = re.search(r"^play_seat_pin\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL).group(0)
         self.assertEqual(pin.count("taskset"), 1)
-        self.assertIn(r"lxc\.payload\.", pin)
-        self.assertNotIn("lxc.monitor", pin)
+        seat = re.search(r"^play_payload_seat\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL).group(0)
+        self.assertIn("play_payload_seat", pin)   # the one place that decides what a seat is (play's own group only)
+        self.assertIn(r"lxc\.payload\.", seat)
+        self.assertNotIn("lxc.monitor", pin + seat)
 
 
 class DispatchAndEventTests(unittest.TestCase):
