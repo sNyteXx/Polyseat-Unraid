@@ -26,6 +26,9 @@ only with recorded evidence from the relevant disposable test environment.
 
 Order of the next live steps: [mvp-roadmap.md](mvp-roadmap.md).
 
+Owner mode (an admin's click in the WebUI instead of a signed token per session, for an installed plugin) is described in
+[plugin-owner-mode.md](plugin-owner-mode.md). It is a package property, adds no gate and is not Unraid evidence.
+
 There is no installable `.plg` (only a non-installable template) until B2–H have passed. Production deployment
 or GOW migration requires a separate, explicit operator decision.
 

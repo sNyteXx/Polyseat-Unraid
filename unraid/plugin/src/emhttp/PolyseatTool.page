@@ -77,7 +77,7 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
     </div>
     <p class="psu-muted">Seats, pairing and streaming are managed in Polyseat's own interface, which opens in a new tab.
      In an owner build, Start verifies and stages the runtime, seat image and daemon from the flash drive and starts a
-     session that ends by itself after the configured length (Settings, Play); nothing starts after a reboot by itself.
+     session that ends by itself after the configured length (Settings, Play); nothing starts by itself when Unraid comes back up.
      Otherwise a session is started and stopped on the console with a signed approval and this card only shows its state.</p>
    </div>
   </div>

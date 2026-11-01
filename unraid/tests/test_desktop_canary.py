@@ -1554,7 +1554,7 @@ class SupervisorEnvironmentTests(unittest.TestCase):
                               *functions], capture_output=True, text=True, check=True)
         used = set(re.findall(r'\$\{?([A-Z][A-Z0-9_]*)', res.stdout))
         allowed_unset = {"POLYSEAT_CI_REAL_SYSTEM", "CI", "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT",  # read with ${X:-}
-                         "BASHPID", "PATH"}
+                         "BASHPID", "PATH", "POLYSEAT_DETACHED"}
         missing = sorted(used - passed - allowed_unset)
         self.assertEqual(missing, [], "globals read under bash -u but not passed to the supervisor")
 
