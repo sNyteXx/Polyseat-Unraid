@@ -52,6 +52,11 @@ writes, and treating those as foreign tags refuses a seat's own gamepad.
 
 `--tag ""` turns the name check off entirely.
 
+**Unraid adapter extension:** a physical USB device the owner has listed, by
+exact vendor and product id, for exactly this seat in the assignment file
+(`/run/polyseat/assign.json`, see "physical devices, by assignment" below) is
+attached like a virtual one. Nothing else physical ever is.
+
     ./broker.py --seat seat1
 """
 
@@ -154,7 +159,164 @@ def classify(sysdev):
     return list(dict.fromkeys(props))
 
 
-def scan(pattern=None):
+# ------------------------------------------- physical devices, by assignment
+#
+# An Unraid-adapter extension, and deliberately the one place in this file where
+# a device that is not virtual may enter a seat. Everything above and below
+# treats the host's own hardware as off limits, and that stays true for every
+# device the owner has not named: scan() still skips anything outside
+# /devices/virtual/ unless this section says otherwise.
+#
+# The owner says so in a file, one entry per physical device, written by the
+# controller and never by anything inside a seat:
+#
+#     [{"vendor": "1532", "product": "00a4", "seat": "seat1"}]
+#
+# vendor and product are the USB ids as four lowercase hex digits, and BOTH are
+# required: a vendor alone would hand a seat every device the maker ever built,
+# including ones plugged in later and ones the owner never saw. `interfaces` is
+# optional and restricts the assignment to the evdev nodes of those USB
+# interface numbers (bInterfaceNumber); without it every node of the device is
+# assigned, which for a wireless receiver is its mouse, its keyboard and its
+# consumer-control nodes alike.
+#
+# The file is read on every cycle, so changing it needs no restart, and it is
+# strict on purpose. Anything unreadable, malformed or ambiguous assigns
+# NOTHING, because the cost of a typo has to be a mouse that stays on the host
+# and not a mouse in the wrong seat. A writer should replace the file atomically
+# (write beside it, then rename), or a half-written file reads as "no
+# assignments" and detaches the device for a cycle.
+
+ASSIGN_FILE = os.environ.get("POLYSEAT_ASSIGN_FILE", "/run/polyseat/assign.json")
+
+# Seat names are validated by the daemon (internal/seat nameRE); the same rule
+# here keeps an entry from naming something the daemon would never create.
+SEAT_NAME = re.compile(r"^[a-z][a-z0-9-]{1,30}[a-z0-9]$")
+USB_ID = re.compile(r"^[0-9a-f]{4}$")
+ASSIGN_KEYS = {"vendor", "product", "seat", "interfaces"}
+
+# The last thing said about the file, so a broken one is reported once rather
+# than twice a second, and again if it breaks differently or breaks again after
+# having been fine.
+_assign_said = None
+
+
+def _assign_say(message):
+    global _assign_said
+    if message != _assign_said:
+        _assign_said = message
+        if message:
+            print(f"  ! assignments: {message}")
+
+
+def _assign_entry_problem(item):
+    """Why one entry is not acceptable, or None when it is."""
+    if not isinstance(item, dict):
+        return "an entry is not an object"
+    extra = set(item) - ASSIGN_KEYS
+    if extra:
+        return f"unknown key(s) {', '.join(sorted(extra))}"
+    for key in ("vendor", "product"):
+        value = item.get(key)
+        if not isinstance(value, str) or not USB_ID.match(value):
+            return f"{key} must be four lowercase hex digits, got {value!r}"
+    seat = item.get("seat")
+    if not isinstance(seat, str) or not SEAT_NAME.match(seat):
+        return f"seat {seat!r} is not a valid seat name"
+    if "interfaces" in item:
+        nums = item["interfaces"]
+        if (not isinstance(nums, list) or not nums
+                or not all(type(n) is int and 0 <= n <= 255 for n in nums)):
+            return "interfaces must be a non-empty list of USB interface numbers"
+    return None
+
+
+def load_assignments():
+    """The owner's assignments as {(vendor, product): (seat, interfaces)}.
+
+    `interfaces` is a frozenset of USB interface numbers, or None for all of
+    them. Anything wrong with the file, as a whole or in a single entry, yields
+    an empty table: see above for why a partial table is worse than none.
+    """
+    try:
+        with open(ASSIGN_FILE) as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        _assign_say(f"{ASSIGN_FILE} does not exist; no physical device is assigned")
+        return {}
+    except (OSError, ValueError) as exc:
+        _assign_say(f"{ASSIGN_FILE} is unreadable or not JSON ({exc}); "
+                    f"nothing is assigned")
+        return {}
+
+    if not isinstance(data, list):
+        _assign_say(f"{ASSIGN_FILE} is not a list; nothing is assigned")
+        return {}
+
+    table = {}
+    for item in data:
+        problem = _assign_entry_problem(item)
+        if problem:
+            _assign_say(f"{problem}; ignoring the whole file, nothing is assigned")
+            return {}
+        key = (item["vendor"], item["product"])
+        if key in table:
+            # The same device for two seats is a contradiction, and for one seat
+            # twice it is ambiguous about the interfaces. Neither is guessed at.
+            _assign_say(f"{key[0]}:{key[1]} is listed more than once; ignoring "
+                        f"the whole file, nothing is assigned")
+            return {}
+        nums = item.get("interfaces")
+        table[key] = (item["seat"], frozenset(nums) if nums else None)
+
+    _assign_say(None)
+    return table
+
+
+def usb_identity(real):
+    """The USB ids and interface number behind an input device, or None.
+
+    Walks up from the event node to the usb_device that carries idVendor and
+    idProduct, remembering the usb_interface passed on the way (the one with
+    bInterfaceNumber). A device with no such ancestor, which includes every
+    virtual one, has no identity and so can never match an assignment.
+    """
+    interface = None
+    path = os.path.dirname(real)
+    for _ in range(32):
+        if path in (SYS_ROOT, "/", ""):
+            return None
+        if interface is None:
+            try:
+                interface = int(read(f"{path}/bInterfaceNumber"), 16)
+            except ValueError:
+                pass
+        vendor, product = read(f"{path}/idVendor"), read(f"{path}/idProduct")
+        if vendor and product:
+            return vendor.lower(), product.lower(), interface
+        path = os.path.dirname(path)
+    return None
+
+
+def assigned_to(real, seat, table):
+    """The 'vendor:product' this physical device is assigned to `seat` by, or None.
+
+    Only ever answers for the seat asked about: a device assigned to another
+    seat is None here, not 'somebody else's', so no caller can come to hold it.
+    """
+    ident = usb_identity(real)
+    if ident is None:
+        return None
+    vendor, product, interface = ident
+    owner, interfaces = table.get((vendor, product), (None, None))
+    if owner != seat:
+        return None
+    if interfaces is not None and interface not in interfaces:
+        return None
+    return f"{vendor}:{product}"
+
+
+def scan(pattern=None, seat=None):
     """Every virtual event device, or only those whose name matches a pattern.
 
     Unfiltered by default, and that is the point. This used to carry a list of
@@ -173,15 +335,28 @@ def scan(pattern=None):
     The filter on `/devices/virtual/` stays and is the real safeguard: only
     what was made through uinput or uhid may enter a seat at all. A pattern can
     still be passed to narrow things while debugging.
+
+    **The one exception** is `seat`. When given, physical event devices that the
+    owner assigned to exactly that seat in the assignment file (see above) are
+    returned as well, marked with `assigned_seat` and `usb_id`. Without it, or
+    for any physical device not assigned to that seat, nothing changes: they
+    are skipped here and never even looked at.
     """
     rx = re.compile(pattern, re.IGNORECASE) if pattern else None
+    table = load_assignments() if seat else {}
     found = {}
     for entry in os.listdir(SYS_INPUT):
         if not entry.startswith("event"):
             continue
         sysdev = f"{SYS_INPUT}/{entry}"
-        if "/devices/virtual/" not in os.path.realpath(sysdev):
-            continue
+        real = os.path.realpath(sysdev)
+        usb_id = None
+        if "/devices/virtual/" not in real:
+            if not table or "/devices/" not in real:
+                continue
+            usb_id = assigned_to(real, seat, table)
+            if usb_id is None:
+                continue
         name = read(f"{sysdev}/device/name")
         if not name or (rx and not rx.search(name)):
             continue
@@ -197,8 +372,13 @@ def scan(pattern=None):
             "syspath": os.path.realpath(sysdev).removeprefix("/sys"),
             "sysname": device_owner.sysname_of_node(entry),
             "props": classify(os.path.realpath(f"{sysdev}/device")),
-            **hidraw_info(entry),
+            # A receiver's HID interfaces also have hidraw nodes, and those
+            # speak the vendor's configuration protocol, not just input. The
+            # assignment is for the evdev node, so the raw half stays behind.
+            **(hidraw_info(entry) if usb_id is None else {"raw": None}),
         }
+        if usb_id:
+            found[entry].update(assigned_seat=seat, usb_id=usb_id)
     return found
 
 
@@ -283,6 +463,21 @@ def attribute(candidates, seat, tag, others=()):
 
     mine = {}
     for node, dev in candidates.items():
+        if "assigned_seat" in dev:
+            # A physical device the owner assigned by USB id. Decided here and
+            # nowhere below: it was not made through uinput or uhid, so neither
+            # the creator check nor the seat tag has anything to say about it,
+            # and what they would say ("created on the host") is the very
+            # answer the owner has overruled. The other direction holds too:
+            # scan() sets the mark only on physical devices, so no virtual
+            # device can arrive here and skip the creator check. A device
+            # assigned to another seat is passed over without a word; it is
+            # that seat's broker's to attach.
+            if dev["assigned_seat"] == seat:
+                dev["attribution"] = "assigned"
+                mine[node] = dev
+            continue
+
         owner = owners.get(dev["sysname"], "unknown")
         if owner == "unknown":
             # No uinput descriptor claims it, so it came through uhid.
@@ -838,6 +1033,8 @@ def attach(backend, seat, dev):
            "uhid-correlated": "uhid descriptor correlated",
            "tag": "name tag only, unverified"}.get(
         dev.get("attribution", ""), dev.get("attribution", ""))
+    if dev.get("attribution") == "assigned":
+        how = f"assigned by USB id {dev['usb_id']}"
     print(f"  + {node:<10} {dev['name']}")
     print(f"    {how}: {' '.join(dev['props'])}")
 
@@ -889,6 +1086,77 @@ def detach(backend, seat, node, dev):
                        "--major", str(dev["major"]), "--minor", str(dev["minor"])])
     backend.detach_node(seat, node)
     backend.run(seat, ["rm", "-f", f"/run/udev/data/c{dev['major']}:{dev['minor']}"])
+
+
+def remove_orphans(backend, seat, tag):
+    """Clean up orphaned attachments from earlier runs. Sunshine instances that
+    crash or restart leave their devices behind on the host; the matching
+    attachments in the seat then point at nothing and keep showing up in sway
+    as dead input devices.
+
+    Returns how many were removed."""
+    stale = 0
+    remembered = load_state(seat)
+    # What the owner assigned to this seat and is plugged in right now. Such a
+    # device carries no seat tag by nature, so the name test below would call
+    # it an orphan on every restart and take it away for the one cycle it
+    # takes to attach it again.
+    assigned = {node for node, dev in scan(seat=seat).items()
+                if "assigned_seat" in dev}
+    for node in backend.attached_nodes(seat):
+        sysdev = f"{SYS_INPUT}/{node}"
+        name = read(f"{sysdev}/device/name")
+        if node in assigned:
+            continue
+        # The reverse case: attached as an assigned device by an earlier run,
+        # and the assignment has gone while the broker was down. The tag test
+        # cannot be relied on to notice that (with --tag "" it never fires), so
+        # the memory is asked.
+        was_assigned = "assigned_seat" in remembered.get(node, {})
+        if not name or was_assigned or (tag and f"({tag})" not in name):
+            print(f"  ~ {node:<10} orphaned, removing")
+            if node in remembered:
+                detach(backend, seat, node, remembered[node])
+            else:
+                # Without a memory only the attachment can go; sway then keeps
+                # the dead device in its list until its next restart.
+                backend.detach_node(seat, node)
+            stale += 1
+    return stale
+
+
+def cycle(backend, seat, tag, others, match, known):
+    """One pass: attach what appeared, detach what went, return what is attached."""
+    current = attribute(scan(match, seat), seat, tag, others)
+    for node, dev in current.items():
+        # Before attaching, and on every pass afterwards. The mark
+        # seal() leaves makes a udev retrigger hide the device again,
+        # but only with a rule file that reads it; with an older one a
+        # retrigger puts the permissions back to what the name rules
+        # decided, and for a device no pattern matches that is open.
+        #
+        # Not for an assigned physical device. Sealing exists to stop the
+        # host's desktop from also reading a seat's virtual device; this one is
+        # the host's own hardware, the host is headless (no compositor, no
+        # Steam), and sealing would chmod a node the owner may still want on
+        # the console after the assignment is removed, mark its DEVPATH for a
+        # udev rule that has no reason to hide it, and announce a real USB
+        # device as removed and added again. The seat gets its own node by
+        # path, which a root:root 0600 node would not change either way.
+        if dev.get("attribution") != "assigned" and seal(node):
+            print(f"  * {node:<10} taken off the host desktop ({dev['name']})")
+        if node not in known:
+            attach(backend, seat, dev)
+    gone = False
+    for node, dev in list(known.items()):
+        if node not in current:
+            detach(backend, seat, node, dev)
+            gone = True
+    if gone:
+        unmark_gone()
+    if current != known:
+        save_state(seat, current)
+    return current
 
 
 def main():
@@ -948,24 +1216,7 @@ def main():
               f"only the structural answer decides.")
     print("Ctrl-C stops it.\n")
 
-    # Clean up orphaned attachments from earlier runs. Sunshine instances that
-    # crash or restart leave their devices behind on the host; the matching
-    # attachments in the seat then point at nothing and keep showing up in sway
-    # as dead input devices.
-    stale = 0
-    remembered = load_state(args.seat)
-    for node in backend.attached_nodes(args.seat):
-        sysdev = f"{SYS_INPUT}/{node}"
-        name = read(f"{sysdev}/device/name")
-        if not name or (tag and f"({tag})" not in name):
-            print(f"  ~ {node:<10} orphaned, removing")
-            if node in remembered:
-                detach(backend, args.seat, node, remembered[node])
-            else:
-                # Without a memory only the attachment can go; sway then keeps
-                # the dead device in its list until its next restart.
-                backend.detach_node(args.seat, node)
-            stale += 1
+    stale = remove_orphans(backend, args.seat, tag)
     if stale:
         print(f"{stale} orphaned attachment(s) removed.\n")
 
@@ -974,27 +1225,8 @@ def main():
     known = {}
     try:
         while True:
-            current = attribute(scan(args.match), args.seat, tag, args.other_seat)
-            for node, dev in current.items():
-                # Before attaching, and on every pass afterwards. The mark
-                # seal() leaves makes a udev retrigger hide the device again,
-                # but only with a rule file that reads it; with an older one a
-                # retrigger puts the permissions back to what the name rules
-                # decided, and for a device no pattern matches that is open.
-                if seal(node):
-                    print(f"  * {node:<10} taken off the host desktop ({dev['name']})")
-                if node not in known:
-                    attach(backend, args.seat, dev)
-            gone = False
-            for node, dev in list(known.items()):
-                if node not in current:
-                    detach(backend, args.seat, node, dev)
-                    gone = True
-            if gone:
-                unmark_gone()
-            if current != known:
-                save_state(args.seat, current)
-            known = current
+            known = cycle(backend, args.seat, tag, args.other_seat, args.match,
+                          known)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nStopped. Attached devices stay in place.")
