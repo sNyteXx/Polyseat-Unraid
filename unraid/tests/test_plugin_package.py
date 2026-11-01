@@ -117,6 +117,12 @@ PLAY_UHID_LINES = {
 }
 
 
+# The one systemctl the controller may name: upstream's session stop, run INSIDE a seat through `incus exec` as its
+# player (manager.go haltContainer). Unraid has no systemd; the host is never asked.
+PLAY_SESSION_STOP_LINE = ('PLAY_SESSION_STOP="sudo -u player env XDG_RUNTIME_DIR=/run/user/1000 '
+                          'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user stop polyseat-sway.service"')
+
+
 def run(*args, cwd=None):
     return subprocess.run([str(a) for a in args], capture_output=True, text=True, cwd=cwd)
 
@@ -440,6 +446,14 @@ class DenylistTests(unittest.TestCase):
         for path in self.FILES:
             body = "\n".join(code_lines(path))
             self.assertNotRegex(body, r"\bpython3?\b")
+            if path.name == "polyseatctl":
+                self.assertEqual(body.count(PLAY_SESSION_STOP_LINE), 1)
+                body = body.replace(PLAY_SESSION_STOP_LINE, "")
+                # ... and it is only ever handed to `incus exec SEAT --`, never run on the host
+                uses = re.findall(r"^.*\$PLAY_SESSION_STOP\b.*$", body, re.MULTILINE)
+                self.assertEqual(len(uses), 2, uses)
+                for use in uses:
+                    self.assertTrue('== "-- $PLAY_SESSION_STOP" ]]' in use or "run_incus exec \"$seat\" -- $PLAY_SESSION_STOP" in use, use)
             self.assertNotRegex(body, r"\bsystemctl\b")
 
     def test_event_scripts_only_call_the_controller(self):

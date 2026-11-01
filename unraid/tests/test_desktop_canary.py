@@ -1199,14 +1199,19 @@ class PlayTests(unittest.TestCase):
     def test_the_controller_only_prepares_the_profile_and_stops_seats(self):
         for command in ("profile device add default eth0 nic nictype=bridged parent=br0 name=eth0",
                         "storage create default dir source=/mnt/cache/polyseat/incus/incus/storage-pools/default",
-                        "stop seat1 --timeout 60", "stop my-seat-2 --force --timeout 5", "admin shutdown --timeout 60",
+                        "stop seat1 --timeout 90", "stop my-seat-2 --force --timeout 5", "admin shutdown --timeout 60",
+                        "exec seat2 -- sudo -u player env XDG_RUNTIME_DIR=/run/user/1000 "
+                        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user stop polyseat-sway.service",
                         "query /1.0/profiles/default", "query /1.0/instances?recursion=1", "config set seat1 boot.autostart=false"):
             with self.subTest(command=command):
                 self.assertTrue(self.allowed(command))
         for command in ("config set seat1 boot.autostart=true", "config set seat1 raw.lxc=x", "config set seat1 security.privileged=true"):
             with self.subTest(command=command):
                 self.assertFalse(self.allowed(command))
-        for command in ("delete seat1", "start seat1", "stop Seat1 --timeout 60", "stop seat1;id --timeout 60",
+        for command in ("delete seat1", "start seat1", "stop Seat1 --timeout 90", "stop seat1;id --timeout 90",
+                        "stop seat1 --timeout 60", "exec seat1 -- sudo -u player systemctl --user stop polyseat-sway.service",
+                        "exec seat1 -- sudo -u root env XDG_RUNTIME_DIR=/run/user/1000 "
+                        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user stop polyseat-sway.service",
                         "profile device add default eth0 nic nictype=macvlan parent=br0 name=eth0",
                         "exec seat1 -- /bin/sh", "config set seat1 raw.lxc=x", "network create polyseatbr0"):
             with self.subTest(command=command):

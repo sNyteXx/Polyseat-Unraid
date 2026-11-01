@@ -1152,7 +1152,8 @@ canary_command_allowed() {
       "profile device add default eth0 nic nictype=bridged parent=$STEAM_NIC_PARENT name=eth0" | \
       'query /1.0/storage-pools/default' | 'query /1.0/profiles/default' | 'admin shutdown --timeout 60') return 0 ;;
     esac
-    [[ $# -eq 4 && $1 == stop && $2 =~ $PLAY_NAME_RE && "$3 $4" == '--timeout 60' ]] && return 0
+    [[ $# -eq 4 && $1 == stop && $2 =~ $PLAY_NAME_RE && "$3 $4" == '--timeout 90' ]] && return 0
+    [[ $# -eq 13 && $1 == exec && $2 =~ $PLAY_NAME_RE && "${*:3}" == "-- $PLAY_SESSION_STOP" ]] && return 0
     [[ $# -eq 4 && $1 == config && $2 == set && $3 =~ $PLAY_NAME_RE && $4 == boot.autostart=false ]] && return 0
     [[ $# -eq 5 && $1 == stop && $2 =~ $PLAY_NAME_RE && "$3 $4 $5" == '--force --timeout 5' ]] && return 0
     return 1
@@ -2961,6 +2962,8 @@ PLAY_PIDS_MAX="max"
 PLAY_TTY="/dev/tty1"
 PLAY_UDEV_RULE="/etc/udev/rules.d/72-polyseat-hide.rules"
 PLAY_HELPER_DIR="/usr/local/lib/polyseat"
+# Upstream's session stop, run as the seat's player before the container stops (manager.go haltContainer, playerPrefix).
+PLAY_SESSION_STOP="sudo -u player env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user stop polyseat-sway.service"
 PLAY_NAME_RE='^[a-z0-9][a-z0-9-]{0,62}$'
 
 polyseatd_config() { # ip out : the bundle's own template with this host's values; host actions must stay off
@@ -3098,7 +3101,13 @@ play_stop_seats() { # every running seat, through Incus (polyseatd leaves them r
   for seat in $(jq -r '(if type == "object" and .type == "sync" then .metadata else . end)[] | select(.status != "Stopped") | .name' <<< "$is"); do
     [[ $seat =~ $PLAY_NAME_RE ]] || continue
     log info "play: stopping seat $seat"
-    INCUS_CMD_TIMEOUT=75 run_incus stop "$seat" --timeout 60 ||
+    # Upstream's own halt order (internal/seat/manager.go haltContainer): the session first, then 90 s, a forced stop
+    # last. Tower run 29: a 60 s stop with Sway, Steam and gamescope still up timed out, and the forced stop then
+    # could not freeze the container, so no clean stop was recorded.
+    # shellcheck disable=SC2086  # PLAY_SESSION_STOP is a fixed word list
+    INCUS_CMD_TIMEOUT=40 run_incus exec "$seat" -- $PLAY_SESSION_STOP >/dev/null 2>&1 ||
+      log warn "play: the session in $seat did not stop cleanly"
+    INCUS_CMD_TIMEOUT=110 run_incus stop "$seat" --timeout 90 ||
       INCUS_CMD_TIMEOUT=20 run_incus stop "$seat" --force --timeout 5 || log error "play: seat $seat did not stop"
   done
   # A seat whose build stopped early has no boot.autostart yet (upstream sets it later): pin it off explicitly.
