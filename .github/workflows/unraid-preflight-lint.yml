@@ -27,12 +27,12 @@ jobs:
       - name: POSIX shell syntax
         run: |
           for script in unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh; do
-            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh|unraid/scripts/local-hook-rehearsal.sh|unraid/scripts/local-hook-rehearsal-inner.sh|unraid/scripts/local-steam-rehearsal.sh|unraid/scripts/local-steam-rehearsal-inner.sh|unraid/scripts/lib/ci-runner-noise.sh) continue ;; esac
+            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh|unraid/scripts/ci-e2e-persist-canary.sh|unraid/scripts/local-hook-rehearsal.sh|unraid/scripts/local-hook-rehearsal-inner.sh|unraid/scripts/local-steam-rehearsal.sh|unraid/scripts/local-steam-rehearsal-inner.sh|unraid/scripts/lib/ci-runner-noise.sh) continue ;; esac
             sh -n "$script"
           done
           bash -n unraid/scripts/ci-canary-cgroup.sh
           bash -n unraid/scripts/ci-e2e-canary.sh
-          bash -n unraid/scripts/ci-e2e-desktop-canary.sh unraid/scripts/lib/ci-runner-noise.sh
+          bash -n unraid/scripts/ci-e2e-desktop-canary.sh unraid/scripts/ci-e2e-persist-canary.sh unraid/scripts/lib/ci-runner-noise.sh
           bash -n unraid/scripts/local-hook-rehearsal.sh unraid/scripts/local-hook-rehearsal-inner.sh
           bash -n unraid/scripts/local-steam-rehearsal.sh unraid/scripts/local-steam-rehearsal-inner.sh
           sh -n unraid/seat-image/build-seat-image.sh
@@ -41,11 +41,11 @@ jobs:
       - name: ShellCheck
         run: |
           for script in unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh; do
-            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh|unraid/scripts/local-hook-rehearsal.sh|unraid/scripts/local-hook-rehearsal-inner.sh|unraid/scripts/local-steam-rehearsal.sh|unraid/scripts/local-steam-rehearsal-inner.sh|unraid/scripts/lib/ci-runner-noise.sh) continue ;; esac
+            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh|unraid/scripts/ci-e2e-persist-canary.sh|unraid/scripts/local-hook-rehearsal.sh|unraid/scripts/local-hook-rehearsal-inner.sh|unraid/scripts/local-steam-rehearsal.sh|unraid/scripts/local-steam-rehearsal-inner.sh|unraid/scripts/lib/ci-runner-noise.sh) continue ;; esac
             shellcheck -x -s sh "$script"
           done
           shellcheck -s bash unraid/scripts/ci-canary-cgroup.sh
-          shellcheck -x -s bash unraid/scripts/ci-e2e-canary.sh unraid/scripts/ci-e2e-desktop-canary.sh
+          shellcheck -x -s bash unraid/scripts/ci-e2e-canary.sh unraid/scripts/ci-e2e-desktop-canary.sh unraid/scripts/ci-e2e-persist-canary.sh
           shellcheck -s bash unraid/scripts/lib/ci-runner-noise.sh
           shellcheck -s bash unraid/scripts/local-hook-rehearsal.sh unraid/scripts/local-hook-rehearsal-inner.sh
           shellcheck -s bash unraid/scripts/local-steam-rehearsal.sh unraid/scripts/local-steam-rehearsal-inner.sh

@@ -733,6 +733,193 @@ class SteamSessionTests(unittest.TestCase):
         self.assertIn("deadline=$(( $(jq -er .expires_at \"$CANARY_APPROVAL\") - STEAM_SESSION_TEARDOWN_SECONDS ))", body)
 
 
+class PersistentStateTests(unittest.TestCase):
+    """Step 2 of the upstream integration plan (owner, 2026-11-01): the Incus state persists on the cache dataset.
+    A persisted database is started again only after a recorded clean stop; the persisted seat is never deleted."""
+    SEAT = "polyseat-persist-cpu"
+    INCUS = "/mnt/cache/polyseat/incus/incus"
+    INIT = ("init polyseat-desktop polyseat-persist-cpu --storage default --config boot.autostart=false "
+            "--config security.privileged=false --config security.nesting=false --config limits.cpu=2 "
+            "--config limits.memory=2GiB --config limits.processes=1024")
+
+    def allowed(self, operation, command):
+        body = r"""
+          POLYSEAT_RELEASE_GATE=canary
+          init_paths
+          INCUS_DIR=/mnt/cache/polyseat/incus/incus
+          CANARY_OPERATION=$1
+          eval "set -- $2"
+          canary_command_allowed "$@"
+        """
+        return source_ctl(body, str(operation), command).returncode == 0
+
+    def test_operation_6_allows_exactly_the_persistent_seat(self):
+        for command in (f"storage create default dir source={self.INCUS}/storage-pools/default",
+                        "profile device add default root disk path=/ pool=default",
+                        "image import /var/lib/polyseat-unraid-seat-image/image --alias polyseat-desktop",
+                        "image delete polyseat-desktop", self.INIT, f"start {self.SEAT}",
+                        f"query /1.0/instances/{self.SEAT}/state",
+                        f"exec {self.SEAT} -- /usr/local/bin/polyseat-selftest desktop",
+                        f"stop {self.SEAT} --timeout 30", f"stop {self.SEAT} --force --timeout 5",
+                        "admin shutdown --timeout 60", "query /1.0/instances?recursion=1"):
+            with self.subTest(command=command):
+                self.assertTrue(self.allowed(6, command))
+        for command in (f"delete {self.SEAT}", f"delete {self.SEAT} --force", "admin shutdown",
+                        self.INIT.replace("boot.autostart=false", "boot.autostart=true"),
+                        self.INIT.replace("limits.cpu=2", "limits.cpu=8"), "start polyseat-steam-gpu",
+                        f"exec {self.SEAT} -- /bin/sh -c id", "exec polyseat-steam-gpu -- /usr/local/bin/polyseat-selftest steam",
+                        f"config set {self.SEAT} boot.autostart=true", "storage delete default"):
+            with self.subTest(command=command):
+                self.assertFalse(self.allowed(6, command))
+        for operation in (2, 3, 4, 5):
+            self.assertFalse(self.allowed(operation, f"start {self.SEAT}"))
+            self.assertFalse(self.allowed(operation, "admin shutdown --timeout 60"))
+
+    def test_token_needs_the_image_binding(self):
+        app = DesktopApprovalTests("test_stage_and_smoke_are_bound_to_bundle_and_image")
+        app.setUp()
+        self.addCleanup(app.tmp.cleanup)
+        app.token["actions"] = ["persist-smoke"]
+        app.sign()
+        app.stage_copy(app.image.read_bytes())
+        self.assertEqual(app.check("persist-smoke"), 0)
+        self.assertEqual(app.check("steam-smoke"), 2)
+
+    def workspace(self):
+        d = Path(tempfile.mkdtemp(prefix="polyseat-persist-"))
+        self.addCleanup(shutil.rmtree, d)
+        (d / "manifest.json").write_text('{"incus_version": "7.5.1"}\n')
+        return d
+
+    def prepare(self, d, version="7.5.1"):
+        # The controller runs as root; the tests do not, so the owner column of stat reads as root here.
+        script = r"""
+          POLYSEAT_RELEASE_GATE=canary
+          me=$(id -u)
+          stat() { local out; out=$(command stat "$@") || return; printf '%s\n' "${out//$me /0 }"; }
+          bundle_manifest() { printf '%s\n' "$1/manifest.json"; }
+          DATA_REAL="$1/data" INCUS_DIR="$1/data/incus" CANARY_SESSION="$1/session.json"
+          jq -n --arg v "$2" '{incus_version: $v}' > "$1/manifest.json"
+          persist_state_prepare "$1" && echo "FRESH=$PERSIST_FRESH"
+        """
+        return source_ctl(script, str(d), version)
+
+    def clean_stop(self, d, instances, mode=0o600):
+        f = d / "data" / "clean-stop.json"
+        f.write_text(json.dumps({"schema": 1, "archive_sha256": "a" * 64, "stopped_at": 1, "instances": instances}))
+        f.chmod(mode)
+        return f
+
+    def test_first_run_creates_the_workspace_and_later_runs_need_a_clean_stop(self):
+        d = self.workspace()
+        res = self.prepare(d)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("FRESH=1", res.stdout)
+        self.assertEqual(oct((d / "data").stat().st_mode & 0o777), "0o711")
+        self.assertEqual(oct((d / "data/incus").stat().st_mode & 0o777), "0o711")
+        self.assertEqual(json.loads((d / "data/persist.json").read_text())["kind"], "persistent")
+        # Second run without a recorded clean stop: refused, nothing changes.
+        res = self.prepare(d)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("no clean stop", res.stderr)
+        # With a clean stop: reopened, and the record is consumed before the daemon starts.
+        self.clean_stop(d, [{"name": self.SEAT, "status": "Stopped", "autostart": "false"}])
+        res = self.prepare(d)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("FRESH=0", res.stdout)
+        self.assertFalse((d / "data/clean-stop.json").exists())
+        self.assertTrue((d / "data/clean-stop.used.json").exists())
+        self.assertNotEqual(self.prepare(d).returncode, 0)  # consumed: a crash now means inspection
+
+    def test_a_record_that_does_not_prove_a_clean_stop_is_refused(self):
+        d = self.workspace()
+        self.assertEqual(self.prepare(d).returncode, 0)
+        stopped = {"name": self.SEAT, "status": "Stopped", "autostart": "false"}
+        for instances, mode in (([dict(stopped, status="Running")], 0o600), ([dict(stopped, autostart="")], 0o600),
+                                ([dict(stopped, autostart="true")], 0o600), ([dict(stopped, name="other")], 0o600),
+                                ([stopped, stopped], 0o600), ([stopped], 0o644)):
+            with self.subTest(instances=instances, mode=oct(mode)):
+                self.clean_stop(d, instances, mode)
+                self.assertNotEqual(self.prepare(d).returncode, 0)
+                self.assertTrue((d / "data/clean-stop.json").exists())  # left for inspection
+        self.clean_stop(d, [stopped])
+        self.assertNotEqual(self.prepare(d, version="7.6.0").returncode, 0)  # no silent up- or downgrade
+        self.assertEqual(self.prepare(d).returncode, 0)
+
+    def test_clean_stop_needs_stopped_seats_and_a_daemon_that_exits_by_itself(self):
+        d = self.workspace()
+        (d / "data").mkdir()
+        script = r"""
+          POLYSEAT_RELEASE_GATE=canary
+          D=$1 MODE=$2 DATA_REAL="$1/data" PTR_CURRENT=abc
+          run_incus() { case "$*" in 'query /1.0/instances?recursion=1') cat "$D/instances.json" ;;
+                                     'admin shutdown --timeout 60') echo shutdown >> "$D/calls"; [[ $MODE == exits ]] && kill "$DAEMON" ;; esac; }
+          sleep 300 & DAEMON=$!
+          if [[ $MODE == hangs ]]; then sleep() { :; }; fi  # the 30 s wait for an exit, without waiting
+          svc_pid() { kill -0 "$DAEMON" 2>/dev/null && echo "$DAEMON"; }
+          persist_clean_stop; rc=$?; kill "$DAEMON" 2>/dev/null; exit $rc
+        """
+        stopped = {"name": self.SEAT, "status": "Stopped", "config": {"boot.autostart": "false"}}
+        (d / "instances.json").write_text(json.dumps([dict(stopped, status="Running")]))
+        self.assertNotEqual(source_ctl(script, str(d), "exits").returncode, 0)
+        self.assertFalse((d / "calls").exists())  # a running seat: no shutdown, no record
+        (d / "instances.json").write_text(json.dumps([stopped]))
+        res = source_ctl(script, str(d), "exits")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        record = json.loads((d / "data/clean-stop.json").read_text())
+        self.assertEqual(record["instances"], [{"name": self.SEAT, "status": "Stopped", "autostart": "false"}])
+        self.assertEqual(oct((d / "data/clean-stop.json").stat().st_mode & 0o777), "0o600")
+        (d / "data/clean-stop.json").unlink()
+        res = source_ctl(script, str(d), "hangs")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertFalse((d / "data/clean-stop.json").exists())  # killed or hung: never recorded as clean
+
+    def test_failure_path_stops_but_never_deletes_the_persisted_seat(self):
+        d = self.workspace()
+        res = source_ctl(r"""
+          POLYSEAT_RELEASE_GATE=canary D=$1
+          svc_pid() { echo 1; }; canary_watchdog_check() { :; }; canary_keep_diagnostics() { :; }
+          run_incus() { echo "CALL $*" >> "$D/calls"; }
+          canary_failure_cleanup polyseat-persist-cpu
+        """, str(d))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        calls = (d / "calls").read_text()
+        self.assertIn("CALL stop polyseat-persist-cpu --force --timeout 5", calls)
+        self.assertNotIn("delete", calls)
+
+    def test_budget_is_free_space_on_the_dataset_not_a_walk_of_the_rootfs(self):
+        d = self.workspace()
+        script = r"""
+          POLYSEAT_RELEASE_GATE=canary CANARY_OPERATION=6 DATA_REAL="$1" LOG_DIR="$1/logs" PERSIST_MIN_FREE_KB=$2
+          du() { echo "du must not run" >&2; return 1; }
+          canary_budget_check
+        """
+        self.assertEqual(source_ctl(script, str(d), "1").returncode, 0)
+        self.assertNotEqual(source_ctl(script, str(d), str(2 ** 50)).returncode, 0)
+
+    def test_the_mount_root_must_be_root_owned(self):
+        d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-persist"))
+        self.addCleanup(shutil.rmtree, d)
+        (d / "mnt/cache/polyseat").mkdir(parents=True)
+        res = source_ctl(r"""
+          POLYSEAT_RELEASE_GATE=canary ROOT="$1" PERSIST_MIN_FREE_KB=1
+          sandbox() { return 0; }; ci_real_system() { return 1; }
+          persist_validate_data_dir
+        """, str(d))
+        self.assertNotEqual(res.returncode, 0)  # owned by the test user, not root
+        self.assertIn("must be root:root", res.stderr)
+
+    def test_the_command_is_wired_and_documented(self):
+        text = CTL.read_text()
+        self.assertIn("persist-smoke) cmd_persist_smoke", text)
+        self.assertIn("6) canary_approval_for persist-smoke ;;", text)
+        self.assertIn('if [[ $CANARY_OPERATION -eq 6 ]]; then persist_state_prepare "$active_sha"', text)
+        body = re.search(r"^cmd_persist_smoke\(\) \([^\n]*\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
+        self.assertIn('canary_failure_cleanup "$PERSIST_INSTANCE"; svc_stop full', body)
+        self.assertLess(body.index("persist_clean_stop || exit"), body.index("  svc_stop full || exit"))
+        self.assertNotIn("run_incus delete", body)
+
+
 class NftStubTests(unittest.TestCase):
     """Incus 7.5.1 only knows nftables; Tower has no nft. The canary daemon gets a read-only stub so that a bridged
     NIC's stop can finish and remove its veth (local Steam rehearsal 2026-10-31), and no rule can ever be written."""

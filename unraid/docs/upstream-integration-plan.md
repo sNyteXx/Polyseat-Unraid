@@ -81,6 +81,25 @@ Consequences:
 | 10 | **Second seat**: the controller's single-instance constants (MAC, storage dir, CPU set) become per seat; reflink library shared; two brokers; observer required | Tower, both seats at once | GPU sharing between two seats and the VMs |
 | 11 | **Plugin/WebUI**: the `.plg` installs the binary, helpers, rule and config. The Unraid page shows gates and guards and links to polyseatd's UI | CI package tests, Tower install/uninstall with rollback | `.plg` activation |
 
+## Step 2 design: persistent Incus state (owner, 2026-11-01: `cache/polyseat/incus`, the existing 150 GB quota)
+
+The RAM canaries never start an existing database, because Incus can start persisted instances before any API audit.
+With persistent state, that rule becomes: **a persisted database starts again only after the controller recorded a
+clean stop of the previous run.**
+
+| | |
+|---|---|
+| Operation | `persist-smoke` (operation 6), its own token action bound to the seat image. Seat `polyseat-persist-cpu`: the M1 desktop seat (CPU, no NIC, no GPU), with `boot.autostart=false` |
+| Location | `/mnt/cache/polyseat/incus` (root 0711) with `incus/` (`INCUS_DIR`, 0711), `persist.json` (Incus version) and the clean-stop record |
+| Before every start | the dataset `cache/polyseat` is mounted at exactly `/mnt/cache/polyseat` with a quota and at least 8 GiB free. Its mount root is `root:root` and not group- or other-writable: the pool root above it is Unraid's (0777), but nothing can rename or replace a mounted dataset root |
+| First run | creates the workspace, pool, image and seat; the image is deleted after `init`, as before |
+| Later runs | need `clean-stop.json` (root 0600, every instance `Stopped` with `boot.autostart=false`) and the same Incus version (no silent up- or downgrade). The record is consumed **before** the daemon starts, so a crash from there on means inspection, not a restart. After start, the persisted seat must be found stopped; nothing starts by itself |
+| Clean stop | every seat stopped and non-autostarting, then `incus admin shutdown`. The daemon must exit **by itself**; only then is the record written. A killed or hung daemon never counts as clean |
+| Failure path | stop the seat, never delete it; no record, so the next run refuses |
+| Budget | free space on the dataset (its quota caps the size) instead of walking the rootfs every second |
+| Proof | unit tests; CI job `persist-canary` with a real ZFS pool `cache` and dataset `cache/polyseat`: run A fresh, run B reused (nothing autostarted), run C refused without a record; then Tower |
+| Tower setup | `/mnt/cache/polyseat` back to `root:root 0755`. "New Permissions" had set it to `nobody:users 0777`, and it now excludes `polyseat` |
+
 Unchanged throughout:
 - no main merge, no release, no unreviewed `.plg`;
 - every Tower step needs its own gate;

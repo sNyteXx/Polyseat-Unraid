@@ -94,6 +94,15 @@ STEAM_SESSION="/usr/local/bin/polyseat-session"
 STEAM_SESSION_MIN_SECONDS=600
 STEAM_SESSION_TEARDOWN_SECONDS=240
 STEAM_SELFTEST_TIMEOUT=1080  # Steam waits up to 900 s for its update and window; the token allows at most 1800 s
+# Step 2 of unraid/docs/upstream-integration-plan.md (owner, 2026-11-01): the Incus state persists in the same
+# dataset as the Steam directory. A persisted database is started again only after the controller recorded a clean
+# stop of the previous run (every instance stopped and non-autostarting, the daemon shut down by itself).
+PERSIST_DATASET="cache/polyseat"
+PERSIST_MOUNT="/mnt/cache/polyseat"
+PERSIST_DATA_DIR="$PERSIST_MOUNT/incus"
+PERSIST_INSTANCE="polyseat-persist-cpu"
+PERSIST_MIN_FREE_KB=$((8 * 1024 * 1024))
+PERSIST_FRESH=0
 CANARY_GPU_PCI=""
 CANARY_INSTANCE="polyseat-canary-cpu"
 CANARY_SIGN_IDENTITY="polyseat-unraid-canary-approver"
@@ -294,7 +303,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
      ((keys | sort) == ["actions", "archive_sha256", "expires_at", "host_sha256", "issued_at", "schema",
         "seat_image_sha256"] and (.seat_image_sha256 | type == "string" and test("^[0-9a-f]{64}$")))) and
     ((.actions | any(.[]; . == "seat-image-stage" or . == "desktop-smoke" or . == "gpu-smoke" or . == "steam-smoke" or
-        . == "steam-session")) ==
+        . == "steam-session" or . == "persist-smoke")) ==
       has("seat_image_sha256")) and
     .schema == 1 and .host_sha256 == $host and
     (.archive_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
@@ -306,6 +315,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
       (unique | length) == length and all(.[];
        . == "stage" or . == "activate" or . == "start" or . == "canary-smoke" or
        . == "seat-image-stage" or . == "desktop-smoke" or . == "gpu-smoke" or . == "steam-smoke" or . == "steam-session" or
+       . == "persist-smoke" or
        . == "config-set" or . == "config-reset")) and
     (.actions | index($action) != null)' "$CANARY_APPROVAL" >/dev/null 2>&1 ||
     die $EX_BLOCKED "canary approval expired, wrong host, invalid scope or bad schema"
@@ -318,7 +328,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
     start | canary-smoke)
       read_pointer
       target=$PTR_CURRENT ;;
-    seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session)
+    seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session | persist-smoke)
       # Both the runtime bundle AND the exact seat image bytes are bound by the owner's token.
       local image_sha
       read_pointer
@@ -988,6 +998,7 @@ canary_secure_path() { # existing absolute directory (ancestors included)
 
 canary_validate_data_dir() { # candidate, may be absent for the first start
   local requested=$1 parent
+  if [[ $CANARY_OPERATION -eq 6 ]]; then persist_validate_data_dir; return; fi
   [[ -z $requested || $requested == "$CANARY_DATA_DIR" ]] || {
     log error "canary: only the fixed ephemeral workspace is allowed"; return 1;
   }
@@ -1110,9 +1121,24 @@ canary_command_allowed() {
     'query /1.0/instances?recursion=1' | 'query /1.0/storage-pools?recursion=1' | \
     'query /1.0/networks?recursion=1' | 'query /1.0/instances/polyseat-canary-cpu/state') return 0 ;;
     "query /1.0/instances/$DESKTOP_INSTANCE/state" | "query /1.0/instances/$GPU_INSTANCE/state" | \
-    "query /1.0/instances/$STEAM_INSTANCE/state")
+    "query /1.0/instances/$STEAM_INSTANCE/state" | "query /1.0/instances/$PERSIST_INSTANCE/state")
       [[ $CANARY_OPERATION -ne 1 ]] && return 0 ;;
   esac
+  if [[ $CANARY_OPERATION -eq 6 ]]; then
+    # The first run creates pool, image and seat; later runs only start the persisted seat. Never delete it.
+    case "$*" in
+      "storage create default dir source=$INCUS_DIR/storage-pools/default" | \
+      'profile device add default root disk path=/ pool=default' | \
+      "image import $SEAT_IMAGE --alias $DESKTOP_ALIAS" | "image delete $DESKTOP_ALIAS" | \
+      "init $DESKTOP_ALIAS $PERSIST_INSTANCE --storage default --config boot.autostart=false --config security.privileged=false --config security.nesting=false --config limits.cpu=2 --config limits.memory=2GiB --config limits.processes=1024" | \
+      "start $PERSIST_INSTANCE" | \
+      "exec $PERSIST_INSTANCE -- $DESKTOP_SELFTEST desktop" | \
+      "exec $PERSIST_INSTANCE -- /usr/bin/head -c $DESKTOP_EVIDENCE_MAX_BYTES /var/lib/polyseat-selftest/screenshot.png" | \
+      "stop $PERSIST_INSTANCE --timeout 30" | "stop $PERSIST_INSTANCE --force --timeout 5" | \
+      'admin shutdown --timeout 60') return 0 ;;
+    esac
+    return 1
+  fi
   if [[ $CANARY_OPERATION -eq 4 || $CANARY_OPERATION -eq 5 ]]; then
     case "$*" in
       "storage create default dir source=$INCUS_DIR/storage-pools/default" | \
@@ -1253,7 +1279,7 @@ canary_cgroup_prepare() {
 }
 
 # Exactly two fixed budgets exist: the CPU canary's (defaults above) and the desktop canary's.
-canary_budget_select() { # cpu|desktop|gpu|steam
+canary_budget_select() { # cpu|desktop|gpu|steam|persist
   case "$1" in
     cpu) ;;
     desktop)
@@ -1263,6 +1289,9 @@ canary_budget_select() { # cpu|desktop|gpu|steam
     gpu)
       canary_budget_select desktop
       CANARY_INSTANCE=$GPU_INSTANCE CANARY_GPU_PCI=$GPU_CANARY_PCI ;;
+    persist)
+      canary_budget_select desktop
+      CANARY_INSTANCE=$PERSIST_INSTANCE ;;
     steam)
       CANARY_CPU_MAX=$STEAM_CPU_MAX CANARY_MEMORY_MAX=$STEAM_MEMORY_MAX
       CANARY_PIDS_MAX=$STEAM_PIDS_MAX CANARY_DATA_MAX_KB=$STEAM_DATA_MAX_KB
@@ -1359,10 +1388,16 @@ canary_process_starttime() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
 
 canary_budget_check() {
   local kb bytes=0 file size
-  # du exits non-zero when an entry vanishes mid-walk (Incus removes files during
-  # stop/delete) but still prints the total; only a missing/non-numeric total fails.
-  kb=$( { du -skx -- "$DATA_REAL" 2>/dev/null || true; } | awk 'NR == 1 {print $1}')
-  [[ $kb =~ ^[0-9]+$ && $kb -le $CANARY_DATA_MAX_KB ]] || return 1
+  if [[ ${CANARY_OPERATION:-0} -eq 6 ]]; then
+    # Persistent state on the dataset: its quota caps the size; walking a seat's rootfs every second would not.
+    kb=$(df -Pk -- "$DATA_REAL" 2>/dev/null | awk 'NR == 2 {print $4}')
+    [[ $kb =~ ^[0-9]+$ && $kb -ge $PERSIST_MIN_FREE_KB ]] || return 1
+  else
+    # du exits non-zero when an entry vanishes mid-walk (Incus removes files during
+    # stop/delete) but still prints the total; only a missing/non-numeric total fails.
+    kb=$( { du -skx -- "$DATA_REAL" 2>/dev/null || true; } | awk 'NR == 1 {print $1}')
+    [[ $kb =~ ^[0-9]+$ && $kb -le $CANARY_DATA_MAX_KB ]] || return 1
+  fi
   for file in "$LOG_DIR/incusd.log" "$LOG_DIR/incusd.out" "$LOG_DIR/$PLUGIN.log" "$LOG_DIR/$PLUGIN.log.1"; do
     [[ ! -e $file && ! -L $file ]] && continue
     [[ -f $file && ! -L $file && $(stat -c %u -- "$file") == 0 ]] || return 1
@@ -1437,7 +1472,7 @@ canary_watchdog_start() {
     CANARY_DATA_MAX_KB="$CANARY_DATA_MAX_KB" CANARY_LOG_MAX_BYTES="$CANARY_LOG_MAX_BYTES" \
     CANARY_HOST_MIN_AVAILABLE_KB="$CANARY_HOST_MIN_AVAILABLE_KB" CANARY_HOST_MAX_LOAD="$CANARY_HOST_MAX_LOAD" \
     CANARY_OPERATION="$CANARY_OPERATION" DESKTOP_MEMORY_MAX="$DESKTOP_MEMORY_MAX" CANARY_GPU_PCI="$CANARY_GPU_PCI" \
-    STEAM_MEMORY_MAX="$STEAM_MEMORY_MAX" \
+    STEAM_MEMORY_MAX="$STEAM_MEMORY_MAX" PERSIST_MIN_FREE_KB="$PERSIST_MIN_FREE_KB" \
     GPU_TRANSITION_LOCKS="$GPU_TRANSITION_LOCKS" GPU_TRANSITION_MARKERS="$GPU_TRANSITION_MARKERS" \
     setsid bash -u -o pipefail -c "$(declare -f canary_watchdog_loop canary_process_starttime write_json_atomic sync_path \
       canary_monotonic_seconds canary_cgroup_check canary_budget_check canary_host_pressure_check log sandbox \
@@ -1567,7 +1602,8 @@ canary_profile_guard() {
   jq -en --argjson server "$server" --argjson projects "$projects" --argjson profiles "$profiles" \
     --argjson instances "$instances" --argjson pools "$pools" --argjson networks "$networks" \
     --arg source "$INCUS_DIR/storage-pools/default" --arg inst "$CANARY_INSTANCE" \
-    --argjson desktop "$([[ $CANARY_INSTANCE == "$DESKTOP_INSTANCE" || $CANARY_INSTANCE == "$GPU_INSTANCE" ]] && echo true || echo false)" \
+    --argjson desktop "$([[ $CANARY_INSTANCE == "$DESKTOP_INSTANCE" || $CANARY_INSTANCE == "$GPU_INSTANCE" ||
+      $CANARY_INSTANCE == "$PERSIST_INSTANCE" ]] && echo true || echo false)" \
     --argjson gpu "$([[ $CANARY_INSTANCE == "$GPU_INSTANCE" || $CANARY_INSTANCE == "$STEAM_INSTANCE" ]] && echo true || echo false)" \
     --argjson steam "$([[ $CANARY_INSTANCE == "$STEAM_INSTANCE" ]] && echo true || echo false)" \
     --arg gpupci "$GPU_CANARY_PCI" \
@@ -1738,6 +1774,7 @@ svc_start() {
       3) canary_approval_for gpu-smoke ;;
       4) canary_approval_for steam-smoke ;;
       5) canary_approval_for steam-session ;;
+      6) canary_approval_for persist-smoke ;;
       *) canary_approval_for start ;;
     esac
     canary_host_pressure_check || { log error "canary: host memory/load outside approved safety window"; return 1; }
@@ -1772,7 +1809,8 @@ svc_start() {
     for tool in unshare setpriv mount umount setsid renice; do command -v "$tool" >/dev/null || return 1; done
     # Read-only topology checks first, so a mismatch leaves no one-shot state behind.
     canary_cgroup_precheck || return 1
-    canary_fresh_state_prepare "$active_sha" || return 1
+    if [[ $CANARY_OPERATION -eq 6 ]]; then persist_state_prepare "$active_sha" || return 1
+    else canary_fresh_state_prepare "$active_sha" || return 1; fi
     canary_deny_tools_prepare || return 1
     [[ -d $LOG_DIR && ! -L $LOG_DIR && $(stat -c %u -- "$LOG_DIR") == 0 ]] || return 1
     canary_budget_check || { log error "canary: initial workspace/log budget exceeded"; return 1; }
@@ -2051,6 +2089,12 @@ seat_image_remove_exact() {
 canary_failure_cleanup() { # instance
   svc_pid >/dev/null 2>&1 && canary_watchdog_check || return 0
   canary_keep_diagnostics "$1"
+  if [[ $1 == "$PERSIST_INSTANCE" ]]; then
+    # Never delete persisted state. No clean-stop record is written, so the next run refuses until inspected.
+    log warn "canary: failure path, stopping the persisted seat $1; no clean stop is recorded"
+    INCUS_CMD_TIMEOUT=20 run_incus stop "$1" --force --timeout 5 >/dev/null 2>&1 || true
+    return 0
+  fi
   log warn "canary: failure path, removing test instance $1 before the hard stop"
   INCUS_CMD_TIMEOUT=20 run_incus stop "$1" --force --timeout 5 >/dev/null 2>&1 || true
   INCUS_CMD_TIMEOUT=90 run_incus delete "$1" >/dev/null 2>&1 || true
@@ -2063,6 +2107,7 @@ canary_keep_diagnostics() { # instance
   local dir=$SEAT_EVIDENCE f
   [[ $1 == "$GPU_INSTANCE" ]] && dir="$RUN_DIR/gpu-evidence"
   [[ $1 == "$STEAM_INSTANCE" ]] && dir="$RUN_DIR/steam-evidence"
+  [[ $1 == "$PERSIST_INSTANCE" ]] && dir="$RUN_DIR/persist-evidence"
   [[ -d $dir && ! -L $dir ]] || return 0
   for f in "$INCUS_DIR/logs/$1/lxc.log" "$INCUS_DIR/logs/$1/forklxc.log"; do
     [[ -f $f && ! -L $f ]] || continue
@@ -2402,6 +2447,135 @@ cmd_steam_session_stop() {
   [[ -f $RUN_DIR/session-status.json ]] || die $EX_BLOCKED "no Steam session is running"
   (umask 077; : > "$RUN_DIR/session-stop") && printf 'stop requested; the session tears down within a few seconds\n'
 }
+
+# ------------------------------------------------------- persistent state ----
+persist_mount_check() { # read-only: the dataset itself is mounted at its root, has a quota and room to grow
+  local mount=$ROOT$PERSIST_MOUNT src quota avail
+  if ! sandbox || ci_real_system; then
+    src=$(findmnt -n -o SOURCE,FSTYPE,TARGET --mountpoint "$mount" 2>/dev/null | tr -s ' ')
+    [[ $src == "$PERSIST_DATASET zfs $mount" ]] ||
+      { log error "persist: $PERSIST_MOUNT is not the mounted $PERSIST_DATASET dataset ('$src')"; return 1; }
+    quota=$(zfs get -Hp -o value quota "$PERSIST_DATASET" 2>/dev/null) || quota=''
+    [[ $quota =~ ^[1-9][0-9]*$ ]] || { log error "persist: $PERSIST_DATASET has no quota"; return 1; }
+  fi
+  avail=$(df -Pk -- "$mount" 2>/dev/null | awk 'NR == 2 {print $4}')
+  [[ $avail =~ ^[0-9]+$ ]] || avail=0
+  (( avail >= PERSIST_MIN_FREE_KB )) || { log error "persist: only $avail KiB free on $PERSIST_DATASET"; return 1; }
+}
+
+persist_validate_data_dir() { # the fixed persistent workspace on the cache dataset; absent before the first run
+  local mount=$ROOT$PERSIST_MOUNT mode
+  DATA_REAL="$ROOT$PERSIST_DATA_DIR" INCUS_DIR="$ROOT$PERSIST_DATA_DIR/incus"
+  persist_mount_check || return 1
+  # The pool root above is Unraid's (0777), but a mounted dataset root cannot be renamed or replaced, and below
+  # it only root may change a name.
+  { [[ -d $mount && ! -L $mount && $(stat -c '%u %g' -- "$mount") == '0 0' ]] && mode=$(stat -c %a -- "$mount") &&
+    (( (8#$mode & 8#022) == 0 )); } ||
+    { log error "persist: $PERSIST_MOUNT must be root:root and writable by root only"; return 1; }
+  [[ ! -e $DATA_REAL && ! -L $DATA_REAL ]] && return 0
+  [[ -d $DATA_REAL && ! -L $DATA_REAL && $(stat -c '%u %g %a' -- "$DATA_REAL") == '0 0 711' ]] ||
+    { log error "persist: $PERSIST_DATA_DIR must be a root:root 0711 directory"; return 1; }
+}
+
+persist_state_prepare() { # active sha : creates the workspace once; afterwards only a recorded clean stop reopens it
+  local active_sha=$1 version stop
+  version=$(jq -er '.incus_version | select(type == "string" and length > 0)' "$(bundle_manifest "$active_sha")") ||
+    { log error "persist: the bundle names no Incus version"; return 1; }
+  [[ ! -e $CANARY_SESSION && ! -L $CANARY_SESSION ]] ||
+    { log error "canary: a prior session record exists; inspection required, no restart"; return 1; }
+  if [[ ! -e $DATA_REAL && ! -L $DATA_REAL ]]; then
+    (umask 022; mkdir -- "$DATA_REAL" && chmod 0711 -- "$DATA_REAL" && mkdir -- "$INCUS_DIR" && chmod 0711 -- "$INCUS_DIR") ||
+      return 1
+    write_json_atomic "$DATA_REAL/persist.json" "$(jq -n --arg sha "$active_sha" --arg v "$version" \
+      '{schema: 1, kind: "persistent", incus_version: $v, created_archive_sha256: $sha}')" || return 1
+    PERSIST_FRESH=1
+    return 0
+  fi
+  jq -e --arg v "$version" '.schema == 1 and .kind == "persistent" and .incus_version == $v' \
+    "$DATA_REAL/persist.json" >/dev/null 2>&1 ||
+    { log error "persist: workspace record missing or written by another Incus version; no up- or downgrade here"; return 1; }
+  stop=$DATA_REAL/clean-stop.json
+  { [[ -f $stop && ! -L $stop && $(stat -c '%u %a' -- "$stop") == '0 600' ]] &&
+    jq -e --arg inst "$PERSIST_INSTANCE" '.schema == 1 and (.instances | type == "array" and length <= 1 and
+      all(.[]; .name == $inst and .status == "Stopped" and .autostart == "false"))' "$stop" >/dev/null 2>&1; } ||
+    { log error "persist: the previous run recorded no clean stop; inspection required, nothing was started"; return 1; }
+  [[ -d $INCUS_DIR && ! -L $INCUS_DIR ]] || { log error "persist: the Incus directory is missing"; return 1; }
+  # Consumed before the daemon starts: a crash from here on leaves no record, so the next run refuses again.
+  mv -f -- "$stop" "$DATA_REAL/clean-stop.used.json" || return 1
+  PERSIST_FRESH=0
+}
+
+persist_instances() { # prints the persisted seats as [{name, status, autostart}] when every one is stopped and non-autostarting
+  local is
+  is=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || return 1
+  jq -ec --arg inst "$PERSIST_INSTANCE" '[(if type == "object" and .type == "sync" then .metadata else . end)[] |
+      {name, status, autostart: (.config["boot.autostart"] // "")}] |
+    select(length <= 1 and all(.[]; .name == $inst and .status == "Stopped" and .autostart == "false"))' <<< "$is"
+}
+
+persist_clean_stop() { # every seat stopped and non-autostarting, Incus shut down by itself, then the record
+  local seats pid i
+  seats=$(persist_instances) || { log error "persist: a seat still runs or would autostart; no clean stop"; return 1; }
+  pid=$(svc_pid) || { log error "persist: the daemon is gone before its shutdown"; return 1; }
+  INCUS_CMD_TIMEOUT=90 run_incus admin shutdown --timeout 60 >/dev/null 2>&1 || log warn "persist: 'admin shutdown' reported an error"
+  for ((i = 0; i < 60; i++)); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+  ! kill -0 "$pid" 2>/dev/null || { log error "persist: the daemon did not exit by itself; no clean stop"; return 1; }
+  write_json_atomic "$DATA_REAL/clean-stop.json" "$(jq -n --arg sha "$PTR_CURRENT" --argjson now "$(date -u +%s)" \
+    --argjson seats "$seats" '{schema: 1, archive_sha256: $sha, stopped_at: $now, instances: $seats}')"
+}
+
+cmd_persist_smoke() ( # step 2: a seat whose Incus database and rootfs persist on the cache dataset across runs
+  local dir="$RUN_DIR/persist-evidence" seats phase
+  [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 0 ]] || die $EX_BLOCKED "persist-smoke needs a canary build and takes no arguments"
+  require_approval persist-smoke
+  require_no_journal
+  read_pointer
+  [[ -n $PTR_CURRENT && $(current_sha_from_link) == "$PTR_CURRENT" ]] || die $EX_BLOCKED "no active canary bundle"
+  { verify_bundle_files "$PTR_CURRENT" && verify_slot "$PTR_CURRENT"; } || die $EX_VERIFY "runtime bundle failed verification"
+  seat_image_verify_staged || die $EX_VERIFY "staged seat image failed verification"
+  ! svc_pid >/dev/null 2>&1 || die $EX_BLOCKED "a daemon is already running; persist-smoke starts its own"
+  [[ ! -e $dir && ! -L $dir ]] || die $EX_BLOCKED "persist evidence from an earlier run exists; collect it first"
+  (umask 077; mkdir -- "$dir") || die $EX_BLOCKED "cannot create evidence directory"
+  canary_budget_select persist
+  CANARY_OPERATION=6
+  trap 'rc=$?; if [[ $CANARY_RUN_OWNED -eq 1 ]]; then canary_failure_cleanup "$PERSIST_INSTANCE"; svc_stop full || rc=4; fi; exit "$rc"' EXIT
+  svc_start || exit $EX_HEALTH
+  canary_profile_guard || exit $EX_HEALTH
+  seats=$(persist_instances) || { log error "persist: a persisted seat runs or would autostart"; exit $EX_HEALTH; }
+  printf '%s\n' "$seats" > "$dir/instances-at-start.json"
+  if [[ $PERSIST_FRESH -eq 1 ]]; then
+    phase=fresh
+    [[ $(jq length <<< "$seats") == 0 ]] || exit $EX_HEALTH
+    log info "persist phase: create (fresh workspace on $PERSIST_DATASET)"
+    run_incus storage create default dir "source=$INCUS_DIR/storage-pools/default" || exit $EX_HEALTH
+    run_incus profile device add default root disk path=/ pool=default || exit $EX_HEALTH
+    canary_profile_guard || exit $EX_HEALTH
+    seat_image_verify_staged || exit $EX_VERIFY
+    INCUS_CMD_TIMEOUT=300 run_incus image import "$SEAT_IMAGE" --alias "$DESKTOP_ALIAS" || exit $EX_HEALTH
+    INCUS_CMD_TIMEOUT=300 run_incus init "$DESKTOP_ALIAS" "$PERSIST_INSTANCE" --storage default \
+      --config boot.autostart=false --config security.privileged=false --config security.nesting=false \
+      --config limits.cpu=2 --config limits.memory=2GiB --config limits.processes=1024 || exit $EX_HEALTH
+    INCUS_CMD_TIMEOUT=60 run_incus image delete "$DESKTOP_ALIAS" || exit $EX_HEALTH
+  else
+    phase=reused
+    [[ $(jq length <<< "$seats") == 1 ]] || { log error "persist: the persisted seat is missing"; exit $EX_HEALTH; }
+    log info "persist phase: reuse (persisted database and seat; nothing started by itself)"
+  fi
+  canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+  log info "persist phase: start"
+  INCUS_CMD_TIMEOUT=300 run_incus start "$PERSIST_INSTANCE" || exit $EX_HEALTH
+  canary_instance_containment && canary_profile_guard && canary_budget_check || exit $EX_HEALTH
+  desktop_selftest "$phase" "$PERSIST_INSTANCE" desktop "$dir" || exit $EX_HEALTH
+  log info "persist phase: stop"
+  INCUS_CMD_TIMEOUT=45 run_incus stop "$PERSIST_INSTANCE" --timeout 30 ||
+    INCUS_CMD_TIMEOUT=20 run_incus stop "$PERSIST_INSTANCE" --force --timeout 5 || exit $EX_HEALTH
+  log info "persist phase: clean stop"
+  persist_clean_stop || exit $EX_HEALTH
+  svc_stop full || exit $EX_HEALTH
+  trap - EXIT
+  printf 'PASS: persistent Incus state on %s (%s): the seat ran and stopped, Incus shut down by itself, clean stop recorded.\n' \
+    "$PERSIST_DATASET" "$phase"
+)
 
 # --------------------------------------------------------- transaction ----
 # Only a service that was running is restarted after a switch/restore. Starting an
@@ -3129,6 +3303,7 @@ usage: polyseatctl COMMAND [args]
              steam-smoke --approve (+ compat32 and one LAN NIC on the host bridge for the test only: Steam to sign-in)
              steam-session --approve (M3: one bounded LAN session) | steam-session-pin NNNN | steam-session-status
              steam-session-stop
+             persist-smoke --approve (step 2: the Incus state persists on the cache dataset across runs)
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
 EOF
@@ -3159,7 +3334,7 @@ main() {
     logs) cmd_logs "${args[@]}"; return ;;
     config-get) cmd_config_get; return ;;
     stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke | seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session | steam-session-pin | \
-    steam-session-status | steam-session-stop) ;;
+    steam-session-status | steam-session-stop | persist-smoke) ;;
     *) usage ;;
   esac
   require_mutation_allowed "$cmd" "${args[@]}"
@@ -3197,6 +3372,7 @@ main() {
     gpu-smoke) cmd_gpu_smoke "${args[@]}" ;;
     steam-smoke) cmd_steam_smoke "${args[@]}" ;;
     steam-session) cmd_steam_session "${args[@]}" ;;
+    persist-smoke) cmd_persist_smoke "${args[@]}" ;;
     start)
       require_no_journal
       read_pointer
