@@ -1,6 +1,8 @@
 #!/bin/bash
 # Array and pools are mounted: rebuild the RAM runtime from flash and start the
 # service if the user enabled it. Runs in the background so array start is not delayed.
+# An owner-mode controller (owner decision 2026-11-01) starts nothing here: "boot" only verifies the bundle on the
+# flash and logs. A play session is started from the WebUI.
 CTL=/usr/local/emhttp/plugins/polyseat-unraid/scripts/polyseatctl
 [[ -x $CTL ]] || exit 0
 ( setsid "$CTL" boot > /dev/null 2>&1 < /dev/null & )

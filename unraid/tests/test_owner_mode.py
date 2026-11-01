@@ -6,17 +6,20 @@ Sandbox directories under /tmp only; no Incus daemon, cgroup or host path is tou
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
+import subprocess
+import tarfile
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
 from unraid.tests.ctl_support import CTL, Sandbox
-from unraid.tests.test_desktop_canary import source_ctl
+from unraid.tests.test_desktop_canary import make_manifest, source_ctl
 
 ARCHIVE = b"archive"
 BUNDLE = hashlib.sha256(ARCHIVE).hexdigest()  # a stage binds the bytes, so the pointer names their hash
@@ -279,6 +282,421 @@ class SettingsTests(unittest.TestCase):
         for key in ("PLAY_SESSION_HOURS", "PLAY_CPU_PERFORMANCE", "PLAY_SEAT_CPUS"):
             self.assertTrue(schema[key]["locked_while_running"], key)
             self.assertEqual(schema[key]["tab"], "play")
+
+
+UNSQUASHFS = b"#!/bin/sh\necho 'unsquashfs version 4.6'\nexit 1\n"
+
+
+class PlayStartTests(unittest.TestCase):
+    """play-start against a real sandbox: signed files on the flash, real verification, activation and staging.
+    Only the things that need a host (GPU preflight, the LAN, the detached launch) are replaced."""
+
+    def setUp(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        public = self.sb.key.with_suffix(".pub").read_text().split()
+        (self.sb.flash / "allowed_signers").write_text(
+            f'polyseat-unraid-release namespaces="polyseat-unraid-bundle,polyseat-unraid-seat-image,polyseat-unraid-daemon" '
+            f'{public[0]} {public[1]}\n')
+        self.bundle = self.put_bundle("1.0.0")
+        self.seat_image = self.sb.flash / "seat/polyseat-desktop.tar.xz"
+        self.seat_image.parent.mkdir()
+        self.seat_image.write_bytes(os.urandom(4096))
+        manifest = self.sb.flash / "seat/seat.manifest.json"
+        self.assertEqual(make_manifest(self.seat_image, manifest).returncode, 0)
+        self.sign(manifest, "polyseat-unraid-seat-image")
+        self.put_daemon()
+        self.launches = self.sb.root / "launches.log"
+
+    def sign(self, path, namespace):
+        Path(str(path) + ".sig").unlink(missing_ok=True)
+        subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", str(self.sb.key), "-n", namespace, str(path)],
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL)
+
+    def put_bundle(self, version, **kwargs):
+        b = self.sb.make_bundle(version, extra={"tools/unsquashfs": UNSQUASHFS}, executable=("tools/unsquashfs",), **kwargs)
+        self.sb.bundles.mkdir(parents=True, exist_ok=True)
+        shutil.copy(b["archive"], self.sb.bundles / f"{b['sha']}.tar.gz")
+        shutil.copy(b["manifest"], self.sb.bundles / f"{b['sha']}.manifest.json")
+        shutil.copy(b["sig"], self.sb.bundles / f"{b['sha']}.manifest.json.sig")
+        return b
+
+    def put_daemon(self):
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w", format=tarfile.GNU_FORMAT) as tar:
+            binary = b"daemon-binary"
+            for name, data, mode in (("MANIFEST", (sha(binary) + "  bin/polyseatd\n").encode(), 0o644),
+                                     ("bin/polyseatd", binary, 0o755)):
+                info = tarfile.TarInfo(name)
+                info.size, info.mode = len(data), mode
+                tar.addfile(info, io.BytesIO(data))
+        self.daemon = self.sb.flash / "daemon/polyseat-daemon.tar"
+        self.daemon.parent.mkdir(exist_ok=True)
+        self.daemon.write_bytes(raw.getvalue())
+        self.sign(self.daemon, "polyseat-unraid-daemon")
+        self.daemon_sha = sha(raw.getvalue())
+
+    def start(self, pre="", **env):
+        script = r"""
+          POLYSEAT_ROOT="$1"; POLYSEAT_RELEASE_GATE=canary POLYSEAT_APPROVAL_MODE=owner
+          init_paths; SCHEMA="$2"; LAUNCHES="$3"
+          mkdir -p "$RUN_DIR" "$LOG_DIR"; LOG_ENABLED=1
+          me=$(id -u); stat() { local out; out=$(command stat "$@") || return; printf '%s\n' "${out//$me /0 }"; }
+          canary_host_sha256() { printf '%s\n' 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'; }
+          polyseatd_precheck() { return "${PRECHECK_RC:-0}"; }
+          gpu_preflight_run() { GPU_RES=("FAIL	gpu busy"); return "${GPU_RC:-0}"; }
+          play_launch_detached() { echo "launched approval=$([[ -f $OWNER_APPROVAL ]] && echo yes)" >> "$LAUNCHES"; }
+          ensure_state_dirs
+          """ + pre + r"""
+          POLYSEATD_SHA256=""
+          cmd_play_start
+        """
+        environment = {"PATH": os.environ["PATH"], **env}
+        proc = subprocess.run(["bash", "-c", "source <(sed '$d' \"$1\")\nshift\n" + script, "play", str(CTL), str(self.sb.root),
+                               str(CTL.parent.parent / "schema.json"), str(self.launches)],
+                              env=environment, capture_output=True, text=True)
+        return proc
+
+    def approval(self):
+        return json.loads((self.sb.run_dir / "owner-approval.json").read_text())
+
+    def log(self):
+        return self.sb.log_file.read_text() if self.sb.log_file.exists() else ""
+
+    def launched(self):
+        return self.launches.read_text().splitlines() if self.launches.exists() else []
+
+    def assert_refused(self, proc, needle):
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(needle, proc.stderr)
+        self.assertEqual(self.launched(), [])
+        self.assertFalse((self.sb.run_dir / "owner-approval.json").exists(), "a refused start leaves no approval")
+
+    def test_first_start_verifies_activates_stages_approves_and_launches(self):
+        self.sb.write_cfg(PLAY_SESSION_HOURS="12")
+        proc = self.start()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("play session starting (up to 12 h)", proc.stdout)
+        self.assertEqual(self.launched(), ["launched approval=yes"])
+        a = self.approval()
+        self.assertEqual((a["archive_sha256"], a["seat_image_sha256"], a["daemon_sha256"]),
+                         (self.bundle["sha"], sha(self.seat_image.read_bytes()), self.daemon_sha))
+        self.assertEqual((a["schema"], a["mode"], a["actions"]), (1, "owner", ACTIONS))
+        self.assertEqual(a["expires_at"] - a["issued_at"], 12 * 3600)
+        self.assertEqual(oct((self.sb.run_dir / "owner-approval.json").stat().st_mode & 0o777), "0o600")
+        self.assertEqual(self.sb.pointer()["current"], self.bundle["sha"])
+        self.assertEqual(self.sb.current_link(), f"slots/{self.bundle['sha']}")
+        self.assertEqual((self.sb.root / "var/lib/polyseat-unraid-seat-image/image").read_bytes(), self.seat_image.read_bytes())
+        self.assertEqual((self.sb.root / "var/lib/polyseat-unraid-daemon/.bundle-sha256").read_text().strip(), self.daemon_sha)
+        self.assertEqual(self.sb.status().get("state"), "ACTIVE")  # nothing was started by the controller itself
+
+    def test_the_default_is_six_hours_and_the_setting_is_capped_at_the_schema_maximum(self):
+        self.assertEqual(self.start().returncode, 0)
+        self.assertEqual(self.approval()["expires_at"] - self.approval()["issued_at"], 6 * 3600)
+        (self.sb.run_dir / "owner-approval.json").unlink()
+        self.sb.write_cfg(PLAY_SESSION_HOURS="24")
+        self.assertEqual(self.start().returncode, 0)
+        self.assertEqual(self.approval()["expires_at"] - self.approval()["issued_at"], 86400)
+        (self.sb.run_dir / "owner-approval.json").unlink()
+        for bad in ("0", "25", "6h", ""):
+            self.sb.write_cfg(PLAY_SESSION_HOURS=bad)
+            proc = self.start()
+            if bad == "":
+                self.assertEqual(proc.returncode, 0)  # an empty value falls back to the default
+                (self.sb.run_dir / "owner-approval.json").unlink()
+                continue
+            self.assert_refused_keep_launches(proc, "PLAY_SESSION_HOURS")
+
+    def assert_refused_keep_launches(self, proc, needle):
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(needle, proc.stderr)
+        self.assertFalse((self.sb.run_dir / "owner-approval.json").exists())
+
+    def test_a_second_start_reuses_what_is_current_and_staged_and_clears_the_records_of_the_last_session(self):
+        self.assertEqual(self.start().returncode, 0)
+        (self.sb.run_dir / "owner-approval.json").unlink()  # owner_session_end
+        for name in ("canary-session.json", "canary-guardian.pid", "canary-emergency-stop", "polyseatd-stop", "polyseatd.pid"):
+            (self.sb.run_dir / name).write_text("x")
+        evidence = self.sb.run_dir / "play-evidence"
+        evidence.mkdir()
+        (evidence / "status-start.json").write_text("{}")
+        before = self.sb.log_file.read_text().count("activated bundle")
+        proc = self.start()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.sb.log_file.read_text().count("activated bundle"), before)  # not activated again
+        self.assertIn("seat image already staged", self.log())
+        self.assertIn("daemon bundle already staged", self.log())
+        for name in ("canary-session.json", "canary-guardian.pid", "canary-emergency-stop", "polyseatd-stop", "polyseatd.pid"):
+            self.assertFalse((self.sb.run_dir / name).exists(), name)
+        self.assertTrue((self.sb.run_dir / "play-evidence.last/status-start.json").exists())
+        self.assertFalse(evidence.exists())
+        self.assertEqual(len(self.launched()), 2)
+
+    def test_after_a_reboot_the_ram_runtime_is_rebuilt_from_the_flash_and_nothing_else_is_assumed(self):
+        self.assertEqual(self.start().returncode, 0)
+        (self.sb.run_dir / "owner-approval.json").unlink()
+        shutil.rmtree(self.sb.ram)  # RAM is gone; the pointer on the flash stays
+        shutil.rmtree(self.sb.root / "var/lib/polyseat-unraid-seat-image")
+        shutil.rmtree(self.sb.root / "var/lib/polyseat-unraid-daemon")
+        proc = self.start()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.sb.current_link(), f"slots/{self.bundle['sha']}")
+        self.assertTrue((self.sb.root / "var/lib/polyseat-unraid-seat-image/image").exists())
+        self.assertTrue((self.sb.root / "var/lib/polyseat-unraid-daemon/bin/polyseatd").exists())
+
+    def test_the_newest_complete_bundle_wins_and_an_ambiguous_one_refuses(self):
+        self.assertEqual(self.start().returncode, 0)
+        (self.sb.run_dir / "owner-approval.json").unlink()
+        newer = self.put_bundle("1.10.0")  # 1.10.0 is newer than 1.9.0 and 1.0.0 (version sort, not text)
+        self.put_bundle("1.9.0")
+        proc = self.start()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.sb.pointer()["current"], newer["sha"])
+        self.assertEqual(self.sb.pointer()["previous"], self.bundle["sha"])
+        (self.sb.run_dir / "owner-approval.json").unlink()
+        twin = self.sb.make_bundle("1.10.0", extra={"tools/unsquashfs": UNSQUASHFS + b"#twin\n"}, executable=("tools/unsquashfs",))
+        for suffix, src in ((".tar.gz", "archive"), (".manifest.json", "manifest"), (".manifest.json.sig", "sig")):
+            shutil.copy(twin[src], self.sb.bundles / f"{twin['sha']}{suffix}")
+        self.assertIn("claim the newest version", self.start().stderr)
+
+    def test_an_incomplete_triple_is_not_a_candidate(self):
+        (self.sb.bundles / f"{self.bundle['sha']}.manifest.json.sig").unlink()
+        self.assert_refused(self.start(), "no complete runtime bundle")
+
+    def test_nothing_is_started_over_a_running_daemon_or_unrestored_host_changes(self):
+        self.assert_refused(self.start(pre="svc_pid() { echo 4242; }"), "Incus is already running")
+        for name, needle in (("play-host.json", "host changes not restored"), ("polyseatd-status.json", "earlier session left"),
+                             ("play-console.json", "earlier session left")):
+            (self.sb.run_dir).mkdir(parents=True, exist_ok=True)
+            (self.sb.run_dir / name).write_text("{}")
+            self.assert_refused(self.start(), needle)
+            (self.sb.run_dir / name).unlink()
+        (self.sb.run_dir / "canary-session.json.reason").write_text("expired\n")
+        self.assert_refused(self.start(), "watchdog ended the previous session (expired)")
+        (self.sb.run_dir / "canary-session.json.reason").unlink()
+        self.assert_refused(self.start(pre='CANARY_CGROUP=$ROOT'), "cgroup still exists")
+        self.assert_refused(self.start(pre='play_evidence_rotate() { return 1; }'), "evidence directory")
+        self.assertEqual(self.start().returncode, 0)
+
+    def test_a_running_polyseatd_is_refused_but_a_stale_pid_file_is_not(self):
+        self.sb.run_dir.mkdir(parents=True, exist_ok=True)
+        (self.sb.run_dir / "polyseatd.pid").write_text("4242\n")
+        self.assert_refused(self.start(pre="polyseatd_alive() { return 0; }"), "polyseatd is already running (pid 4242)")
+        self.assertEqual(self.start(pre="polyseatd_alive() { return 1; }").returncode, 0)
+
+    def test_every_flash_file_is_required_and_the_signatures_are_the_release_keys(self):
+        for path in (self.seat_image, self.seat_image.parent / "seat.manifest.json", self.seat_image.parent / "seat.manifest.json.sig",
+                     self.daemon):
+            data = path.read_bytes()
+            path.unlink()
+            self.assert_refused(self.start(), "missing on the flash drive")
+            path.write_bytes(data)
+        archive = self.sb.bundles / f"{self.bundle['sha']}.tar.gz"
+        data = archive.read_bytes()
+        archive.write_bytes(data + b"x")
+        self.assert_refused(self.start(), "failed verification")
+        archive.write_bytes(data)
+        # the bundle's signature is no seat image signature, and a changed image is no signed image
+        manifest = self.seat_image.parent / "seat.manifest.json"
+        self.sign(manifest, "polyseat-unraid-bundle")
+        proc = self.start()
+        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertIn("staging the seat image failed", proc.stderr)
+        self.assertFalse((self.sb.run_dir / "owner-approval.json").exists())
+        self.sign(manifest, "polyseat-unraid-seat-image")
+        Path(str(self.daemon) + ".sig").write_bytes(b"not a signature")
+        proc = self.start()
+        self.assertEqual(proc.returncode, 5, proc.stderr)
+        self.assertIn("staging the daemon bundle failed", proc.stderr)
+        self.assertEqual(self.launched(), [])
+
+    def test_the_prechecks_of_the_session_refuse_before_anything_is_launched(self):
+        self.assert_refused(self.start(PRECHECK_RC="1"), "polyseatd prechecks failed")
+        self.assert_refused(self.start(GPU_RC="1"), "GPU is not available")
+        self.assertIn("gpu-preflight: gpu busy", self.log())
+        self.assert_refused(self.start(pre="play_limits() { return 1; }"), "PLAY_CPU_PERCENT or PLAY_MEMORY_MB")
+        self.assertEqual(self.start().returncode, 0)
+
+    def test_an_unfinished_transaction_blocks_the_start(self):
+        (self.sb.state).mkdir(parents=True, exist_ok=True)
+        (self.sb.state / "journal.json").write_text(json.dumps(
+            {"phase": "activating", "target": self.bundle["sha"], "previous": None, "was_running": False}))
+        (self.sb.state / "journal.json").chmod(0o600)
+        self.assert_refused(self.start(), "unfinished transaction")
+
+    def test_a_failure_after_the_approval_took_it_back(self):
+        self.assert_refused(self.start(pre="cmd_seat_image_stage() { return 1; }"), "staging the seat image failed")
+        self.assertTrue((self.sb.state / "pointer.json").exists())  # the bundle was activated; that is not undone
+
+    def test_the_session_is_launched_detached_with_the_lock_handed_over(self):
+        fake = self.sb.root / "fake-ctl"
+        fake.write_text('#!/bin/bash\n{ echo "args=$*"; echo "detached=$POLYSEAT_DETACHED inherited=$POLYSEAT_LOCK_INHERITED"; '
+                        '[[ /proc/self/fd/9 -ef "$LOCK" ]] && echo fd9-is-the-lock; sleep 1.5; echo finished; } >> "$OUT" 2>&1\n')
+        fake.chmod(0o755)
+        out = self.sb.root / "fake.out"
+        script = r"""
+          POLYSEAT_ROOT="$1"; POLYSEAT_RELEASE_GATE=canary POLYSEAT_APPROVAL_MODE=owner
+          init_paths; mkdir -p "$RUN_DIR" "$LOG_DIR"; CTL_SELF=$2; export OUT=$3 LOCK=$LOCKFILE
+          exec 9> "$LOCKFILE"; flock 9
+          play_launch_detached; echo "parent-done rc=$?"
+        """
+        proc = subprocess.run(["bash", "-c", "source <(sed '$d' \"$1\")\nshift\n" + script, "launch", str(CTL), str(self.sb.root),
+                               str(fake), str(out)], capture_output=True, text=True, env={"PATH": os.environ["PATH"]}, timeout=20)
+        self.assertIn("parent-done rc=0", proc.stdout, proc.stderr)
+        lock = self.sb.run_dir / "lock"
+        busy = subprocess.run(["flock", "-n", str(lock), "true"]).returncode  # the parent has exited; the child holds it
+        self.assertNotEqual(busy, 0)
+        time.sleep(2)
+        self.assertEqual(subprocess.run(["flock", "-n", str(lock), "true"]).returncode, 0)
+        text = out.read_text()
+        self.assertIn("args=polyseatd-play --approve", text)
+        self.assertIn("detached=1 inherited=1", text)
+        self.assertIn("fd9-is-the-lock", text)
+        self.assertIn("finished", text)
+
+    def test_the_lock_is_taken_over_only_from_the_lock_file_itself(self):
+        script = r"""
+          POLYSEAT_ROOT="$1"; POLYSEAT_RELEASE_GATE=canary POLYSEAT_APPROVAL_MODE=owner
+          init_paths; mkdir -p "$RUN_DIR" "$LOG_DIR"
+          if [[ $2 == lock ]]; then exec 9> "$LOCKFILE"; else exec 9> "$RUN_DIR/other"; fi
+          flock -n "$LOCKFILE" true && echo free-before
+          acquire_lock && echo acquired
+        """
+        env = {"PATH": os.environ["PATH"], "POLYSEAT_LOCK_INHERITED": "1"}
+        ok = subprocess.run(["bash", "-c", "source <(sed '$d' \"$1\")\nshift\n" + script, "x", str(CTL), str(self.sb.root), "lock"],
+                            capture_output=True, text=True, env=env, timeout=20)
+        self.assertIn("acquired", ok.stdout, ok.stderr)
+        # descriptor 9 pointing elsewhere is not our lock: the controller reopens the lock file as usual
+        holder = subprocess.Popen(["flock", str(self.sb.run_dir / "lock"), "sleep", "6"])
+        self.addCleanup(lambda: (holder.kill(), holder.wait()))
+        time.sleep(0.5)
+        blocked = subprocess.run(["timeout", "2", "bash", "-c", "source <(sed '$d' \"$1\")\nshift\n" + script, "x", str(CTL),
+                                  str(self.sb.root), "other"], capture_output=True, text=True, env=env)
+        self.assertEqual(blocked.returncode, 124, blocked.stdout)
+        self.assertNotIn("acquired", blocked.stdout)
+
+
+class PlayStopTests(unittest.TestCase):
+    def setUp(self):
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.sb.run_dir.mkdir(parents=True)
+        self.sb.log_file.parent.mkdir(parents=True)
+
+    def stop(self, *args, timeout=30):
+        script = r"""
+          POLYSEAT_ROOT="$1"; shift; POLYSEAT_RELEASE_GATE=canary POLYSEAT_APPROVAL_MODE=owner
+          init_paths; cmd_play_stop "$@"; echo "rc=$?"
+        """
+        return subprocess.run(["bash", "-c", "source <(sed '$d' \"$1\")\nshift\n" + script, "x", str(CTL), str(self.sb.root), *args],
+                              capture_output=True, text=True, env={"PATH": os.environ["PATH"]}, timeout=timeout)
+
+    def test_it_is_cmd_polyseatd_stop_without_a_wait(self):
+        res = self.stop()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("no polyseatd session is running", res.stderr)
+        (self.sb.run_dir / "polyseatd-status.json").write_text("{}")
+        self.assertEqual(self.stop().returncode, 0)
+        self.assertTrue((self.sb.run_dir / "polyseatd-stop").exists())
+
+    def test_the_wait_form_takes_exactly_two_arguments_in_range(self):
+        for args in (("--wait",), ("--wait", "0"), ("--wait", "601"), ("--wait", "x"), ("--wait", "5", "6"), ("5",), ("--now",)):
+            with self.subTest(args=args):
+                res = self.stop(*args)
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn("usage: play-stop", res.stderr)
+
+    def test_nothing_running_returns_at_once(self):
+        start = time.time()
+        res = self.stop("--wait", "30")
+        self.assertIn("rc=0", res.stdout)
+        self.assertLess(time.time() - start, 5)
+        self.assertIn("no session or controller operation is running", self.sb.log_file.read_text())
+
+    def test_a_running_session_is_asked_to_stop_and_waited_for(self):
+        lock = self.sb.run_dir / "lock"
+        # a stand-in session: holds the lock until it sees the stop request, then needs a moment to restore the host
+        session = subprocess.Popen(["flock", str(lock), "bash", "-c",
+                                    f'until [[ -e {self.sb.run_dir}/polyseatd-stop ]]; do sleep 0.2; done; sleep 1.5'])
+        self.addCleanup(lambda: (session.kill(), session.wait()))
+        time.sleep(0.5)
+        start = time.time()
+        res = self.stop("--wait", "30")
+        self.assertIn("rc=0", res.stdout, res.stderr)
+        self.assertGreaterEqual(time.time() - start, 1.5)
+        self.assertEqual(session.wait(timeout=5), 0)
+        text = self.sb.log_file.read_text()
+        self.assertIn("asking it to stop and waiting up to 30s", text)
+        self.assertIn("play-stop: ended after", text)
+
+    def test_the_wait_is_bounded(self):
+        holder = subprocess.Popen(["flock", str(self.sb.run_dir / "lock"), "sleep", "30"])
+        self.addCleanup(lambda: (holder.kill(), holder.wait()))
+        time.sleep(0.5)
+        start = time.time()
+        res = self.stop("--wait", "3")
+        self.assertIn("rc=1", res.stdout)
+        self.assertGreaterEqual(time.time() - start, 3)
+        self.assertLess(time.time() - start, 12)
+        self.assertIn("the emergency stop follows", self.sb.log_file.read_text())
+
+
+class DispatchAndEventTests(unittest.TestCase):
+    def test_the_operator_verbs_are_dispatched_before_the_lock_and_play_start_after_a_probe(self):
+        main = CTL.read_text().split("\nmain() {", 1)[1]
+        early = main[:main.index("  acquire_lock\n")]
+        self.assertIn("polyseatd-status | play-status) cmd_polyseatd_status; return ;;", early)
+        self.assertIn('play-stop) cmd_play_stop "${args[@]}"; return ;;', early)
+        self.assertIn("play-start) play_lock_free ||", early)  # refused at once, never queued behind a session
+        self.assertIn('play-start) cmd_play_start "${args[@]}" ;;', main[main.index("  acquire_lock\n"):])
+        self.assertIn('polyseatd-play) cmd_polyseatd_play "${args[@]}"; owner_session_end $? ;;', main)
+
+    def test_play_start_is_not_an_unattended_boot_path(self):
+        text = CTL.read_text()
+        boot = re.search(r"^cmd_boot_owner\(\) \{.*?^\}", text, re.M | re.S).group(0)
+        for forbidden in ("svc_start", "play-start", "cmd_play_start", "setsid", "cmd_activate", "polyseatd-play"):
+            self.assertNotIn(forbidden, boot)
+        self.assertIn("nothing is started", boot)
+
+    def test_boot_in_owner_mode_only_verifies_and_logs(self):
+        sb = Sandbox()
+        self.addCleanup(sb.cleanup)
+        b = sb.make_bundle("1.0.0")
+        shutil.copy(b["archive"], sb.bundles.joinpath(f"{b['sha']}.tar.gz")) if sb.bundles.exists() else None
+        sb.bundles.mkdir(parents=True, exist_ok=True)
+        for suffix, key in ((".tar.gz", "archive"), (".manifest.json", "manifest"), (".manifest.json.sig", "sig")):
+            shutil.copy(b[key], sb.bundles / f"{b['sha']}{suffix}")
+        sb.state.mkdir(parents=True, exist_ok=True)
+        (sb.state / "pointer.json").write_text(json.dumps({"current": b["sha"], "previous": None}))
+        (sb.state / "pointer.json").chmod(0o600)
+        sb.write_cfg(SERVICE="enabled")  # even an enabled service does not start by itself
+        script = r"""
+          POLYSEAT_ROOT="$1"; POLYSEAT_RELEASE_GATE=canary POLYSEAT_APPROVAL_MODE=owner
+          init_paths; svc_start() { echo STARTED >> "$1/started"; }; main_boot() { cmd_boot; }
+          ensure_state_dirs; acquire_lock; cmd_boot; echo "rc=$?"
+        """
+        run = lambda: subprocess.run(["bash", "-c", "source <(sed '$d' \"$1\")\nshift\n" + script, "x", str(CTL), str(sb.root)],
+                                     capture_output=True, text=True, env={"PATH": os.environ["PATH"]})
+        res = run()
+        self.assertIn("rc=0", res.stdout, res.stderr)
+        self.assertIn("nothing is started", res.stderr)
+        self.assertFalse((sb.root / "started").exists())
+        self.assertFalse((sb.ram / "current").exists())  # not even the RAM runtime is rebuilt: play-start does that
+        archive = sb.bundles / f"{b['sha']}.tar.gz"
+        archive.write_bytes(archive.read_bytes() + b"x")
+        res = run()
+        self.assertNotIn("rc=0", res.stdout)
+        self.assertIn("failed verification", res.stderr)
+
+    def test_the_stop_event_asks_for_the_session_first_and_the_start_event_starts_nothing(self):
+        base = Path(CTL).parents[1] / "event"
+        stopping = (base / "stopping_svcs").read_text()
+        self.assertLess(stopping.index('"$CTL" play-stop --wait 300'), stopping.index('"$CTL" stop'))
+        mounted = (base / "disks_mounted").read_text()
+        for forbidden in ("play-start", "polyseatd-play", "--approve", "activate"):
+            self.assertNotIn(forbidden, mounted)
+        for name in ("stopping_svcs", "disks_mounted"):
+            self.assertEqual(subprocess.run(["bash", "-n", str(base / name)]).returncode, 0)
 
 
 if __name__ == "__main__":

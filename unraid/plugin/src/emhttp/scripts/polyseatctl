@@ -182,6 +182,7 @@ init_paths() {
   OWNER_DAEMON_DIR="$FLASH_DIR/daemon"
   OWNER_DAEMON="$OWNER_DAEMON_DIR/polyseat-daemon.tar"
   OWNER_APPROVAL="$RUN_DIR/owner-approval.json"
+  CTL_SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
   # Every reader of the approval's end (budget, watchdog, session loops) looks at $CANARY_APPROVAL; in owner mode that
   # is the host-local file, so none of them needs to know the difference. The signed token is not consulted at all.
   if [[ $POLYSEAT_APPROVAL_MODE == owner ]]; then CANARY_APPROVAL=$OWNER_APPROVAL; fi
@@ -196,7 +197,7 @@ ci_real_system() {
 
 # ------------------------------------------------------------- logging ----
 log() {
-  local level=$1 msg=$2 line
+  local level=$1 msg=$2 line logged=0
   line="$(date -u +%Y-%m-%dT%H:%M:%SZ) [$level] $msg"
   if [[ $LOG_ENABLED -eq 1 ]]; then
     local file="$LOG_DIR/$PLUGIN.log"
@@ -205,12 +206,14 @@ log() {
     fi
     if [[ ! -L $file ]]; then
       printf '%s\n' "$line" >> "$file"
+      logged=1
     fi
     if ! sandbox && command -v logger >/dev/null 2>&1; then
       logger -t "$PLUGIN" -- "[$level] $msg" || true
     fi
   fi
-  [[ $level == debug ]] || printf '%s\n' "$line" >&2
+  # A detached session (play-start) has the log file for stdout and stderr: echoing there would write every line twice.
+  [[ $level == debug || ( $logged -eq 1 && ${POLYSEAT_DETACHED:-} == 1 ) ]] || printf '%s\n' "$line" >&2
 }
 
 die() {
@@ -338,7 +341,7 @@ owner_approval_for() { # command args... (root only, owner-mode builds only)
   local action=$1 now host_sha target="" image_sha
   shift
   [[ $POLYSEAT_APPROVAL_MODE == owner ]] || die $EX_BLOCKED "owner approvals exist only in an owner-mode build"
-  [[ -d $RUN_DIR && ! -L $RUN_DIR ]] && check_private_file "$OWNER_APPROVAL" ||
+  { [[ -d $RUN_DIR && ! -L $RUN_DIR ]] && check_private_file "$OWNER_APPROVAL"; } ||
     die $EX_BLOCKED "no owner approval: a play session is started from the WebUI (play-start)"
   now=$(date -u +%s)
   host_sha=$(canary_host_sha256) || die $EX_BLOCKED "cannot fingerprint canary host"
@@ -528,9 +531,21 @@ acquire_lock() {
   [[ $LOCK_HELD -eq 1 ]] && return 0
   mkdir -p -- "$RUN_DIR" "$LOG_DIR" || die $EX_BLOCKED "cannot create runtime directories"
   LOG_ENABLED=1
-  exec 9> "$LOCKFILE" || die $EX_BLOCKED "cannot open lock file"
+  # play-start hands its lock to the detached session it launches: that process inherits descriptor 9, so there is no
+  # moment in which a second start could slip in. Only the lock file itself counts; flock on the already locked
+  # description succeeds at once, and on anything else it simply takes the lock as usual.
+  if [[ ${POLYSEAT_LOCK_INHERITED:-} == 1 && -e /proc/self/fd/9 && /proc/self/fd/9 -ef $LOCKFILE ]]; then
+    :
+  else
+    exec 9> "$LOCKFILE" || die $EX_BLOCKED "cannot open lock file"
+  fi
+  unset POLYSEAT_LOCK_INHERITED
   flock -w 120 9 || die $EX_PENDING "another polyseatctl operation is running"
   LOCK_HELD=1
+}
+
+play_lock_free() { # nothing holds the controller lock: no session, no staging, no update
+  [[ ! -e $LOCKFILE ]] || flock -n -- "$LOCKFILE" true 2>/dev/null
 }
 
 # --------------------------------------------------------------- state ----
@@ -3387,6 +3402,167 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
     "$ip" "$POLYSEATD_PORT"
 )
 
+# ----------------------------------------------------------- owner mode ----
+# Owner decisions 2026-11-01: an Unraid admin's click starts and stops a play session; nothing starts after a reboot.
+# play-start does what the operator on another machine did (stage, activate, seat-image-stage, daemon-stage, polyseatd-play),
+# from fixed names on the flash drive, under a host-local approval (owner_approval_for) instead of a signed token.
+
+owner_bundle_select() { # the runtime bundle play-start uses: the highest version among complete, hash-named triples on the flash
+  local f sha version best="" best_version="" tie=0
+  for f in "$BUNDLE_DIR"/*.manifest.json; do
+    [[ -f $f && ! -L $f ]] || continue
+    sha=$(basename -- "$f" .manifest.json)
+    [[ $sha =~ $SHA_RE && -f $BUNDLE_DIR/$sha.tar.gz && ! -L $BUNDLE_DIR/$sha.tar.gz &&
+       -f $BUNDLE_DIR/$sha.manifest.json.sig && ! -L $BUNDLE_DIR/$sha.manifest.json.sig ]] || continue
+    version=$(jq -r '.version // empty' "$f" 2>/dev/null) || continue
+    [[ $version =~ ^[0-9][0-9A-Za-z.+_-]{0,40}$ ]] || continue
+    if [[ -z $best ]]; then best=$sha best_version=$version tie=0
+    elif [[ $version == "$best_version" ]]; then tie=1
+    elif [[ $(printf '%s\n%s\n' "$best_version" "$version" | sort -V | tail -n 1) == "$version" ]]; then
+      best=$sha best_version=$version tie=0
+    fi
+  done
+  [[ -n $best ]] || { log error "play-start: no complete runtime bundle (archive, manifest, signature) in $BUNDLE_DIR"; return 1; }
+  [[ $tie -eq 0 ]] || { log error "play-start: two bundles claim the newest version $best_version; remove the wrong one"; return 1; }
+  printf '%s\n' "$best"
+}
+
+play_evidence_remove() { # dir : the files a session writes, then the directory; anything else stays and fails the call
+  local dir=$1 f
+  [[ -e $dir || -L $dir ]] || return 0
+  [[ -d $dir && ! -L $dir ]] || return 1
+  for f in gpu-preflight-before.txt seats-at-start.json polyseatd.json status-start.json polyseatd.log; do
+    if [[ -f $dir/$f && ! -L $dir/$f ]]; then rm -f -- "$dir/$f"; fi
+  done
+  rmdir -- "$dir"
+}
+
+play_evidence_rotate() { # the operator collected it by hand; the admin cannot, so the last session's stays as play-evidence.last
+  local dir="$RUN_DIR/play-evidence"
+  [[ -e $dir || -L $dir ]] || return 0
+  play_evidence_remove "$dir.last" && mv -T -- "$dir" "$dir.last"
+}
+
+play_launch_detached() { # the session in its own session, with the controller log for output, holding the lock we hold
+  local out="$LOG_DIR/$PLUGIN.log"
+  [[ -d $LOG_DIR && ! -L $LOG_DIR && ! -L $out ]] || { log error "play-start: the controller log is not usable"; return 1; }
+  POLYSEAT_DETACHED=1 POLYSEAT_LOCK_INHERITED=1 setsid -f "$CTL_SELF" polyseatd-play --approve >> "$out" 2>&1 < /dev/null
+}
+
+cmd_play_start() ( # owner mode: verify and stage what is on the flash, approve it for this host, launch the session, return
+  local sha seat_sha daemon_sha hours now expires f pid launched=0 a
+  [[ $POLYSEAT_RELEASE_GATE == canary && $POLYSEAT_APPROVAL_MODE == owner && $# -eq 0 ]] ||
+    die $EX_BLOCKED "play-start needs an owner-mode build and takes no arguments"
+  require_no_journal
+  # Nothing runs, and nothing of an earlier session is left that only an inspection may clear.
+  ! svc_pid >/dev/null 2>&1 || die $EX_BLOCKED "Incus is already running; stop the session first (play-stop)"
+  if [[ -f $RUN_DIR/polyseatd.pid && ! -L $RUN_DIR/polyseatd.pid ]]; then
+    pid=$(< "$RUN_DIR/polyseatd.pid")
+    ! polyseatd_alive "$pid" || die $EX_BLOCKED "polyseatd is already running (pid $pid); stop the session first (play-stop)"
+  fi
+  for f in polyseatd-status.json play-host.json play-console.json; do
+    [[ ! -e $RUN_DIR/$f && ! -L $RUN_DIR/$f ]] ||
+      die $EX_BLOCKED "an earlier session left $f in $RUN_DIR (play-host.json: host changes not restored); inspect it first"
+  done
+  [[ ! -e $CANARY_CGROUP && ! -e $CANARY_WATCHDOG_CGROUP ]] || die $EX_BLOCKED "an earlier session's cgroup still exists; inspect it first"
+  [[ ! -e $CANARY_SESSION.reason && ! -L $CANARY_SESSION.reason ]] ||
+    die $EX_BLOCKED "the watchdog ended the previous session ($(head -c 60 -- "$CANARY_SESSION.reason" | tr -c '[:alnum:]-\n' '?')); inspect it first"
+  # What a finished session leaves in RAM and a new one refuses (persist_state_prepare, canary_launch). We hold the lock
+  # and nothing runs, so these are records, not live state; the Incus clean-stop record is what really gates the next run.
+  for f in canary-session.json canary-guardian.pid canary-watchdog.ready canary-emergency-stop owner-approval.json \
+           polyseatd-stop polyseatd.pid; do
+    if [[ -e $RUN_DIR/$f || -L $RUN_DIR/$f ]]; then rm -f -- "$RUN_DIR/$f"; log info "play-start: removed $f of an earlier session"; fi
+  done
+  play_evidence_rotate || die $EX_BLOCKED "the earlier session's evidence directory holds unexpected files; collect it first"
+  # What is on the flash, and that it is the release key's.
+  sha=$(owner_bundle_select) || exit $EX_BLOCKED
+  for f in "$OWNER_SEAT_IMAGE" "$OWNER_SEAT_MANIFEST" "$OWNER_SEAT_MANIFEST.sig" "$OWNER_DAEMON"; do
+    [[ -f $f && ! -L $f ]] || die $EX_BLOCKED "missing on the flash drive: $f"
+  done
+  { verify_bundle_files "$sha" && check_host_compat "$(bundle_manifest "$sha")"; } ||
+    die $EX_VERIFY "runtime bundle $sha failed verification; nothing was started"
+  seat_sha=$(file_sha256 "$OWNER_SEAT_IMAGE") daemon_sha=$(file_sha256 "$OWNER_DAEMON")
+  hours=$(cfg_get PLAY_SESSION_HOURS 6)
+  schema_validate PLAY_SESSION_HOURS "$hours" || die $EX_BLOCKED "PLAY_SESSION_HOURS '$hours' is not usable; nothing was started"
+  now=$(date -u +%s) expires=$(( now + 10#$hours * 3600 ))
+  # The approval: this host, these bytes, these actions, this long. Removed again unless the session was launched.
+  # shellcheck disable=SC2154  # rc is assigned inside the trap itself
+  trap 'rc=$?; [[ $launched -eq 1 ]] || rm -f -- "$OWNER_APPROVAL"; exit "$rc"' EXIT
+  write_json_atomic "$OWNER_APPROVAL" "$(jq -n --arg host "$(canary_host_sha256)" --arg bundle "$sha" --arg seat "$seat_sha" \
+    --arg daemon "$daemon_sha" --argjson now "$now" --argjson expires "$expires" --argjson actions "$OWNER_ACTIONS" \
+    '{schema: 1, mode: "owner", host_sha256: $host, archive_sha256: $bundle, seat_image_sha256: $seat, daemon_sha256: $daemon,
+      issued_at: $now, expires_at: $expires, actions: $actions}')" || die $EX_BLOCKED "cannot write the owner approval (no host fingerprint?)"
+  APPROVED=1
+  log info "play-start: bundle $sha, seat image $seat_sha, daemon $daemon_sha, approved for $hours h"
+  # stage: the files are already on the flash, so staging is the verification above plus this binding.
+  owner_approval_for stage "$(bundle_archive "$sha")"
+  read_pointer
+  if [[ $PTR_CURRENT != "$sha" ]]; then
+    owner_approval_for activate "$sha"
+    (cmd_activate "$sha") || die $EX_HEALTH "activating bundle $sha failed (see the log); nothing was started"
+  else
+    # Current on the flash; after a reboot its RAM slot and link are gone and are rebuilt from the flash, as boot does elsewhere.
+    materialize_slot "$sha" || die $EX_VERIFY "runtime slot $sha cannot be rebuilt; nothing was started"
+    [[ $(current_sha_from_link) == "$sha" ]] || switch_current "$sha" || die $EX_CORRUPT "cannot link the runtime bundle"
+  fi
+  owner_approval_for seat-image-stage "$OWNER_SEAT_IMAGE"
+  if seat_image_verify_staged 2>/dev/null && [[ $(file_sha256 "$SEAT_IMAGE") == "$seat_sha" ]]; then
+    log info "play-start: seat image already staged"
+  else
+    seat_image_remove_exact
+    (cmd_seat_image_stage "$OWNER_SEAT_IMAGE" "$OWNER_SEAT_MANIFEST" "$OWNER_SEAT_MANIFEST.sig" >/dev/null) ||
+      die $EX_VERIFY "staging the seat image failed (see the log); nothing was started"
+  fi
+  owner_approval_for daemon-stage "$OWNER_DAEMON"
+  if LOG_ENABLED=0 polyseatd_verify 2>/dev/null && [[ $(< "$POLYSEATD_DIR/.bundle-sha256") == "$daemon_sha" ]]; then
+    log info "play-start: daemon bundle already staged"
+  else
+    (cmd_daemon_stage "$OWNER_DAEMON") || die $EX_VERIFY "staging the daemon bundle failed (see the log); nothing was started"
+  fi
+  # The session repeats these; doing them here lets a refusal reach the admin instead of only the log.
+  polyseatd_precheck || die $EX_BLOCKED "polyseatd prechecks failed; nothing was started"
+  play_limits || die $EX_BLOCKED "PLAY_CPU_PERCENT or PLAY_MEMORY_MB is not usable; nothing was started"
+  if ! gpu_preflight_run "$GPU_CANARY_PCI"; then
+    for a in "${GPU_RES[@]}"; do [[ ${a%%$'\t'*} == FAIL ]] && log error "gpu-preflight: ${a#*$'\t'}"; done
+    die $EX_BLOCKED "GPU is not available for seats now; nothing was started"
+  fi
+  owner_approval_for polyseatd-play
+  play_launch_detached || die $EX_BLOCKED "cannot launch the play session"
+  launched=1
+  log info "play-start: session launched (detached); it ends by itself at $(date -u -d "@$expires" +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'play session starting (up to %s h): Incus, polyseatd and the seat guards come up now; watch the Polyseat card\n' "$hours"
+)
+
+cmd_play_stop() { # [--wait SECONDS] : ask the session to stop; with --wait (array stop) hold until it is gone, bounded
+  local wait=0 deadline start=$SECONDS
+  if [[ $# -gt 0 ]]; then
+    { [[ $# -eq 2 && $1 == --wait && $2 =~ ^[0-9]{1,3}$ ]] && (( 10#$2 >= 1 && 10#$2 <= 600 )); } ||
+      die $EX_USAGE "usage: play-stop [--wait SECONDS (1..600)]"
+    wait=$((10#$2))
+  fi
+  if [[ $wait -eq 0 ]]; then cmd_polyseatd_stop; return; fi
+  [[ -d $LOG_DIR && ! -L $LOG_DIR ]] && LOG_ENABLED=1
+  if play_lock_free; then log info "play-stop: no session or controller operation is running"; return 0; fi
+  log info "play-stop: a session or operation is running; asking it to stop and waiting up to ${wait}s"
+  deadline=$(( SECONDS + wait ))
+  while ! play_lock_free; do
+    if (( SECONDS >= deadline )); then
+      log error "play-stop: still running after ${wait}s; the emergency stop follows"
+      return 1
+    fi
+    # Rewritten every round: a session that is still starting removes an older request when it gets that far.
+    if [[ -d $RUN_DIR && ! -L $RUN_DIR ]]; then (umask 077; : > "$RUN_DIR/polyseatd-stop"); fi
+    sleep 2
+  done
+  log info "play-stop: ended after $(( SECONDS - start ))s"
+}
+
+# After the session in an owner build, whatever way it ended: the approval does not outlive it.
+owner_session_end() { # exit code of the session
+  if [[ $POLYSEAT_APPROVAL_MODE == owner ]]; then rm -f -- "$OWNER_APPROVAL"; fi
+  return "$1"
+}
+
 # --------------------------------------------------------- transaction ----
 # Only a service that was running is restarted after a switch/restore. Starting an
 # enabled service is the boot path's job (it runs once the pool is mounted); a plugin
@@ -3610,8 +3786,19 @@ cmd_uninstall() {
   log info "uninstalled; settings and DATA_DIR were not touched"
 }
 
+cmd_boot_owner() { # owner decision 2026-11-01: after a reboot nothing starts by itself; this only logs and verifies
+  ensure_state_dirs
+  read_journal
+  [[ -z $JR_PHASE ]] || log warn "boot: unfinished transaction ($JR_PHASE); 'recover' finishes it"
+  read_pointer
+  if [[ -z $PTR_CURRENT ]]; then log info "boot: no bundle installed"; return 0; fi
+  verify_bundle_files "$PTR_CURRENT" || die $EX_VERIFY "boot: bundle $PTR_CURRENT on the flash failed verification"
+  log info "boot: bundle $PTR_CURRENT verified on the flash; nothing is started (a play session is started from the WebUI)"
+}
+
 cmd_boot() {
   local rc
+  [[ $POLYSEAT_APPROVAL_MODE != owner ]] || { cmd_boot_owner; return; }
   ensure_state_dirs
   read_journal
   if [[ -n $JR_PHASE ]]; then
@@ -4120,6 +4307,8 @@ usage: polyseatctl COMMAND [args]
              daemon-stage FILE --approve | polyseatd-session --approve (step 3: polyseatd on the LAN, no seats)
              polyseatd-status | polyseatd-stop
              polyseatd-play --approve (polyseatd builds and runs seats with keyboard, mouse and gamepads; up to 6 h)
+ owner mode: play-start (verify, stage, approve and launch a session from the files on the flash; no token)
+             play-stop [--wait SECONDS] | play-status (aliases of polyseatd-stop/-status, no token)
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
 EOF
@@ -4151,7 +4340,7 @@ main() {
     config-get) cmd_config_get; return ;;
     stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke | seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session | steam-session-pin | \
     steam-session-status | steam-session-stop | persist-smoke | daemon-stage | polyseatd-session | polyseatd-play | \
-    polyseatd-status | polyseatd-stop) ;;
+    polyseatd-status | polyseatd-stop | play-start | play-stop | play-status) ;;
     *) usage ;;
   esac
   require_mutation_allowed "$cmd" "${args[@]}"
@@ -4169,8 +4358,11 @@ main() {
       steam-session-pin) cmd_steam_session_pin "${args[@]}"; return ;;
       steam-session-status) cmd_steam_session_status; return ;;
       steam-session-stop) cmd_steam_session_stop; return ;;
-      polyseatd-status) cmd_polyseatd_status; return ;;
+      polyseatd-status | play-status) cmd_polyseatd_status; return ;;
       polyseatd-stop) cmd_polyseatd_stop; return ;;
+      play-stop) cmd_play_stop "${args[@]}"; return ;;
+      # A second click must be refused at once, not queued behind the running session for two minutes.
+      play-start) play_lock_free || die $EX_PENDING "a play session or another controller operation is already running" ;;
     esac
   fi
   ensure_state_dirs
@@ -4194,7 +4386,8 @@ main() {
     persist-smoke) cmd_persist_smoke "${args[@]}" ;;
     daemon-stage) cmd_daemon_stage "${args[@]}" ;;
     polyseatd-session) cmd_polyseatd_session "${args[@]}" ;;
-    polyseatd-play) cmd_polyseatd_play "${args[@]}" ;;
+    polyseatd-play) cmd_polyseatd_play "${args[@]}"; owner_session_end $? ;;
+    play-start) cmd_play_start "${args[@]}" ;;
     start)
       require_no_journal
       read_pointer
