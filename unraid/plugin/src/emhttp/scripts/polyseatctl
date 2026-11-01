@@ -511,6 +511,9 @@ require_mutation_allowed() {
         play-status | play-stop) ;;  # the same two, under their owner-facing names
         # play-start writes the owner approval itself, so there is none to check yet; it exists in owner builds only.
         play-start) [[ $POLYSEAT_APPROVAL_MODE == owner ]] || die $EX_BLOCKED "play-start exists only in an owner-mode build" ;;
+        # Recovery after an abnormal end writes the Incus clean-stop record and puts the host back: the admin's click is its
+        # approval, and a signed build leaves it to the operator on the console.
+        play-recover) [[ $POLYSEAT_APPROVAL_MODE == owner ]] || die $EX_BLOCKED "play-recover exists only in an owner-mode build" ;;
         # Owner mode: the admin's click (same-origin POST, CSRF token) is the approval of a settings change, not a
         # session; the canary whitelist still applies. boot only verifies and logs there (cmd_boot).
         config-set | config-reset | boot)
@@ -2769,6 +2772,13 @@ persist_validate_data_dir() { # the fixed persistent workspace on the cache data
     { log error "persist: $PERSIST_DATA_DIR must be a root:root 0711 directory"; return 1; }
 }
 
+persist_clean_stop_valid() { # file : the record persist_state_prepare accepts: root-private, every instance stopped and not autostarting
+  local stop=$1
+  [[ -f $stop && ! -L $stop && $(stat -c '%u %a' -- "$stop") == '0 600' ]] &&
+    jq -e --arg re "$PLAY_NAME_RE" '.schema == 1 and (.instances | type == "array" and (map(.name) | unique | length) == length and
+      all(.[]; (.name | test($re)) and .status == "Stopped" and (.autostart == "false" or .autostart == "")))' "$stop" >/dev/null 2>&1
+}
+
 persist_state_prepare() { # active sha : creates the workspace once; afterwards only a recorded clean stop reopens it
   local active_sha=$1 version stop
   version=$(jq -er '.incus_version | select(type == "string" and length > 0)' "$(bundle_manifest "$active_sha")") ||
@@ -2787,9 +2797,7 @@ persist_state_prepare() { # active sha : creates the workspace once; afterwards 
     "$DATA_REAL/persist.json" >/dev/null 2>&1 ||
     { log error "persist: workspace record missing or written by another Incus version; no up- or downgrade here"; return 1; }
   stop=$DATA_REAL/clean-stop.json
-  { [[ -f $stop && ! -L $stop && $(stat -c '%u %a' -- "$stop") == '0 600' ]] &&
-    jq -e --arg re "$PLAY_NAME_RE" '.schema == 1 and (.instances | type == "array" and (map(.name) | unique | length) == length and
-      all(.[]; (.name | test($re)) and .status == "Stopped" and (.autostart == "false" or .autostart == "")))' "$stop" >/dev/null 2>&1; } ||
+  persist_clean_stop_valid "$stop" ||
     { log error "persist: the previous run recorded no clean stop; inspection required, nothing was started"; return 1; }
   [[ -d $INCUS_DIR && ! -L $INCUS_DIR ]] || { log error "persist: the Incus directory is missing"; return 1; }
   # Consumed before the daemon starts: a crash from here on leaves no record, so the next run refuses again.
@@ -3159,9 +3167,16 @@ cmd_polyseatd_session() ( # step 3: upstream's polyseatd, no seats, its interfac
 )
 
 # Operator side of a running polyseatd session: root-private files in $RUN_DIR only, like the Steam session's.
-cmd_polyseatd_status() {
-  [[ -f $RUN_DIR/polyseatd-status.json ]] || die $EX_BLOCKED "no polyseatd session is running"
-  cat -- "$RUN_DIR/polyseatd-status.json"
+cmd_polyseatd_status() { # always one JSON line with a "state" (play_state); the exit code stays 0 only for a running session
+  local out state
+  out=$(play_state) || die $EX_CORRUPT "cannot work out the state of the play session"
+  printf '%s\n' "$out"
+  state=$(jq -r .state <<< "$out")
+  case "$state" in
+    running) ;;
+    needs-recovery) die $EX_BLOCKED "no polyseatd session is running; the last one ended abnormally ($(jq -r .reason <<< "$out")): play-recover restores the host and the clean-stop record" ;;
+    *) die $EX_BLOCKED "no polyseatd session is running" ;;
+  esac
 }
 cmd_polyseatd_stop() {
   [[ -f $RUN_DIR/polyseatd-status.json ]] || die $EX_BLOCKED "no polyseatd session is running"
@@ -3455,21 +3470,31 @@ play_host_off() { # exactly what play_host_on recorded, nothing else
   epp=$(jq -c '.epp // {}' "$state") || epp=''
   if [[ -z $epp ]]; then rc=1
   elif [[ $epp != '{}' ]]; then
+    log info "play: restoring the energy profile of $(jq length <<< "$epp" 2>/dev/null || echo '?') CPUs"
     play_epp_write "$epp" || { log error "play: the CPUs' energy profile was not restored exactly"; rc=1; }
   fi
   if [[ $helper == added ]]; then
+    log info "play: removing the device-owner helper"
     rm -f -- "$helper_dir/device_owner.py"
     rmdir -- "$helper_dir" || rc=1
   fi
   if [[ $rule == added ]]; then
+    log info "play: removing the udev rule"
     rm -f -- "$rule_file"
     if play_real; then udevadm control --reload || rc=1; fi
   fi
-  if [[ $uhid == loaded ]] && play_real; then modprobe -r uhid 2>/dev/null || log warn "play: uhid is still in use; left loaded"; fi
+  if [[ $uhid == loaded ]] && play_real; then
+    log info "play: unloading uhid (the session loaded it)"
+    modprobe -r uhid 2>/dev/null || log warn "play: uhid is still in use; left loaded"
+  fi
   if [[ -e $RUN_DIR/play-console.json ]]; then
+    log info "play: putting the console keyboard back"
     "$POLYSEATD_DIR/bin/polyseat-console" restore "$RUN_DIR/play-console.json" || { log error "play: console keyboard not restored"; rc=1; }
   fi
-  if [[ $sysrq =~ ^[0-9]+$ ]]; then printf '%s\n' "$sysrq" > "$(lxc_mount_real /proc/sys/kernel/sysrq)" || rc=1; else rc=1; fi
+  if [[ $sysrq =~ ^[0-9]+$ ]]; then
+    log info "play: sysrq back to $sysrq"
+    printf '%s\n' "$sysrq" > "$(lxc_mount_real /proc/sys/kernel/sysrq)" || rc=1
+  else rc=1; fi
   if [[ $rc -eq 0 ]]; then rm -f -- "$state"; log info "play: host restored (sysrq $sysrq, console keyboard, udev rule, helper, CPU energy profile)"; fi
   return "$rc"
 }
@@ -3674,19 +3699,23 @@ cmd_play_start() ( # owner mode: verify and stage what is on the flash, approve 
     pid=$(< "$RUN_DIR/polyseatd.pid")
     ! polyseatd_alive "$pid" || die $EX_BLOCKED "polyseatd is already running (pid $pid); stop the session first (play-stop)"
   fi
+  # An abnormal end (a killed session, the watchdog's hard stop) is cleared by play-recover, which proves that nothing runs
+  # and restores the host; a start never guesses. The words below are the card's button, for an admin who only sees this line.
   for f in polyseatd-status.json play-host.json play-console.json; do
     [[ ! -e $RUN_DIR/$f && ! -L $RUN_DIR/$f ]] ||
-      die $EX_BLOCKED "an earlier session left $f in $RUN_DIR (play-host.json: host changes not restored); inspect it first"
+      die $EX_BLOCKED "an earlier session left $f in $RUN_DIR (play-host.json: host changes not restored); $PLAY_RECOVER_HINT"
   done
-  [[ ! -e $CANARY_CGROUP && ! -e $CANARY_WATCHDOG_CGROUP ]] || die $EX_BLOCKED "an earlier session's cgroup still exists; inspect it first"
+  [[ ! -e $CANARY_CGROUP && ! -e $CANARY_WATCHDOG_CGROUP ]] ||
+    die $EX_BLOCKED "an earlier session's cgroup still exists; inspect it first (nothing may still run in it; $PLAY_RECOVER_HINT afterwards)"
   [[ ! -e $CANARY_SESSION.reason && ! -L $CANARY_SESSION.reason ]] ||
-    die $EX_BLOCKED "the watchdog ended the previous session ($(head -c 60 -- "$CANARY_SESSION.reason" | tr -c '[:alnum:]-\n' '?')); inspect it first"
+    die $EX_BLOCKED "the watchdog ended the previous session ($(head -c 60 -- "$CANARY_SESSION.reason" | tr -c '[:alnum:]-\n' '?')); $PLAY_RECOVER_HINT"
+  # The same refusal Incus' own gate would give, but where the admin reads it: the session would only log it.
+  play_recovery_reason >/dev/null &&
+    die $EX_BLOCKED "the previous play session recorded no clean stop ($(play_recovery_reason)); $PLAY_RECOVER_HINT"
   # What a finished session leaves in RAM and a new one refuses (persist_state_prepare, canary_launch). We hold the lock
   # and nothing runs, so these are records, not live state; the Incus clean-stop record is what really gates the next run.
-  for f in canary-session.json canary-guardian.pid canary-watchdog.ready canary-emergency-stop owner-approval.json \
-           polyseatd-stop polyseatd.pid; do
-    if [[ -e $RUN_DIR/$f || -L $RUN_DIR/$f ]]; then rm -f -- "$RUN_DIR/$f"; log info "play-start: removed $f of an earlier session"; fi
-  done
+  # shellcheck disable=SC2086  # PLAY_RECORDS is a fixed word list
+  play_records_remove play-start $PLAY_RECORDS play-last-end.json || die $EX_BLOCKED "cannot remove the records of the earlier session"
   play_evidence_rotate || die $EX_BLOCKED "the earlier session's evidence directory holds unexpected files; collect it first"
   # What is on the flash, and that it is the release key's.
   sha=$(owner_bundle_select) || exit $EX_BLOCKED
@@ -3778,6 +3807,313 @@ owner_session_end() { # exit code of the session
   if [[ $POLYSEAT_APPROVAL_MODE == owner ]]; then rm -f -- "$OWNER_APPROVAL"; fi
   return "$1"
 }
+
+# ------------------------------------------------------------- recovery ----
+# A play session can end without ever reaching its clean stop (Tower 2026-11-01: the process hosting it was killed; the
+# memory floor killed the whole cgroup with two games running). polyseatd, incusd and the seats are gone, but no clean-stop
+# record was written, so Incus' own gate refuses the next start by design; the console guard may still be on, the CPUs'
+# energy profile still "performance", the watchdog's .reason still there. The operator recovered by hand, always with the
+# same verified steps. play-recover is exactly those steps, in that order, and nothing else:
+#   1. prove that nothing can still run (no incusd, no polyseatd, no process in a seat's or the plugin's cgroup, no
+#      polyseat cgroup, no mount below the persistent data directory);
+#   2. prove that restoring the host is possible, from the records play_host_on wrote;
+#   3. prove that no instance can autostart (boot.autostart "false" in every instance's backup.yaml);
+#   4. only then change anything: restore the host (play_host_off), look once more that nothing runs, write the clean-stop
+#      record with a `recovery` note saying what was verified, and clear the watchdog's .reason and the session records.
+# All checks run before any change, and each says precisely why it failed. Owner mode only: a signed build's recovery is
+# the operator's, with the owner's eyes on every step.
+PLAY_REASON_RE='^[a-z][a-z0-9-]{0,63}$'
+PLAY_RECOVER_HINT='press "Wiederherstellen" on the Polyseat card (or run: polyseatctl play-recover as root)'
+# The plain records a session leaves in $RUN_DIR (RAM) that only name it. Evidence (play-evidence) is not among them.
+PLAY_RECORDS="canary-session.json canary-guardian.pid canary-watchdog.ready canary-emergency-stop owner-approval.json polyseatd-stop polyseatd.pid play-end-reason"
+
+play_records_remove() { # who file... : those records of an earlier session in $RUN_DIR; one that cannot be removed fails the call
+  local who=$1 f rc=0
+  shift
+  for f in "$@"; do
+    [[ -e $RUN_DIR/$f || -L $RUN_DIR/$f ]] || continue
+    if rm -f -- "$RUN_DIR/$f" && [[ ! -e $RUN_DIR/$f && ! -L $RUN_DIR/$f ]]; then
+      log info "$who: removed $f of an earlier session"
+    else
+      log error "$who: cannot remove $RUN_DIR/$f"; rc=1
+    fi
+  done
+  return "$rc"
+}
+
+play_token_read() { # file : the first line of a one-word record, as a word; anything else is "unknown". Fails if there is no file
+  local f=$1 word
+  [[ -f $f && ! -L $f ]] || return 1
+  word=$(head -n 1 -- "$f" | head -c 65)  # one byte more than a word may have, so a longer one is not cut into a valid one
+  [[ $word =~ $PLAY_REASON_RE ]] || word=unknown
+  printf '%s\n' "$word"
+}
+
+# Read-only, no lock, no Incus: does the last play session need play-recover, and why? One word, or failure if it does not.
+# What counts is a fact of an abnormal end (the watchdog's hard stop, host changes not restored, the status file of a
+# session that is gone, the missing clean-stop record); the name of the cause (play-end-reason: the graceful memory-floor
+# request) only labels it, so a stale label alone is never a reason.
+play_recovery_reason() {
+  local cause="" named f persist=$ROOT$PERSIST_DATA_DIR
+  f=$RUN_DIR
+  if [[ -e $CANARY_SESSION.reason || -L $CANARY_SESSION.reason ]]; then
+    cause=$(play_token_read "$CANARY_SESSION.reason") || cause=unknown
+  elif [[ -e $f/play-host.json || -L $f/play-host.json || -e $f/play-console.json || -L $f/play-console.json ]]; then
+    cause='host-not-restored'
+  elif [[ -e $f/polyseatd-status.json || -L $f/polyseatd-status.json ]]; then
+    cause='session-process-gone'
+  elif [[ -f $persist/persist.json && ! -L $persist/persist.json ]] && ! persist_clean_stop_valid "$persist/clean-stop.json"; then
+    cause='no-clean-stop'
+  fi
+  [[ -n $cause ]] || return 1
+  if [[ ! -e $CANARY_SESSION.reason ]] && named=$(play_token_read "$RUN_DIR/play-end-reason"); then cause=$named; fi
+  printf '%s\n' "$cause"
+}
+
+# The state the card needs, as one JSON line, without the lock and without Incus: idle | busy (the lock is held, no session
+# status yet: starting, or another controller operation) | running (the status file, plus state) | needs-recovery (+ reason).
+# idle and needs-recovery also carry how the last session ended (play-last-end.json), if it is known.
+play_state() {
+  local status=$RUN_DIR/polyseatd-status.json last=$RUN_DIR/play-last-end.json end="" reason
+  if ! play_lock_free; then
+    if [[ -f $status && ! -L $status ]]; then
+      jq -c 'if type == "object" then . + {state: "running"} else {state: "running"} end' "$status" 2>/dev/null || printf '{"state":"running"}\n'
+    else
+      printf '{"state":"busy"}\n'
+    fi
+    return 0
+  fi
+  if [[ -f $last && ! -L $last ]]; then
+    end=$(jq -c --arg re "$PLAY_REASON_RE" 'select(type == "object" and (.reason | type == "string" and test($re)) and
+      (.clean | type == "boolean") and (.ended_at | type == "number" and . == floor)) |
+      {reason, clean, recovered: (.recovered == true), ended_at}' "$last" 2>/dev/null) || end=""
+  fi
+  [[ -n $end ]] || end=null
+  if reason=$(play_recovery_reason); then
+    jq -nc --arg reason "$reason" --argjson end "$end" '{state: "needs-recovery", reason: $reason, last_end: $end}'
+  else
+    jq -nc --argjson end "$end" '{state: "idle", last_end: $end}'
+  fi
+}
+
+# play-host.json is exactly what play_host_on wrote (an older record without the energy profile is fine): restoring from it is
+# then exact, and nothing in it can point anywhere else. play_host_off stays as tolerant as it was; this is the recovery's gate.
+play_host_record_check() { # file
+  jq -e --arg epp "$PLAY_EPP_VALUE_RE" '
+    type == "object" and ((keys - ["epp"]) == ["helper", "rule", "schema", "sysrq", "uhid"]) and .schema == 1 and
+    (.sysrq | type == "string" and test("^[0-9]+$")) and (.uhid == "preloaded" or .uhid == "loaded") and
+    (.rule == "present" or .rule == "added") and (.helper == "present" or .helper == "added") and
+    ((.epp // {}) | type == "object" and all(to_entries[]; (.key | test("^[0-9]{1,4}$")) and
+      (.value | type == "string" and test($epp))))' "$1" >/dev/null 2>&1
+}
+
+play_recover_check_processes() { # nothing that proves a session could still run: logs each finding, fails if there is one
+  local proc p pid comm cg shown bad=0
+  proc=$(host_path /proc)
+  [[ -d $proc ]] || { log error "play-recover: cannot look at the processes ($proc)"; return 1; }
+  for p in "$proc"/[0-9]*; do
+    [[ -d $p ]] || continue
+    pid=${p##*/}
+    [[ $pid == "$$" || $pid == "$BASHPID" ]] && continue
+    comm=$(cat -- "$p/comm" 2>/dev/null) || comm=""
+    cg=$(cat -- "$p/cgroup" 2>/dev/null) || cg=""
+    shown=$(head -n 1 <<< "$cg" | tr -c '[:alnum:]/:._-' '?' | head -c 100)
+    # Any incusd, ours or not: the forks of a running container carry the name too. polyseatd is the daemon on the LAN.
+    case "$comm" in
+      incusd | polyseatd) log error "play-recover: $comm is still running (pid $pid)"; bad=1 ;;
+    esac
+    # A seat's payload or monitor (lxc.payload.<name>, lxc.monitor.<name>), or anything left in the plugin's own groups.
+    if [[ $cg == *lxc.payload.* || $cg == *lxc.monitor.* ]]; then
+      log error "play-recover: process $pid is in a seat's cgroup ($shown)"; bad=1
+    elif [[ $cg == *"/${CANARY_CGROUP##*/}"* ]]; then
+      log error "play-recover: process $pid is in the plugin's cgroup ($shown)"; bad=1
+    fi
+  done
+  # What no cgroup shows: a process that left it but still runs a binary of the runtime, or the supervisor's own shells.
+  canary_leak_check || bad=1
+  [[ $bad -eq 0 ]]
+}
+
+play_recover_check_cgroups() { # no polyseat cgroup of any kind is left
+  local group bad=0
+  for group in "$CANARY_CGROUP" "$CANARY_WATCHDOG_CGROUP"; do
+    if [[ -e $group || -L $group ]]; then log error "play-recover: the cgroup $group still exists"; bad=1; fi
+  done
+  [[ $bad -eq 0 ]]
+}
+
+play_recover_check_mounts() { # no mount at or below the persistent data directory (the host's own mount table)
+  local dir=$ROOT$PERSIST_DATA_DIR info found
+  info=$(host_path /proc/self/mountinfo)
+  [[ -r $info ]] || { log error "play-recover: cannot read the mount table ($info)"; return 1; }
+  found=$(awk -v d="$dir" '$5 == d || index($5, d "/") == 1 { print $5 }' "$info" | head -n 3 | tr '\n' ' ')
+  [[ -z $found ]] || { log error "play-recover: still mounted below the persistent data directory: $found"; return 1; }
+}
+
+# All of the above; run before anything is changed and once more right before the record is written.
+play_recover_quiet() {
+  local bad=0
+  play_recover_check_processes || bad=1
+  play_recover_check_cgroups || bad=1
+  play_recover_check_mounts || bad=1
+  [[ $bad -eq 0 ]]
+}
+
+play_recover_check_data() { # the persistent workspace is the real, validated one and has its own record
+  persist_validate_data_dir || return 1
+  { [[ -d $DATA_REAL && ! -L $DATA_REAL && -d $INCUS_DIR && ! -L $INCUS_DIR ]] &&
+    jq -e '.schema == 1 and .kind == "persistent"' "$DATA_REAL/persist.json" >/dev/null 2>&1; } ||
+    { log error "play-recover: $PERSIST_DATA_DIR is not an initialised persistent workspace (no persist.json); nothing to record a clean stop for"; return 1; }
+}
+
+play_recover_check_host() { # read-only: the records are play_host_on's, and what restoring from them needs is there
+  local host=$RUN_DIR/play-host.json console=$RUN_DIR/play-console.json
+  if [[ -e $host || -L $host ]]; then
+    { [[ -f $host && ! -L $host ]] && play_host_record_check "$host"; } ||
+      { log error "play-recover: $host is not a record that play_host_on wrote; restore the host by hand, then remove it"; return 1; }
+  elif [[ -e $console || -L $console ]]; then
+    log error "play-recover: play-console.json without play-host.json cannot be put back safely; restore the console by hand, then remove it"
+    return 1
+  fi
+  if [[ -e $console || -L $console ]]; then
+    [[ -f $console && ! -L $console ]] || { log error "play-recover: $console is not a plain file"; return 1; }
+    # The console keyboard is put back by the staged tool, and a console left off is the one thing a recovery must not do.
+    if ! { [[ -x $POLYSEATD_DIR/bin/polyseat-console && ! -L $POLYSEATD_DIR/bin/polyseat-console ]] && polyseatd_verify; }; then
+      log error "play-recover: the staged polyseat-console is gone or not the verified one ($POLYSEATD_DIR/bin/polyseat-console), so the console keyboard cannot be restored from $console; nothing was changed. Restore it by hand with the same tool from the signed daemon bundle ('polyseat-console restore $console'), then run play-recover again"
+      return 1
+    fi
+  fi
+}
+
+# The awk program that reads an instance's backup.yaml. Incus writes the instance as the top-level `container:` mapping,
+# its own config as `  config:` and the profile-merged one as `  expanded_config:`, keys at four spaces. Anything that
+# does not look exactly like that is "not proven", never "fine": one container block, its name is the directory's, exactly
+# one boot.autostart in its config, and every boot.autostart that is there is the quoted string "false".
+# shellcheck disable=SC2016  # awk's program, not the shell's
+PLAY_BACKUP_AWK='
+function value(v) {
+  sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+  if (v ~ /^"[^"]*"$/ || v ~ /^\047[^\047]*\047$/) return "s:" substr(v, 2, length(v) - 2)
+  return "u:" v
+}
+/^[^ \t#]/ { top = ($0 ~ /^container:[ \t]*$/); if (top) containers++; sect = ""; next }
+top && /^  [^ \t#]/ {
+  sect = ""
+  if ($0 ~ /^  config:[ \t]*$/) { sect = "config"; configs++ }
+  else if ($0 ~ /^  expanded_config:[ \t]*$/) { sect = "expanded" }
+  else if ($0 ~ /^  name:/) { names++; got = value(substr($0, 8)) }
+  next
+}
+top && sect != "" && /^    boot\.autostart:/ {
+  v = value(substr($0, 20))
+  if (sect == "config") { n++; if (v != "s:false") bad = v } else if (v != "s:false") ebad = v
+  next
+}
+END {
+  if (containers != 1) print "no-container-block"
+  else if (configs != 1) print "no-config-block"
+  else if (names != 1 || (got != "s:" name && got != "u:" name)) print "name-is-not-the-directory"
+  else if (n == 0) print "no-boot.autostart"
+  else if (n > 1) print "boot.autostart-twice"
+  else if (bad != "") print "boot.autostart-is-" substr(bad, 3)
+  else if (ebad != "") print "expanded-boot.autostart-is-" substr(ebad, 3)
+  else print "ok"
+}'
+
+play_recover_backup_check() { # directory : its backup.yaml proves boot.autostart "false"; logs why not
+  local dir=$1 name=${1##*/} f=$1/backup.yaml verdict
+  { [[ -f $f && ! -L $f ]] && (( $(stat -c %s -- "$f") <= 1048576 )); } ||
+    { log error "play-recover: instance $name: no plain backup.yaml (at most 1 MiB) in $dir"; return 1; }
+  verdict=$(awk -v name="$name" "$PLAY_BACKUP_AWK" "$f" 2>/dev/null) || verdict=unreadable
+  [[ $verdict == ok ]] || { log error "play-recover: instance $name: backup.yaml does not prove boot.autostart \"false\" ($verdict)"; return 1; }
+}
+
+PLAY_RECOVER_NAMES=()
+play_recover_check_instances() { # the names in clean-stop.used.json plus every directory of the pool; all must pass. Sets PLAY_RECOVER_NAMES
+  local used=$DATA_REAL/clean-stop.used.json base=$INCUS_DIR/storage-pools/default/containers entry name bad=0
+  local -A seen=()
+  PLAY_RECOVER_NAMES=()
+  if [[ -e $used || -L $used ]]; then
+    if [[ -f $used && ! -L $used ]] && jq -e '.instances | type == "array" and all(.[]; (.name | type == "string"))' "$used" >/dev/null 2>&1; then
+      while IFS= read -r name; do seen[$name]=1; done < <(jq -r '.instances[].name' "$used")
+    else
+      log error "play-recover: clean-stop.used.json is not a record this controller wrote; the instance list cannot be proven"; bad=1
+    fi
+  fi
+  if [[ -e $base || -L $base ]]; then
+    if [[ -d $base && ! -L $base ]]; then
+      for entry in "$base"/* "$base"/.[!.]*; do
+        [[ -e $entry || -L $entry ]] || continue
+        if [[ -d $entry && ! -L $entry ]]; then seen[${entry##*/}]=1
+        else log error "play-recover: unexpected entry ${entry##*/} in the pool's containers directory (not a directory)"; bad=1; fi
+      done
+    else
+      log error "play-recover: $base is not a directory"; bad=1
+    fi
+  fi
+  while IFS= read -r name; do
+    [[ -n $name ]] || continue
+    if ! [[ $name =~ $PLAY_NAME_RE ]]; then log error "play-recover: instance name '$(printf '%s' "$name" | tr -c '[:alnum:]._-' '?' | head -c 64)' is outside the seat names"; bad=1; continue; fi
+    play_recover_backup_check "$base/$name" || bad=1
+    PLAY_RECOVER_NAMES+=("$name")
+  done < <(printf '%s\n' "${!seen[@]}" | LC_ALL=C sort)
+  [[ $bad -eq 0 ]]
+}
+
+play_recover_host_restore() { # play_host_off, from the records, and proof that no record is left
+  if [[ -e $RUN_DIR/play-host.json ]]; then
+    log info "play-recover: restoring the host from play-host.json (CPU energy profile, device-owner helper, udev rule, uhid, console keyboard, sysrq)"
+    play_host_off || { log error "play-recover: the host was not restored exactly; play-host.json is kept"; return 1; }
+  else
+    log info "play-recover: no play-host.json: the host was not changed, or was restored before"
+  fi
+  [[ ! -e $RUN_DIR/play-host.json && ! -L $RUN_DIR/play-host.json && ! -e $RUN_DIR/play-console.json && ! -L $RUN_DIR/play-console.json ]] ||
+    { log error "play-recover: a host record is still there after the restore"; return 1; }
+}
+
+cmd_play_recover() ( # owner mode, root, under the lock: prove that nothing runs, restore the host, write the clean-stop record
+  local reason bad=0 instances now existing=0
+  [[ $POLYSEAT_RELEASE_GATE == canary && $POLYSEAT_APPROVAL_MODE == owner && $# -eq 0 ]] ||
+    die $EX_BLOCKED "play-recover needs an owner-mode build and takes no arguments"
+  require_no_journal
+  read_pointer
+  [[ $PTR_CURRENT =~ $SHA_RE ]] || die $EX_BLOCKED "play-recover: no active runtime bundle is recorded; the clean stop is recorded against one"
+  reason=$(play_recovery_reason) || die $EX_BLOCKED "play-recover: nothing to recover; the last play session ended with a clean stop"
+  log info "play-recover: the last play session needs recovery ($reason); checking that nothing can still be running"
+  # Read-only from here to the line that says so.
+  play_recover_quiet && log info "play-recover: no incusd, no polyseatd, no process in a seat or plugin cgroup, no polyseat cgroup, no mount below the data directory" || bad=1
+  if play_recover_check_data; then play_recover_check_instances || bad=1; else bad=1; fi  # the pool is read from the validated directory only
+  play_recover_check_host || bad=1
+  [[ $bad -eq 0 ]] || die $EX_BLOCKED "play-recover: refused, a check failed (see above); nothing was changed"
+  log info "play-recover: instances ${PLAY_RECOVER_NAMES[*]:-(none)}: boot.autostart is \"false\" in every backup.yaml"
+  log info "play-recover: all checks passed; changing the host now"
+  play_recover_host_restore || die $EX_HEALTH "play-recover: the host could not be restored; no clean-stop record was written"
+  # Nothing may have started while the host was being put back; the record is the last thing that is written.
+  play_recover_quiet || die $EX_BLOCKED "play-recover: something is running now; no clean-stop record was written"
+  now=$(date -u +%s)
+  if persist_clean_stop_valid "$DATA_REAL/clean-stop.json"; then
+    existing=1
+    log info "play-recover: a valid clean-stop record is there already (the session stopped cleanly, only the host was not restored); kept"
+  else
+    instances=$(if (( ${#PLAY_RECOVER_NAMES[@]} )); then
+      printf '%s\n' "${PLAY_RECOVER_NAMES[@]}" | jq -R '{name: ., status: "Stopped", autostart: "false"}' | jq -sc .
+    else printf '[]\n'; fi) || die $EX_CORRUPT "play-recover: cannot build the instance list"
+    write_json_atomic "$DATA_REAL/clean-stop.json" "$(jq -n --arg sha "$PTR_CURRENT" --argjson now "$now" --argjson seats "$instances" \
+      --arg reason "$reason" '{schema: 1, archive_sha256: $sha, stopped_at: $now, instances: $seats, recovery: {
+        by: "polyseatctl play-recover", at: $now, reason: $reason,
+        why: "The play session ended without a clean stop. Verified before this record was written: no incusd, no polyseatd, no process in a seat or plugin cgroup, no polyseat cgroup, no mount below the persistent data directory; the host was restored from play-host.json; every instance (those of the last clean stop and every directory of the pool) has boot.autostart \"false\" in its backup.yaml."}}')" ||
+      die $EX_CORRUPT "play-recover: cannot write the clean-stop record"
+    persist_clean_stop_valid "$DATA_REAL/clean-stop.json" || die $EX_CORRUPT "play-recover: the record just written is not accepted by the next start; it is kept for inspection"
+    log info "play-recover: clean-stop record written for ${#PLAY_RECOVER_NAMES[@]} instance(s)"
+  fi
+  # The watchdog's .reason and the session's records. The reason survives as a note for the card (play-last-end.json).
+  # shellcheck disable=SC2086  # PLAY_RECORDS is a fixed word list
+  play_records_remove play-recover $PLAY_RECORDS polyseatd-status.json polyseatd-status.json.new "${CANARY_SESSION##*/}.reason" ||
+    die $EX_BLOCKED "play-recover: the clean-stop record is written, but a session record could not be removed; run play-recover again after looking at it"
+  play_last_end_write "$reason" false true || log warn "play-recover: cannot record how the session ended"
+  log info "play-recover: done; a new session can be started"
+  printf 'recovered after %s: host restored, clean-stop record %s; a new session can be started\n' "$reason" "$([[ $existing -eq 1 ]] && echo kept || echo written)"
+)
 
 # --------------------------------------------------------- transaction ----
 # Only a service that was running is restarted after a switch/restore. Starting an
@@ -4528,6 +4864,7 @@ usage: polyseatctl COMMAND [args]
              polyseatd-play --approve (polyseatd builds and runs seats with keyboard, mouse and gamepads; up to 6 h)
  owner mode: play-start (verify, stage, approve and launch a session from the files on the flash; no token)
              play-stop [--wait SECONDS] | play-status (aliases of polyseatd-stop/-status, no token)
+             play-recover (after a session ended without a clean stop: prove nothing runs, restore the host, record it)
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
 EOF
@@ -4559,7 +4896,7 @@ main() {
     config-get) cmd_config_get; return ;;
     stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke | seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session | steam-session-pin | \
     steam-session-status | steam-session-stop | persist-smoke | daemon-stage | polyseatd-session | polyseatd-play | \
-    polyseatd-status | polyseatd-stop | play-start | play-stop | play-status) ;;
+    polyseatd-status | polyseatd-stop | play-start | play-stop | play-status | play-recover) ;;
     *) usage ;;
   esac
   require_mutation_allowed "$cmd" "${args[@]}"
@@ -4582,6 +4919,8 @@ main() {
       play-stop) cmd_play_stop "${args[@]}"; return ;;
       # A second click must be refused at once, not queued behind the running session for two minutes.
       play-start) play_lock_free || die $EX_PENDING "a play session or another controller operation is already running" ;;
+      # Nothing is recovered under a live session: the lock is the first proof that none runs (the checks are the rest).
+      play-recover) play_lock_free || die $EX_PENDING "a play session or another controller operation is running; nothing is recovered while the lock is held" ;;
     esac
   fi
   ensure_state_dirs
@@ -4607,6 +4946,7 @@ main() {
     polyseatd-session) cmd_polyseatd_session "${args[@]}" ;;
     polyseatd-play) cmd_polyseatd_play "${args[@]}"; owner_session_end $? ;;
     play-start) cmd_play_start "${args[@]}" ;;
+    play-recover) cmd_play_recover "${args[@]}" ;;
     start)
       require_no_journal
       read_pointer
