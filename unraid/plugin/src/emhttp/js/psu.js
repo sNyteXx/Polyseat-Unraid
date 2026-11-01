@@ -52,6 +52,7 @@
       case 'stop': return 'STOP';
       case 'play_stop': return 'STOP';
       case 'play_recover': return 'WIEDERHERSTELLEN';
+      case 'workloads_stop': return 'STOP WORKLOADS';
       case 'restart': return 'RESTART';
       case 'config_reset': return 'RESET';
       default: return '';
@@ -152,6 +153,33 @@
       /* only an abnormal end that the controller says needs recovery, and only where an admin's click may approve it */
       recover: owner && state === 'needs-recovery'
     };
+  };
+
+  /* resp is the API reply of action=workloads: data is null in a build without the workloads daemon. Mirrors
+     psu_workloads_view() in lib.php. */
+  PSU.workloadsView = function (resp) {
+    var states = {
+      stopped: ['Stopped', 'muted'], starting: ['Starting', 'warn'], running: ['Running', 'ok'], degraded: ['Degraded', 'warn'],
+      stopping: ['Stopping', 'warn'], failed: ['Failed', 'crit'], orphaned: ['Daemon without supervisor', 'crit']
+    };
+    if (!resp || !resp.ok) { return { available: true, text: 'Workloads status unavailable', cls: 'warn', instances: [], violations: [], note: '' }; }
+    var d = resp.data;
+    if (!d) { return { available: false, text: 'Not in this build', cls: 'muted', instances: [], violations: [], note: '' }; }
+    var st = states[d.state] || states.stopped;
+    var text = st[0], cls = st[1];
+    if (d.state === 'running' && d.policy_ok === false) { text = 'Running, outside the policy'; cls = 'crit'; }
+    return { available: true, text: text, cls: cls, state: d.state, enabled: !!d.enabled, instances: Array.isArray(d.instances) ? d.instances : [],
+             violations: Array.isArray(d.violations) ? d.violations : [], note: d.note || '', cleanStop: d.clean_stop };
+  };
+
+  /* Which Workloads-card buttons may be pressed; the controller and lib.php are the guards. The daemon starts where an admin's
+     click is the approval; stop is open while anything of it may run, including a daemon whose supervisor is gone. */
+  PSU.workloadsButtons = function (status, resp) {
+    var off = { start: false, stop: false };
+    if (!status || status.release_gate === 'closed' || status.approval_mode !== 'owner' || !resp || !resp.ok || !resp.data) { return off; }
+    var state = resp.data.state;
+    return { start: state === 'stopped' || state === 'failed',
+             stop: state === 'starting' || state === 'running' || state === 'degraded' || state === 'orphaned' };
   };
 
   PSU.errorText = function (resp) {
@@ -277,6 +305,28 @@
     }
   }
 
+  function paintWorkloads(scope, resp) {
+    var v = PSU.workloadsView(resp);
+    var card = scope.querySelector('[data-bind="workloads-card"]');
+    if (card) { card.hidden = !v.available; }
+    var pills = scope.querySelectorAll('[data-bind="workloads-pill"]');
+    for (var i = 0; i < pills.length; i++) { setPill(pills[i], v); }
+    setText(scope, 'workloads-note', v.note || (v.violations.length ? v.violations.join('; ') : ''));
+    var body = scope.querySelector('[data-bind="workloads-instances"]');
+    if (!body) { return; }
+    body.textContent = '';
+    if (!v.instances.length) {
+      body.appendChild(h('tr', {}, [h('td', { colspan: '3', class: 'psu-muted', text: v.state === 'stopped' ? 'Not running.' : 'No instances.' })]));
+    }
+    v.instances.forEach(function (inst) {
+      body.appendChild(h('tr', {}, [
+        h('td', { 'data-label': 'Instance', text: inst.name }),
+        h('td', { 'data-label': 'State', text: inst.status + (inst.autostart ? ' (autostart)' : '') }),
+        h('td', { 'data-label': 'Address', text: (inst.ips && inst.ips.length) ? inst.ips.join(', ') : '-' })
+      ]));
+    });
+  }
+
   function paintMetrics(scope, m) {
     if (!m) { return; }
     var memUsed = m.memory.total_kb - m.memory.available_kb;
@@ -299,11 +349,12 @@
     var timer = null;
     function tick() {
       if (document.hidden) { return; }
-      Promise.all([PSU.api('status'), PSU.api('metrics'), PSU.api('play')]).then(function (r) {
+      Promise.all([PSU.api('status'), PSU.api('metrics'), PSU.api('play'), PSU.api('workloads')]).then(function (r) {
         if (r[0].ok) { paintStatus(scope, r[0].data); cfg.gate = r[0].data.release_gate; scope.dispatchEvent(new CustomEvent('psu:status', { detail: r[0].data })); }
         else { paintStatus(scope, null); }
         if (r[1].ok) { paintMetrics(scope, r[1].data); }
         paintPlay(scope, r[2]);
+        paintWorkloads(scope, r[3]);
       });
     }
     document.addEventListener('visibilitychange', function () { if (!document.hidden) { tick(); } });
@@ -408,15 +459,18 @@
     var logState = { which: 'controller', lines: '200' };
     var lastStatus = null;
     var lastPlay = null;
+    var lastWorkloads = null;
 
     function refreshAll() {
-      Promise.all([PSU.api('status'), PSU.api('metrics'), PSU.api('list'), PSU.api('play')]).then(function (r) {
+      Promise.all([PSU.api('status'), PSU.api('metrics'), PSU.api('list'), PSU.api('play'), PSU.api('workloads')]).then(function (r) {
         if (r[0].ok) { lastStatus = r[0].data; paintStatus(scope, lastStatus); cfg.gate = lastStatus.release_gate; applyLocks(); }
         else { paintStatus(scope, null); }
         if (r[1].ok) { paintMetrics(scope, r[1].data); }
         lastPlay = r[3];
+        lastWorkloads = r[4];
         renderBundles(scope, r[2], lastStatus);
         paintPlay(scope, r[3]);
+        paintWorkloads(scope, r[4]);
         applyLocks();
       });
     }
@@ -442,6 +496,11 @@
       /* Wiederherstellen exists on the card only while an abnormal end needs it */
       var rec = scope.querySelector('[data-do="play-recover"]');
       if (rec) { rec.hidden = !play.recover; }
+      var wl = PSU.workloadsButtons(lastStatus, lastWorkloads);
+      Object.keys(wl).forEach(function (k) {
+        var b = scope.querySelector('[data-do="workloads-' + k + '"]');
+        if (b) { b.disabled = !wl[k]; }
+      });
     }
 
     function loadLogs() {
@@ -498,6 +557,17 @@
           'kein Prozess in einem Seat oder in den Polyseat-cgroups, keine Mounts unter dem Datenverzeichnis) und dass keine Instanz ' +
           'automatisch startet. Erst danach wird der Host aus den Aufzeichnungen zurückgesetzt (Konsole, SysRq, CPU-Energieprofil, udev) ' +
           'und der saubere Stopp für Incus eingetragen. Schlägt eine Prüfung fehl, bleibt alles unverändert.' });
+    }); }
+    var ws = scope.querySelector('[data-do="workloads-start"]');
+    if (ws) { ws.addEventListener('click', function () {
+      runAction(scope, 'Start workloads', 'workloads_start', {}, '', { alwaysConfirm: true,
+        body: 'Start the permanent workloads daemon. Its containers that are set to autostart start with it; nothing else changes.' });
+    }); }
+    var wp = scope.querySelector('[data-do="workloads-stop"]');
+    if (wp) { wp.addEventListener('click', function () {
+      runAction(scope, 'Stop workloads', 'workloads_stop', {}, '', { danger: true,
+        body: 'Stop the workloads daemon: every container is shut down cleanly (up to 2 minutes each), then Incus stops. ' +
+          'The services in those containers are unavailable until the daemon is started again.' });
     }); }
     var rb = scope.querySelector('[data-do="rollback"]');
     if (rb) { rb.addEventListener('click', function () { runAction(scope, 'Roll back', 'rollback', {}, '', { danger: true, body: 'Return to the previous runtime bundle.' }); }); }

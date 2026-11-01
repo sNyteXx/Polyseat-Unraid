@@ -50,6 +50,23 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
      <div class="psu-meter"><div class="psu-meter-head"><span>Memory</span><span data-bind="mem">-</span></div><div class="psu-bar"><i data-meter="mem"></i></div></div>
      <div class="psu-meter"><div class="psu-meter-head"><span>Data directory</span><span data-bind="disk">-</span></div><div class="psu-bar"><i data-meter="disk"></i></div></div>
     </div>
+    <div class="psu-card" data-bind="workloads-card"><h3>Workloads</h3>
+     <div class="psu-actions" style="margin-bottom:10px">
+      <span class="psu-pill muted" data-bind="workloads-pill">...</span>
+     </div>
+     <table class="psu-table">
+      <thead><tr><th>Instance</th><th>State</th><th>Address</th></tr></thead>
+      <tbody data-bind="workloads-instances"></tbody>
+     </table>
+     <p class="psu-muted" data-bind="workloads-note"></p>
+     <div class="psu-actions" style="margin-top:12px">
+      <button type="button" class="psu-btn primary" data-do="workloads-start" disabled>Start</button>
+      <button type="button" class="psu-btn danger" data-do="workloads-stop" disabled>Stop</button>
+     </div>
+     <p class="psu-muted">The permanent Incus for your own containers, separate from play sessions. It starts at array start when
+      enabled in Settings, Workloads, and stops cleanly (every container, up to 2 minutes each) before the array stops.
+      Containers are created with the incus client, see docs/workloads.md.</p>
+    </div>
     <div class="psu-card"><h3>Isolation</h3>
      <dl class="psu-kv">
       <dt>Network</dt><dd>No management listener, no bridge or firewall changes</dd>
@@ -107,7 +124,7 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
    <div class="psu-card"><h3>Logs</h3>
     <div class="psu-actions" style="margin-bottom:10px">
      <select class="psu-input" style="width:auto" data-bind="log-which" aria-label="Log source">
-      <option value="controller">Controller</option><option value="incusd">Incus daemon</option></select>
+      <option value="controller">Controller</option><option value="incusd">Incus daemon (play)</option><option value="workloads">Incus daemon (workloads)</option></select>
      <select class="psu-input" style="width:auto" data-bind="log-lines" aria-label="Lines">
       <option value="100">100 lines</option><option value="200" selected>200 lines</option><option value="500">500 lines</option></select>
      <button type="button" class="psu-btn" data-action="logs-refresh">Refresh</button>

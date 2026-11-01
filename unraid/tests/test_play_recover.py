@@ -596,7 +596,7 @@ class DataAndGateTests(Fixture):
         early = main[:main.index("  acquire_lock\n")]
         self.assertIn("play-recover) play_lock_free ||", early)
         self.assertIn('play-recover) cmd_play_recover "${args[@]}" ;;', main[main.index("  acquire_lock\n"):])
-        self.assertIn("play-recover)", main[:main.index("  require_mutation_allowed")])  # in the verb list
+        self.assertIn("play-recover | \\\n", main[:main.index("  require_mutation_allowed")])  # in the verb list
 
 
 class StateTests(Fixture):

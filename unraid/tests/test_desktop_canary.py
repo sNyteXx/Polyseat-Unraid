@@ -1336,7 +1336,7 @@ class PlayTests(unittest.TestCase):
         calls = sorted((d / "calls").read_text().split("\n")[:-1])
         self.assertEqual(calls, ["-n -12 -p 100", "-n -12 -p 101", "-n -12 -p 200"])
         launch = re.search(r"^canary_launch\(\) \{.*?^\}", CTL.read_text(), re.MULTILINE | re.DOTALL).group(0)
-        self.assertIn('if [[ $CANARY_OPERATION -ne 8 ]]; then renice -n 19 -p "$BASHPID"', launch)
+        self.assertIn('if [[ $CANARY_OPERATION -ne 8 && $CANARY_OPERATION -ne 9 ]]; then renice -n 19 -p "$BASHPID"', launch)
 
     def test_only_a_play_token_may_cover_six_hours(self):
         app = DesktopApprovalTests("test_stage_and_smoke_are_bound_to_bundle_and_image")

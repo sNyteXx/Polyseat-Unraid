@@ -193,6 +193,20 @@ init_paths() {
   OWNER_DAEMON="$OWNER_DAEMON_DIR/polyseat-daemon.tar"
   OWNER_APPROVAL="$RUN_DIR/owner-approval.json"
   CTL_SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
+  # Per Incus instance: a second daemon (the permanent workloads one, see wl_enter) points these at its own files.
+  INCUS_CLIENT_DIR="$RUN_DIR/client"
+  INCUSD_LOG="$LOG_DIR/incusd.log"
+  # What a second daemon and a play stop share (see wl_shared_rmdir).
+  WL_CLAIM="$RUN_DIR/workloads.claim"
+  WL_SHARED_LOCK="$RUN_DIR/lxc-shared.lock"
+  # The permanent workloads daemon (see the workloads section): its own files next to play's, never shared.
+  WL_PIDFILE="$RUN_DIR/workloads-incusd.pid"
+  WL_LOCKFILE="$RUN_DIR/workloads.lock"
+  WL_STOPFILE="$RUN_DIR/workloads-stop"
+  WL_STATUS="$RUN_DIR/workloads-status.json"
+  WL_CLIENT_DIR="$RUN_DIR/workloads-client"
+  WL_LOG="$LOG_DIR/workloads-incusd.log"
+  WL_OUT="$LOG_DIR/workloads-incusd.out"
   # Every reader of the approval's end (budget, watchdog, session loops) looks at $CANARY_APPROVAL; in owner mode that
   # is the host-local file, so none of them needs to know the difference. The signed token is not consulted at all.
   if [[ $POLYSEAT_APPROVAL_MODE == owner ]]; then CANARY_APPROVAL=$OWNER_APPROVAL; fi
@@ -333,7 +347,10 @@ canary_config_set_allowed() { # KEY=VALUE... : the settings a canary build may c
       PLAY_CPU_PERCENT=* | PLAY_MEMORY_MB=* | PLAY_IDLE_STOP_MINUTES=* | LIBRARY_PATH=* | PLAY_SESSION_HOURS=* | \
       PLAY_CPU_PERFORMANCE=* | PLAY_SEAT_CPUS=*)
         schema_validate "${arg%%=*}" "${arg#*=}" || die $EX_BLOCKED "canary refuses an invalid play setting" ;;
-      *) die $EX_BLOCKED "canary accepts only fixed DATA_DIR, disabled SERVICE, LSM acknowledgement and the play settings" ;;
+      # The permanent workloads daemon's settings (owner builds); again the schema's values and nothing else.
+      WORKLOADS_ENABLED=* | WORKLOADS_INSTANCES=* | WORKLOADS_MEMORY_MB=* | WORKLOADS_CPUS=*)
+        schema_validate "${arg%%=*}" "${arg#*=}" || die $EX_BLOCKED "canary refuses an invalid workloads setting" ;;
+      *) die $EX_BLOCKED "canary accepts only fixed DATA_DIR, disabled SERVICE, LSM acknowledgement and the play and workloads settings" ;;
     esac
   done
 }
@@ -514,6 +531,9 @@ require_mutation_allowed() {
         # Recovery after an abnormal end writes the Incus clean-stop record and puts the host back: the admin's click is its
         # approval, and a signed build leaves it to the operator on the console.
         play-recover) [[ $POLYSEAT_APPROVAL_MODE == owner ]] || die $EX_BLOCKED "play-recover exists only in an owner-mode build" ;;
+        # The permanent workloads daemon is an owner-mode feature too; its own settings and guards replace the token.
+        workloads-start | workloads-stop | workloads-status | workloads-recover | workloads-run)
+          [[ $POLYSEAT_APPROVAL_MODE == owner ]] || die $EX_BLOCKED "the workloads daemon exists only in an owner-mode build" ;;
         # Owner mode: the admin's click (same-origin POST, CSRF token) is the approval of a settings change, not a
         # session; the canary whitelist still applies. boot only verifies and logs there (cmd_boot).
         config-set | config-reset | boot)
@@ -1067,9 +1087,21 @@ remove_lxc_rootfs_mount() {
   for f in $CANARY_DENIED_TOOLS nft; do rm -f -- "$(lxc_mount_real "$CANARY_DENY_DIR/$f")"; done
   rmdir -- "$(lxc_mount_real "$CANARY_DENY_DIR")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks")" 2>/dev/null || true
-  rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")" 2>/dev/null || true
+  # liblxc's rootfs mount point is compiled in, so the permanent workloads daemon uses this very directory (inside its own
+  # private mount namespace). While that daemon holds its claim the directory stays, and with it its parent.
+  wl_shared_rmdir "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")"
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/root")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT")" 2>/dev/null || true
+}
+
+wl_claimed() { [[ -e $WL_CLAIM || -L $WL_CLAIM ]]; }
+
+wl_shared_rmdir() { # dir : the shared LXC mount point goes away with a play stop unless the workloads daemon has claimed it
+  if [[ -d $RUN_DIR && ! -L $RUN_DIR ]]; then
+    ( flock -w 10 7 && ! wl_claimed && rmdir -- "$1" ) 7> "$WL_SHARED_LOCK" 2>/dev/null || true
+  else
+    rmdir -- "$1" 2>/dev/null || true
+  fi
 }
 
 # The LXC nvidia mount hook runs as the container's root INSIDE its user namespace (host uid SUBID_START), so it
@@ -1235,10 +1267,12 @@ daemon_programs_check() { # resolved slot
   [[ -z $missing ]] || { log error "required daemon programs missing on PATH:$missing"; return 1; }
 }
 
-svc_pid() {
-  local pid cmd
-  [[ -f $PIDFILE && ! -L $PIDFILE ]] || return 1
-  pid=$(cat -- "$PIDFILE")
+svc_pid() { incusd_pid "$PIDFILE"; }
+
+incusd_pid() { # pid file : the pid it names, if that is one of our incusd processes
+  local pid cmd file=$1
+  [[ -f $file && ! -L $file ]] || return 1
+  pid=$(cat -- "$file")
   [[ $pid =~ ^[0-9]+$ ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || return 1
@@ -1252,14 +1286,17 @@ run_incus() { # args...
   [[ -n $INCUS_DIR && $INCUS_DIR == "$DATA_REAL/incus" ]] || { log error "refusing to run incus without a validated INCUS_DIR"; return 1; }
   if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
     canary_command_allowed "$@" || { log error "canary: Incus command outside the fixed CPU-only path"; return 1; }
-    canary_watchdog_check || { log error "canary: expiry supervisor is not healthy"; return 1; }
+    # The workloads daemon (operation 9) is permanent on purpose: it has no expiry supervisor to be healthy.
+    if [[ $CANARY_OPERATION -ne 9 ]]; then
+      canary_watchdog_check || { log error "canary: expiry supervisor is not healthy"; return 1; }
+    fi
     if [[ $CANARY_HEALTH_DEADLINE -gt 0 ]]; then
       remaining=$((CANARY_HEALTH_DEADLINE - $(canary_monotonic_seconds)))
       [[ $remaining -gt 0 ]] || return 1
       [[ $limit -le $remaining ]] || limit=$remaining
     fi
   fi
-  env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" INCUS_CONF="$RUN_DIR/client" \
+  env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" INCUS_CONF="$INCUS_CLIENT_DIR" \
     timeout "$limit" "$CURRENT/payload/bin/incus" "$@"
 }
 
@@ -1275,6 +1312,21 @@ canary_command_allowed() {
     "query /1.0/instances/$STEAM_INSTANCE/state" | "query /1.0/instances/$PERSIST_INSTANCE/state")
       [[ $CANARY_OPERATION -ne 1 ]] && return 0 ;;
   esac
+  if [[ $CANARY_OPERATION -eq 9 ]]; then
+    # The permanent workloads daemon: the bootstrap of a fresh workspace, queries, and the stops of its stop sequence.
+    # Instances are created and configured by the operator with the incus client (docs/workloads.md), never by the
+    # controller: it never starts, deletes, execs into or changes the devices of one.
+    case "$*" in
+      "storage create $WL_POOL dir source=$INCUS_DIR/storage-pools/$WL_POOL" | \
+      "profile device add default root disk path=/ pool=$WL_POOL" | \
+      "query /1.0/storage-pools/$WL_POOL" | 'query /1.0/profiles/default' | 'query /1.0/instances?recursion=2' | \
+      "admin shutdown --timeout $WL_SHUTDOWN_TIMEOUT") return 0 ;;
+    esac
+    [[ $# -eq 4 && $1 == stop && $2 =~ $PLAY_NAME_RE && "$3 $4" == "--timeout $WL_STOP_TIMEOUT" ]] && return 0
+    [[ $# -eq 5 && $1 == stop && $2 =~ $PLAY_NAME_RE && "$3 $4 $5" == '--force --timeout 10' ]] && return 0
+    [[ $# -eq 4 && $1 == config && $2 == set && $3 =~ $PLAY_NAME_RE && $4 == boot.autostart=false ]] && return 0
+    return 1
+  fi
   if [[ $CANARY_OPERATION -eq 8 ]]; then
     case "$*" in
       "storage create default dir source=$INCUS_DIR/storage-pools/default" | \
@@ -1548,15 +1600,28 @@ canary_cgroup_remove() { # one exact plugin-owned cgroup and its descendants
 
 # After both groups are gone no canary code may run anywhere: neither a bundled binary (incusd, its forks,
 # the incus CLI) nor the supervisor/witness/launcher shells, which are recognised by their exact argv0.
+# Two daemons of the one runtime can run side by side (play and the permanent workloads one): each process only looks
+# for its own instance's leftovers. What belongs to the other instance's cgroup (CANARY_OTHER_CGROUP, a prefix of the
+# group name) is that instance's business; anything outside both groups is a leak of either.
+CANARY_OTHER_CGROUP="polyseat-unraid-workloads"
+
 canary_leak_check() {
-  local proc pid exe found="" element
+  local proc pid exe found="" element cgroup
   local -a argv
   [[ $SLOTS == /*/slots ]] || { log error "canary: leak check without a valid slot root"; return 1; }
-  for proc in /proc/[0-9]*; do
-    pid=${proc#/proc/}
+  for proc in "${CANARY_PROC:-/proc}"/[0-9]*; do
+    pid=${proc##*/}
     [[ $pid == "$$" || $pid == "$BASHPID" ]] && continue
+    { cgroup=$(< "$proc/cgroup"); } 2>/dev/null || cgroup=""
+    [[ $cgroup == "0::/$CANARY_OTHER_CGROUP"* ]] && continue
     exe=$(readlink -- "$proc/exe" 2>/dev/null) || exe=""
     exe=${exe% (deleted)}
+    # The permanent daemon is administered with the bundled incus client from a shell. Such a client is no leftover of
+    # either daemon: this one's own (operation 9), or, for the play side, one whose INCUS_DIR is the workloads workspace.
+    if [[ $exe == "$SLOTS"/*/payload/bin/incus ]]; then
+      [[ $CANARY_OPERATION -eq 9 ]] && continue
+      { tr '\0' '\n' < "$proc/environ" | grep -qxF "INCUS_DIR=$ROOT$WL_DATA_DIR/incus"; } 2>/dev/null && continue
+    fi
     if [[ -n $exe && $exe == "$SLOTS"/* ]]; then found+=" $pid"; continue; fi
     mapfile -d '' -t argv 2>/dev/null < "$proc/cmdline" || continue  # silence first: the process may be gone
     for element in "${argv[@]}"; do
@@ -1824,7 +1889,7 @@ CANARY_DENIED_TOOLS="modprobe insmod rmmod btrfs lvm zfs zpool qemu-system-x86_6
 canary_deny_tools_prepare() {
   local tool out dir
   dir=$(lxc_mount_real "$CANARY_DENY_DIR")
-  [[ -d $(lxc_mount_real "$LXC_STATE_PARENT") && ! -L $(lxc_mount_real "$LXC_STATE_PARENT") ]] || return 1
+  [[ -d $(dirname -- "$dir") && ! -L $(dirname -- "$dir") ]] || return 1
   [[ ! -e $dir && ! -L $dir ]] || return 1
   mkdir -m 0700 -- "$dir" || return 1
   for tool in $CANARY_DENIED_TOOLS; do
@@ -1963,13 +2028,19 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   # can reach it (Tower run 26). LXC takes that fallback whenever "/" has the type rootfs, which a bind of the root
   # keeps (run 27). In this daemon's own mount namespace only, the root becomes a small tmpfs holding binds of every
   # top-level entry (switch_root's trick), so "/" is no longer rootfs, and LXC can pivot again.
+  # The permanent workloads daemon (operation 9) needs the same switch for the same reason, with a directory of its own.
   [[ $CANARY_OPERATION -eq 8 ]] && switch_root=$(lxc_mount_real "$LXC_STATE_PARENT/root")
+  [[ $CANARY_OPERATION -eq 9 ]] && switch_root=$(lxc_mount_real "$WL_LXC_STATE/root")
   parent_mnt_ns=$(readlink /proc/self/ns/mnt) || return 1
   [[ $parent_mnt_ns =~ ^mnt:\[[0-9]+\]$ ]] || return 1
-  [[ ! -e $RUN_DIR/canary-emergency-stop ]] && canary_watchdog_check || return 1
+  # Operation 9 has no expiry supervisor: it is permanent, and its start is guarded by its own supervisor process.
+  if [[ $CANARY_OPERATION -ne 9 ]]; then
+    [[ ! -e $RUN_DIR/canary-emergency-stop ]] && canary_watchdog_check || return 1
+  fi
   # The bounded tests run their daemon at the lowest priority. Play does not: every seat process inherits it, and a
   # compositor at nice 19 loses the CPU to the game it composites, so the stream lags while the game is fine (run 30).
-  if [[ $CANARY_OPERATION -ne 8 ]]; then renice -n 19 -p "$BASHPID" >/dev/null || return 1; fi
+  # Neither does the workloads daemon: everything in its containers inherits it.
+  if [[ $CANARY_OPERATION -ne 8 && $CANARY_OPERATION -ne 9 ]]; then renice -n 19 -p "$BASHPID" >/dev/null || return 1; fi
   printf '%s\n' "$BASHPID" > "$CANARY_CGROUP/daemon/cgroup.procs" || return 1
   # The OUTER parent has the hard aggregate limits. Do NOT enable controllers
   # in its subtree: this daemon leaf then advertises no controllers to LXC.
@@ -1980,7 +2051,7 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   # Drop explicit kernel-module/raw-I/O privileges for the entire process tree.
   # shellcheck disable=SC2016  # launcher body must expand in its new namespaces
   exec setsid env -i PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
-    INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
+    INCUS_CONF="$INCUS_CLIENT_DIR" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
     INCUS_LXC_HOOK="$(lxc_mount_real "$LXC_HOOK_DIR")" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
     POLYSEAT_SWITCH_ROOT="$switch_root" \
     setpriv --bounding-set=-sys_module,-sys_rawio \
@@ -2040,7 +2111,7 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
       shift 2
       exec "$@"
     ' polyseat-canary-launch "$PIDFILE" "$parent_mnt_ns" "$slot_real/payload/bin/incusd" \
-      --group "" --logfile "$LOG_DIR/incusd.log" 9>&-
+      --group "" --logfile "$INCUSD_LOG" 9>&- 8>&-
 }
 
 # An incusd that is not ours. Helper processes of running containers (forklxc, forkexec, ...) carry the
@@ -2139,7 +2210,7 @@ svc_start() {
       INCUS_LXC_HOOK="$(lxc_mount_real "$LXC_HOOK_DIR")" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
       bash -c 'echo $$ > "$1"; shift; exec "$@"' polyseat-launch "$PIDFILE" \
       "$slot_real/payload/bin/incusd" --group "" --logfile "$LOG_DIR/incusd.log" \
-      > "$LOG_DIR/incusd.out" 2>&1 < /dev/null 9>&-
+      > "$LOG_DIR/incusd.out" 2>&1 < /dev/null 9>&- 8>&-
   ) &
   if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
     timeout=$CANARY_HEALTH_TIMEOUT
@@ -2758,9 +2829,11 @@ persist_mount_check() { # read-only: the dataset itself is mounted at its root, 
   (( avail >= PERSIST_MIN_FREE_KB )) || { log error "persist: only $avail KiB free on $PERSIST_DATASET"; return 1; }
 }
 
-persist_validate_data_dir() { # the fixed persistent workspace on the cache dataset; absent before the first run
-  local mount=$ROOT$PERSIST_MOUNT mode
-  DATA_REAL="$ROOT$PERSIST_DATA_DIR" INCUS_DIR="$ROOT$PERSIST_DATA_DIR/incus"
+persist_validate_data_dir() { persist_validate_dir "$PERSIST_DATA_DIR"; }
+
+persist_validate_dir() { # logical dir : a fixed persistent workspace on the cache dataset (play's, or the workloads one); absent before the first run
+  local dir=$1 mount=$ROOT$PERSIST_MOUNT mode
+  DATA_REAL="$ROOT$dir" INCUS_DIR="$ROOT$dir/incus"
   persist_mount_check || return 1
   # The pool root above is Unraid's (0777), but a mounted dataset root cannot be renamed or replaced, and below
   # it only root may change a name.
@@ -2769,7 +2842,7 @@ persist_validate_data_dir() { # the fixed persistent workspace on the cache data
     { log error "persist: $PERSIST_MOUNT must be root:root and writable by root only"; return 1; }
   [[ ! -e $DATA_REAL && ! -L $DATA_REAL ]] && return 0
   [[ -d $DATA_REAL && ! -L $DATA_REAL && $(stat -c '%u %g %a' -- "$DATA_REAL") == '0 0 711' ]] ||
-    { log error "persist: $PERSIST_DATA_DIR must be a root:root 0711 directory"; return 1; }
+    { log error "persist: $dir must be a root:root 0711 directory"; return 1; }
 }
 
 persist_clean_stop_valid() { # file : the record persist_state_prepare accepts: root-private, every instance stopped and not autostarting
@@ -4121,6 +4194,771 @@ cmd_play_recover() ( # owner mode, root, under the lock: prove that nothing runs
   printf 'recovered after %s: host restored, clean-stop record %s; a new session can be started\n' "$reason" "$([[ $existing -eq 1 ]] && echo kept || echo written)"
 )
 
+# -------------------------------------------------------------- workloads ----
+# Owner 2026-11-01: the owner's dev/services VM (UbuntuDev) moves into an Incus system container on Tower. That needs an
+# Incus that lives as long as the array does, separate from the play session's, which stays session-scoped under its own
+# cgroup with its memory floor and expiry. Owner-mode builds only. It is a second incusd of the SAME signed runtime, and
+# nothing is shared that one could trample in the other. Per instance:
+#   INCUS_DIR and pool    /mnt/cache/polyseat/workloads/incus, pool "workloads" (play: .../incus, pool "default")
+#   cgroup                polyseat-unraid-workloads: a cpuset and an optional memory cap. No oom group, swap or pids
+#                         limit, no watchdog, no expiry, no memory floor. cgroup.kill only as the last resort of a stop
+#   process files         $RUN_DIR/workloads-* and workloads-incusd.log; its own client config (INCUS_CONF)
+#   LXC state             /var/lib/polyseat-lxc-workloads: switch_root directory, hooks, deny-tools
+#   lock                  $RUN_DIR/workloads.lock, held by its supervisor for the daemon's life (play holds the
+#                         controller lock for its whole session; workloads-* never wait behind it)
+# Shared on purpose: the runtime slot, the subuid block, and liblxc's compiled-in rootfs mount point
+# /var/lib/polyseat-lxc/rootfs, an empty directory each daemon uses inside its own private mount namespace. Its removal by
+# a play stop is what the claim file prevents (wl_shared_rmdir), and an activation is refused while workloads run.
+# One polyseatctl process serves exactly one instance: wl_enter points the per-instance globals of the play code (cgroup,
+# pid file, client config, log, deny tools, hook directory, data directory) at the workloads set, so run_incus,
+# canary_launch, canary_cgroup_stop and the leak check serve both without a copy of them.
+WL_CGROUP_ROOT="/sys/fs/cgroup"
+WL_CGROUP="$WL_CGROUP_ROOT/polyseat-unraid-workloads"
+WL_DATA_DIR="$PERSIST_MOUNT/workloads"
+WL_POOL="workloads"
+WL_LXC_STATE="/var/lib/polyseat-lxc-workloads"
+# What docker and tailscale need inside the container and the host does not load by itself (read-only check on Tower,
+# 2026-11-01): the host loads exactly these before the daemon starts, and never unloads them (they are shared with the host).
+WL_MODULES="nft_chain_nat nft_masq nft_nat nft_ct nft_compat overlay"
+WL_MODPROBE="/sbin/modprobe"
+WL_SYS_MODULE="/sys/module"
+WL_NIC_NAMES="enp1s0 eth0"
+WL_STOP_TIMEOUT=120      # per instance, the clean stop (incus stop --timeout)
+WL_SHUTDOWN_TIMEOUT=60   # incus admin shutdown --timeout
+WL_HEALTH_TIMEOUT=60
+WL_GUARD_EVERY=5         # supervisor rounds (2 s each) between two policy checks
+WL_LOG_MAX_BYTES=8388608 # /var/log is a 128 MiB tmpfs and this daemon never ends: a log is rotated at this size
+WL_MAX_INSTANCES=16
+WL_STATE=""
+WL_POLICY_OK=true
+WL_VIOLATIONS='[]'
+WL_INSTANCES='[]'
+WL_LAST_VIOLATION=""
+WL_SINCE=0
+WL_CPUSET=""
+WL_MEMORY_MAX="max"
+WL_SEATS='[]'
+WL_UNCLEAN=0
+
+wl_enter() { # this process serves the workloads daemon, not play's
+  CANARY_OPERATION=9
+  CANARY_CGROUP=$WL_CGROUP
+  # The shared teardown (canary_cgroup_stop) removes a watchdog group too. This daemon has none, and play's is not ours to
+  # touch: pointing the name at the daemon's own group makes that second removal a no-op.
+  CANARY_WATCHDOG_CGROUP=$WL_CGROUP
+  CANARY_OTHER_CGROUP="polyseat-unraid-canary"
+  CANARY_DENY_DIR="$WL_LXC_STATE/deny-tools"
+  LXC_HOOK_DIR="$WL_LXC_STATE/hooks"
+  PIDFILE=$WL_PIDFILE
+  INCUS_CLIENT_DIR=$WL_CLIENT_DIR
+  INCUSD_LOG=$WL_LOG
+  DATA_REAL="$ROOT$WL_DATA_DIR" INCUS_DIR="$ROOT$WL_DATA_DIR/incus"
+}
+
+wl_log_enable() {
+  mkdir -p -- "$RUN_DIR" "$LOG_DIR" || die $EX_BLOCKED "cannot create runtime directories"
+  LOG_ENABLED=1
+}
+
+wl_supervised() { [[ -e $WL_LOCKFILE ]] && ! flock -n -- "$WL_LOCKFILE" true 2>/dev/null; }
+
+wl_daemon_pid() { incusd_pid "$WL_PIDFILE"; }
+
+wl_running() { # a supervisor, a daemon or a cgroup: anything that a change of the runtime or of its settings would hit
+  wl_supervised || wl_daemon_pid >/dev/null 2>&1 || [[ -e $WL_CGROUP || -L $WL_CGROUP ]]
+}
+
+wl_claim() { # manifest : the claim and the shared mount point, under the lock a play stop's removal takes as well
+  ( flock -w 10 7 || exit 1
+    (umask 077; : > "$WL_CLAIM") || exit 1
+    ensure_lxc_rootfs_mount "$1" ) 7> "$WL_SHARED_LOCK"
+}
+
+wl_claim_release() { # nothing of the daemon is left: the shared mount point may go with the next play stop
+  [[ -d $RUN_DIR && ! -L $RUN_DIR ]] || return 0
+  ( flock -w 10 7 && rm -f -- "$WL_CLAIM" ) 7> "$WL_SHARED_LOCK" 2>/dev/null || true
+}
+
+wl_lxc_prepare() { # the directories only this daemon uses; the shared mount point comes with wl_claim
+  local parent
+  parent=$(lxc_mount_real "$WL_LXC_STATE")
+  [[ ! -L $parent && ! -L $parent/root && ! -L $parent/hooks ]] || { log error "workloads: refusing a symlinked LXC state directory"; return 1; }
+  (umask 022; mkdir -p -- "$parent/root" "$parent/hooks") || { log error "workloads: cannot create $WL_LXC_STATE"; return 1; }
+}
+
+wl_lxc_remove() { # exactly what wl_lxc_prepare and canary_deny_tools_prepare made; nothing recursive
+  local f dir
+  dir=$(lxc_mount_real "$WL_LXC_STATE")
+  [[ -d $dir && ! -L $dir ]] || return 0
+  for f in $CANARY_DENIED_TOOLS nft; do rm -f -- "$dir/deny-tools/$f"; done
+  rmdir -- "$dir/deny-tools" "$dir/hooks" "$dir/root" "$dir" 2>/dev/null || true
+}
+
+# ---- settings
+wl_instances_setting() { # the instance names the owner allows, one per line; fails on anything that is not a clean list
+  local value name names=" " n=0
+  value=$(cfg_get WORKLOADS_INSTANCES "")
+  schema_validate WORKLOADS_INSTANCES "$value" || return 1
+  for name in $value; do
+    [[ $name =~ $PLAY_NAME_RE && $names != *" $name "* ]] || return 1
+    names+="$name "
+    n=$((n + 1))
+    printf '%s\n' "$name"
+  done
+  (( n <= WL_MAX_INSTANCES ))
+}
+
+wl_limits() { # the settings as cgroup values: WL_CPUSET (the cpuset the group gets) and WL_MEMORY_MAX ("max" or bytes)
+  local cpus mb parent ids
+  cpus=$(cfg_get WORKLOADS_CPUS "") mb=$(cfg_get WORKLOADS_MEMORY_MB 0)
+  schema_validate WORKLOADS_CPUS "$cpus" && schema_validate WORKLOADS_MEMORY_MB "$mb" || return 1
+  parent=$(< "$WL_CGROUP_ROOT/cpuset.cpus.effective") || return 1
+  [[ $parent =~ ^[0-9]+([,-][0-9]+)*$ ]] || return 1
+  WL_CPUSET=$parent
+  if [[ -n $cpus ]]; then
+    ids=$(play_cpu_ids "$cpus" "$parent") || return 1
+    WL_CPUSET=$(play_cpu_list <<< "$ids")
+  fi
+  WL_MEMORY_MAX=max
+  (( 10#$mb == 0 )) || WL_MEMORY_MAX=$(( 10#$mb * 1048576 ))
+}
+
+# ---- the Incus policy
+# Everything in the workloads Incus is either the owner's listed instances in exactly the shape below, or refused.
+# A violation is reported by wl_policy_check (nothing is changed) and acted on by wl_policy_enforce.
+wl_policy_check() { # read-only: one line per violation ("global: ..." or "instance NAME: ..."); nothing when all is in policy
+  local server projects profiles instances pools networks listed
+  listed=$(wl_instances_setting | tr '\n' ' ') || { printf 'global: WORKLOADS_INSTANCES is not usable\n'; return 0; }
+  server=$(INCUS_CMD_TIMEOUT=5 run_incus query /1.0) || return 1
+  projects=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/projects?recursion=1') || return 1
+  profiles=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/profiles?recursion=1') || return 1
+  instances=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || return 1
+  pools=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/storage-pools?recursion=1') || return 1
+  networks=$(INCUS_CMD_TIMEOUT=5 run_incus query '/1.0/networks?recursion=1') || return 1
+  jq -rn --argjson server "$server" --argjson projects "$projects" --argjson profiles "$profiles" \
+    --argjson instances "$instances" --argjson pools "$pools" --argjson networks "$networks" \
+    --arg source "$INCUS_DIR/storage-pools/$WL_POOL" --arg pool "$WL_POOL" --arg parent "$STEAM_NIC_PARENT" \
+    --arg nicnames "$WL_NIC_NAMES" --arg modules "$WL_MODULES" --arg listed "$listed" --arg namere "$PLAY_NAME_RE" '
+    def meta: if type == "object" and has("metadata") and has("type") then .metadata else . end;
+    def root: . == {type: "disk", path: "/", pool: $pool};
+    def abspath: type == "string" and test("^/[^/]+(/[^/]+)*$") and (test("(^|/)\\.\\.?(/|$)") | not);
+    def nic: .type == "nic" and .nictype == "bridged" and .parent == $parent and
+      (.name | IN(($nicnames | split(" "))[])) and
+      (.hwaddr | type == "string" and test("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")) and
+      ((keys - ["type", "nictype", "parent", "name", "hwaddr"]) | length == 0);
+    def tun: . == {type: "unix-char", source: "/dev/net/tun", path: "/dev/net/tun"};
+    def share: .type == "disk" and (.source | type == "string" and test("^/mnt/(user|cache)/[^/]+(/[^/]+)*$") and
+        (test("(^|/)\\.\\.?(/|$)") | not) and (test("^/mnt/(user|cache)/polyseat(/|$)") | not)) and
+      (.path | abspath) and (.readonly == null or .readonly == "true" or .readonly == "false") and
+      ((keys - ["type", "source", "path", "readonly"]) | length == 0);
+    def volume: .type == "disk" and .pool == $pool and (.source | type == "string" and test("^[a-z0-9][a-z0-9-]{0,62}$")) and
+      (.path | abspath) and (.readonly == null or .readonly == "true" or .readonly == "false") and
+      ((keys - ["type", "pool", "source", "path", "readonly"]) | length == 0);
+    def device_ok: type == "object" and (nic or tun or share or volume);
+    def devices_bad: (to_entries | map(select((if .key == "root" then (.value | root) else (.value | device_ok) end) | not) |
+        "device " + .key)) + (if ([.[] | select(type == "object" and .type == "nic")] | length) > 1 then ["more than one nic"] else [] end);
+    def kmods: split(",") | map(gsub("^\\s+|\\s+$"; "")) | length > 0 and all(.[]; . as $m | (($modules | split(" ")) | index($m)) != null);
+    def config_bad: to_entries | map(select((
+      (.key | test("^(image|volatile|user)\\.")) or
+      (.key == "boot.autostart" and (.value == "true" or .value == "false")) or
+      ((.key == "boot.autostart.priority" or .key == "boot.autostart.delay") and (.value | test("^[0-9]{1,5}$"))) or
+      (.key == "boot.host_shutdown_timeout" and (.value | test("^[0-9]{1,4}$"))) or
+      (.key == "security.nesting" and (.value == "true" or .value == "false")) or
+      (.key == "security.privileged" and .value == "false") or
+      ((.key == "security.syscalls.intercept.mknod" or .key == "security.syscalls.intercept.setxattr") and
+        (.value == "true" or .value == "false")) or
+      ((.key | test("^limits\\.[a-z0-9]+(\\.[a-z0-9_]+)*$")) and (.value | test("^[A-Za-z0-9._%,-]{0,64}$"))) or
+      (.key == "linux.kernel_modules" and (.value | kmods))) | not)) | map("config " + .key);
+    [ (if ($server | meta | .config) == {} then empty else "global: server config" end),
+      (if ($projects | meta | map(.name)) == ["default"] then empty else "global: projects" end),
+      (if ($networks | meta | all(.[]; .managed == false)) then empty else "global: a managed network" end),
+      (if ($pools | meta | length == 1 and .[0].name == $pool and .[0].driver == "dir" and .[0].config.source == $source)
+        then empty else "global: storage pools" end),
+      (($profiles | meta) as $ps | if ($ps | length == 1 and .[0].name == "default" and (.[0].config // {}) == {} and
+        ((.[0].devices // {}) | to_entries | all(.[]; .key == "root" and (.value | root))))
+        then empty else "global: profiles" end),
+      ($instances | meta | .[] | . as $i |
+        (if $i.type == "container" then empty else "instance " + $i.name + ": not a container" end),
+        (if ($i.name | test($namere)) and (($listed | split(" ")) | index($i.name)) != null then empty
+         else "instance " + $i.name + ": not listed in WORKLOADS_INSTANCES" end),
+        (if $i.profiles == ["default"] then empty else "instance " + $i.name + ": profiles" end),
+        (if ($i.ephemeral // false) == false then empty else "instance " + $i.name + ": ephemeral" end),
+        ((($i.config // {}) | config_bad) + (($i.expanded_config // {}) | config_bad) +
+         (($i.devices // {}) | devices_bad) + (($i.expanded_devices // {}) | devices_bad) | unique | .[] |
+         "instance " + $i.name + ": " + .))
+    ] | .[]'
+}
+
+wl_policy_enforce() { # check; then stop and un-autostart every offender. 0 = evaluated (WL_POLICY_OK says what), 1 = could not evaluate
+  local out is name status auto
+  local -a offenders=()
+  out=$(wl_policy_check) || return 1
+  if [[ -z $out ]]; then
+    WL_POLICY_OK=true WL_VIOLATIONS='[]' WL_LAST_VIOLATION=""
+    return 0
+  fi
+  WL_POLICY_OK=false
+  WL_VIOLATIONS=$(jq -Rsc 'split("\n") | map(select(length > 0) | .[0:200]) | .[0:20]' <<< "$out") || WL_VIOLATIONS='[]'
+  if [[ $out != "$WL_LAST_VIOLATION" ]]; then
+    log error "workloads: outside the policy: $(head -n 5 <<< "$out" | tr '\n' ';' | head -c 900)"
+    WL_LAST_VIOLATION=$out
+  fi
+  is=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || return 1
+  # A global violation (server, project, network, pool, profile) cannot be pinned on one instance: nothing may run.
+  if grep -q '^global' <<< "$out"; then
+    mapfile -t offenders < <(jq -r '(if type == "object" and .type == "sync" then .metadata else . end)[].name' <<< "$is")
+  else
+    mapfile -t offenders < <(sed -n 's/^instance \([^:]*\): .*/\1/p' <<< "$out" | sort -u)
+  fi
+  for name in "${offenders[@]}"; do
+    [[ $name =~ $PLAY_NAME_RE ]] || continue
+    status=$(jq -r --arg n "$name" '(if type == "object" and .type == "sync" then .metadata else . end)[] | select(.name == $n) | .status' <<< "$is")
+    auto=$(jq -r --arg n "$name" '(if type == "object" and .type == "sync" then .metadata else . end)[] | select(.name == $n) | .config["boot.autostart"] // ""' <<< "$is")
+    [[ -n $status ]] || continue
+    if [[ $status != Stopped ]]; then
+      log error "workloads: stopping $name (outside the policy)"
+      INCUS_CMD_TIMEOUT=30 run_incus stop "$name" --force --timeout 10 >/dev/null 2>&1 || log error "workloads: $name did not stop"
+    fi
+    if [[ $auto != false ]]; then
+      INCUS_CMD_TIMEOUT=20 run_incus config set "$name" boot.autostart=false >/dev/null 2>&1 ||
+        log error "workloads: cannot pin boot.autostart off for $name"
+    fi
+  done
+  return 0
+}
+
+# What the card and workloads-status show: name, state, autostart and the IPv4 addresses of the instance (never a secret).
+wl_instances_view() {
+  local is
+  is=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=2') || return 1
+  jq -c '[(if type == "object" and .type == "sync" then .metadata else . end)[] |
+    {name, type, status, autostart: (.config["boot.autostart"] // ""),
+     ips: [(.state.network // {}) | to_entries[] | select(.key != "lo") | .value.addresses[]? |
+           select(.family == "inet" and .scope == "global") | .address]}]' <<< "$is"
+}
+
+# ---- runtime, host and workspace
+wl_runtime_ready() { # the pointer's bundle verified on the flash and its slot linked in RAM (rebuilt after a reboot, as boot does)
+  local sha
+  ensure_state_dirs
+  require_no_journal
+  read_pointer
+  sha=$PTR_CURRENT
+  [[ -n $sha ]] || { log error "workloads: no runtime bundle is active (play-start installs one)"; return 1; }
+  { verify_bundle_files "$sha" && check_host_compat "$(bundle_manifest "$sha")"; } ||
+    { log error "workloads: runtime bundle $sha failed verification"; return 1; }
+  if [[ -L $CURRENT && $(current_sha_from_link) == "$sha" ]] && verify_slot "$sha"; then return 0; fi
+  # The slot is gone (a reboot): rebuilding it takes the controller lock. A play session holds that lock for hours, but it
+  # has the slot already, so only a start racing play-start or boot can wait here.
+  ( flock -w 60 9 || exit 1
+    materialize_slot "$sha" && switch_current "$sha" ) 9> "$LOCKFILE" ||
+    { log error "workloads: the runtime slot is not in RAM and could not be rebuilt (controller busy?)"; return 1; }
+}
+
+wl_cgroup_precheck() { # read-only: before any state exists, and again right before the group is made
+  local controller available enabled mems
+  [[ $(fs_type "$WL_CGROUP_ROOT") == cgroup2fs && ! -L $WL_CGROUP ]] || { log error "workloads: unified cgroup v2 required"; return 1; }
+  [[ ! -e $WL_CGROUP ]] || { log error "workloads: $WL_CGROUP exists already; workloads-stop clears it"; return 1; }
+  available=" $(< "$WL_CGROUP_ROOT/cgroup.controllers") "
+  enabled=" $(< "$WL_CGROUP_ROOT/cgroup.subtree_control") "
+  for controller in cpu cpuset memory pids; do
+    [[ $available == *" $controller "* && $enabled == *" $controller "* ]] ||
+      { log error "workloads: $controller is not already delegated at cgroup root"; return 1; }
+  done
+  mems=$(< "$WL_CGROUP_ROOT/cpuset.mems.effective") || return 1
+  [[ $mems =~ ^[0-9]+([,-][0-9]+)*$ ]] || { log error "workloads: unexpected NUMA topology"; return 1; }
+  wl_limits || { log error "workloads: WORKLOADS_CPUS or WORKLOADS_MEMORY_MB is not usable on this host"; return 1; }
+}
+
+wl_cgroup_check() { # the group reads back exactly as it was set; the daemon sits in its leaf
+  [[ -d $WL_CGROUP && ! -L $WL_CGROUP && -d $WL_CGROUP/daemon && ! -L $WL_CGROUP/daemon &&
+     $(< "$WL_CGROUP/cpuset.cpus") == "$WL_CPUSET" && $(< "$WL_CGROUP/memory.max") == "$WL_MEMORY_MAX" ]]
+}
+
+wl_cgroup_prepare() {
+  local mems
+  wl_cgroup_precheck || return 1
+  mems=$(< "$WL_CGROUP_ROOT/cpuset.mems.effective") || return 1
+  mkdir -- "$WL_CGROUP" || return 1
+  if ! {
+    printf '%s\n' "$mems" > "$WL_CGROUP/cpuset.mems" &&
+    printf '%s\n' "$WL_CPUSET" > "$WL_CGROUP/cpuset.cpus" &&
+    printf '%s\n' "$WL_MEMORY_MAX" > "$WL_CGROUP/memory.max" &&
+    mkdir -- "$WL_CGROUP/daemon";
+  }; then
+    rmdir -- "$WL_CGROUP/daemon" 2>/dev/null || true
+    rmdir -- "$WL_CGROUP" 2>/dev/null || true
+    log error "workloads: cgroup limits could not be set; daemon not launched"
+    return 1
+  fi
+  if ! wl_cgroup_check; then
+    rmdir -- "$WL_CGROUP/daemon" "$WL_CGROUP" 2>/dev/null || true
+    log error "workloads: cgroup limits did not read back exactly as set; daemon not launched"
+    return 1
+  fi
+}
+
+wl_modules_load() { # exactly WL_MODULES, only what is not loaded yet; never unloaded
+  local mod loaded="" present=""
+  for mod in $WL_MODULES; do
+    if [[ -d $WL_SYS_MODULE/$mod ]]; then present+=" $mod"; continue; fi
+    if play_real; then "$WL_MODPROBE" -- "$mod" || { log error "workloads: cannot load the kernel module $mod"; return 1; }; fi
+    loaded+=" $mod"
+  done
+  log info "workloads: kernel modules loaded:${loaded:- none}; already present:${present:- none}"
+}
+
+# The workspace on the cache dataset. A persisted database starts again only after the controller recorded a clean stop of
+# the previous run: every instance stopped, the daemon gone by itself. Unlike play's, the instances keep boot.autostart
+# (that is what a permanent container is), and the record is consumed before the daemon starts.
+wl_record_check() { # read-only: a fresh workspace, or one with the record of a clean stop by the same Incus version
+  local version stop
+  version=$(jq -er '.incus_version | select(type == "string" and length > 0)' "$(bundle_manifest "$PTR_CURRENT")") ||
+    { log error "workloads: the bundle names no Incus version"; return 1; }
+  [[ ! -e $DATA_REAL && ! -L $DATA_REAL ]] && return 0
+  jq -e --arg v "$version" '.schema == 1 and .kind == "workloads" and .incus_version == $v' "$DATA_REAL/workloads.json" >/dev/null 2>&1 ||
+    { log error "workloads: workspace record missing or written by another Incus version; no up- or downgrade here"; return 1; }
+  stop=$DATA_REAL/clean-stop.json
+  { [[ -f $stop && ! -L $stop && $(stat -c '%u %a' -- "$stop") == '0 600' ]] &&
+    jq -e --arg re "$PLAY_NAME_RE" '.schema == 1 and ((keys - ["archive_sha256", "instances", "recovered", "schema", "stopped_at"]) | length == 0) and
+      (.instances | type == "array" and (map(.name) | unique | length) == length and
+      all(.[]; (.name | test($re)) and .status == "Stopped" and (.autostart == "true" or .autostart == "false" or .autostart == "")))' "$stop" >/dev/null 2>&1; } ||
+    { log error "workloads: the previous run recorded no clean stop; inspection required (workloads-recover), nothing was started"; return 1; }
+  [[ -d $INCUS_DIR && ! -L $INCUS_DIR ]] || { log error "workloads: the Incus directory is missing"; return 1; }
+}
+
+wl_state_prepare() { # active sha : creates the workspace once; afterwards only a recorded clean stop reopens it
+  local active_sha=$1 version
+  version=$(jq -er '.incus_version | select(type == "string" and length > 0)' "$(bundle_manifest "$active_sha")") || return 1
+  if [[ ! -e $DATA_REAL && ! -L $DATA_REAL ]]; then
+    (umask 022; mkdir -- "$DATA_REAL" && chmod 0711 -- "$DATA_REAL" && mkdir -- "$INCUS_DIR" && chmod 0711 -- "$INCUS_DIR") || return 1
+    write_json_atomic "$DATA_REAL/workloads.json" "$(jq -n --arg sha "$active_sha" --arg v "$version" \
+      '{schema: 1, kind: "workloads", incus_version: $v, created_archive_sha256: $sha}')" || return 1
+    return 0
+  fi
+  wl_record_check || return 1
+  # Consumed before the daemon starts: a crash from here on leaves no record, so the next start refuses again.
+  mv -f -- "$DATA_REAL/clean-stop.json" "$DATA_REAL/clean-stop.used.json"
+}
+
+wl_precheck() { # read-only: everything a start needs, so that a refusal reaches the admin before anything is changed
+  local tool
+  read_pointer
+  [[ -n $PTR_CURRENT && -L $CURRENT && $(current_sha_from_link) == "$PTR_CURRENT" ]] ||
+    { log error "workloads: the active runtime is not linked in RAM"; return 1; }
+  lsm_gate "$(bundle_manifest "$PTR_CURRENT")" || return 1
+  if ! sandbox || ci_real_system; then daemon_programs_check "$(readlink -f -- "$CURRENT")" || return 1; fi
+  for tool in unshare setpriv mount umount setsid; do command -v "$tool" >/dev/null || { log error "workloads: $tool is missing"; return 1; }; done
+  if play_real; then [[ -x $WL_MODPROBE ]] || { log error "workloads: $WL_MODPROBE is missing"; return 1; }; fi
+  wl_instances_setting >/dev/null || { log error "workloads: WORKLOADS_INSTANCES is not usable"; return 1; }
+  [[ -d $(sys_root)/class/net/$STEAM_NIC_PARENT ]] || { log error "workloads: the bridge $STEAM_NIC_PARENT does not exist"; return 1; }
+  wl_cgroup_precheck || return 1
+  persist_validate_dir "$WL_DATA_DIR" || return 1
+  wl_record_check || return 1
+}
+
+# ---- the daemon
+wl_health_check() {
+  local pid addr
+  pid=$(svc_pid) || { log error "workloads: health: daemon process not running"; return 1; }
+  [[ -S $INCUS_DIR/unix.socket && ! -L $INCUS_DIR/unix.socket && $(stat -c '%u %a' -- "$INCUS_DIR/unix.socket") == '0 600' ]] ||
+    { log error "workloads: health: management socket missing or not root-private"; return 1; }
+  run_incus info >/dev/null 2>&1 || { log error "workloads: health: 'incus info' failed"; return 1; }
+  addr=$(run_incus config get core.https_address 2>/dev/null) || { log error "workloads: health: cannot read listener config"; return 1; }
+  [[ -z $addr ]] || { log error "workloads: health: unexpected network listener configured: $addr"; return 1; }
+  wl_cgroup_check || { log error "workloads: health: cgroup limits invalid"; return 1; }
+  [[ $(< "/proc/$pid/cgroup") == "0::/${CANARY_CGROUP##*/}/daemon" ]] ||
+    { log error "workloads: health: daemon escaped its cgroup"; return 1; }
+}
+
+wl_bootstrap() { # a fresh workspace has no pool: the dir pool under the workspace, as play's, and the root disk of the default profile
+  if ! INCUS_CMD_TIMEOUT=10 run_incus query "/1.0/storage-pools/$WL_POOL" >/dev/null 2>&1; then
+    run_incus storage create "$WL_POOL" dir "source=$INCUS_DIR/storage-pools/$WL_POOL" || return 1
+  fi
+  if ! INCUS_CMD_TIMEOUT=10 run_incus query /1.0/profiles/default | jq -e '(.metadata // .).devices.root' >/dev/null 2>&1; then
+    run_incus profile device add default root disk path=/ "pool=$WL_POOL" || return 1
+  fi
+}
+
+wl_log_cap() { # copy-truncate: the daemon keeps its descriptor (it was opened for appending)
+  local f size
+  for f in "$WL_LOG" "$WL_OUT"; do
+    [[ -f $f && ! -L $f ]] || continue
+    size=$(stat -c %s -- "$f") || continue
+    (( size > WL_LOG_MAX_BYTES )) || continue
+    if cp -- "$f" "$f.1" && : > "$f"; then log info "workloads: rotated ${f##*/} (was $size bytes)"; fi
+  done
+}
+
+wl_status_write() { # [note] : the card's view, root-private; the supervisor writes it, workloads-status reads it
+  local pid=""
+  pid=$(wl_daemon_pid 2>/dev/null) || pid=""
+  write_json_atomic "$WL_STATUS" "$(jq -n --arg state "$WL_STATE" --arg note "${1:-}" --arg pid "$pid" --argjson since "$WL_SINCE" \
+    --argjson now "$(date -u +%s)" --argjson ok "$WL_POLICY_OK" --argjson violations "$WL_VIOLATIONS" --argjson instances "$WL_INSTANCES" \
+    '{schema: 1, state: $state, note: $note, pid: (if $pid == "" then null else ($pid | tonumber) end), since: $since, updated: $now,
+      policy: {ok: $ok, violations: $violations}, instances: $instances}')" 2>/dev/null || true
+}
+
+wl_round() { # one supervisor round of guards: policy, view, logs, space
+  local free
+  if wl_policy_enforce; then WL_STATE=running; else WL_STATE=degraded; log warn "workloads: the Incus policy could not be evaluated"; fi
+  WL_INSTANCES=$(wl_instances_view 2>/dev/null) || WL_INSTANCES='[]'
+  wl_log_cap
+  free=$(df -Pk -- "$DATA_REAL" 2>/dev/null | awk 'NR == 2 {print $4}')
+  if [[ $free =~ ^[0-9]+$ ]] && (( free < PERSIST_MIN_FREE_KB )); then log warn "workloads: only $free KiB free on the workspace's dataset"; fi
+  wl_status_write
+}
+
+wl_launch() { # slot_real : the daemon, detached, in its own mount/pid/cgroup namespaces (canary_launch)
+  (
+    umask 022
+    cd / || exit 1
+    canary_launch "$1" >> "$WL_OUT" 2>&1 < /dev/null
+    exit 1
+  ) &
+}
+
+wl_stop_instances() { # stops what runs, each instance with its own bounded clean stop; 0 = all stopped, WL_SEATS = [{name, status, autostart}]
+  local is name
+  is=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || { WL_UNCLEAN=1; return 1; }
+  for name in $(jq -r '(if type == "object" and .type == "sync" then .metadata else . end)[] | select(.status != "Stopped") | .name' <<< "$is"); do
+    [[ $name =~ $PLAY_NAME_RE ]] || { WL_UNCLEAN=1; continue; }
+    log info "workloads: stopping $name (up to ${WL_STOP_TIMEOUT}s)"
+    INCUS_CMD_TIMEOUT=$((WL_STOP_TIMEOUT + 30)) run_incus stop "$name" --timeout "$WL_STOP_TIMEOUT" && continue
+    WL_UNCLEAN=1
+    log error "workloads: $name did not stop cleanly within ${WL_STOP_TIMEOUT}s; forcing it"
+    INCUS_CMD_TIMEOUT=30 run_incus stop "$name" --force --timeout 10 || log error "workloads: $name did not stop"
+  done
+  is=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || { WL_UNCLEAN=1; return 1; }
+  WL_SEATS=$(jq -ec '[(if type == "object" and .type == "sync" then .metadata else . end)[] |
+    {name, status, autostart: (.config["boot.autostart"] // "")}] | select(all(.[]; .status == "Stopped"))' <<< "$is") ||
+    { WL_UNCLEAN=1; return 1; }
+}
+
+wl_stop_sequence() { # the daemon's end: each instance cleanly, the policy once more, admin shutdown, then the groups; 0 = clean stop recorded
+  local pid i clean=1 rc=0
+  WL_STATE=stopping WL_UNCLEAN=0 WL_SEATS=''
+  wl_status_write
+  pid=$(wl_daemon_pid 2>/dev/null) || pid=""
+  if [[ -n $pid ]]; then
+    wl_stop_instances || clean=0
+    # What is left must be in policy (or stopped and pinned off), or the next start would meet it autostarting.
+    if wl_policy_enforce; then wl_stop_instances || clean=0; else clean=0; fi
+    [[ $WL_UNCLEAN -eq 0 ]] || clean=0
+    log info "workloads: admin shutdown"
+    INCUS_CMD_TIMEOUT=90 run_incus admin shutdown --timeout "$WL_SHUTDOWN_TIMEOUT" >/dev/null 2>&1 || log warn "workloads: 'admin shutdown' reported an error"
+    for ((i = 0; i < 80; i++)); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    if kill -0 "$pid" 2>/dev/null; then
+      clean=0
+      log error "workloads: the daemon did not exit by itself; signalling it"
+      kill -TERM "$pid" 2>/dev/null || true
+      for ((i = 0; i < 60; i++)); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    fi
+  else
+    clean=0
+    log warn "workloads: no daemon to ask; its processes (if any) are stopped by the group"
+  fi
+  # Whatever is left in the group goes now: the pools unmount after this. A clean stop leaves nothing to kill.
+  canary_cgroup_stop || { clean=0; rc=1; }
+  rm -f -- "$WL_PIDFILE"
+  if [[ $clean -eq 1 && $rc -eq 0 && -n $WL_SEATS ]]; then
+    write_json_atomic "$DATA_REAL/clean-stop.json" "$(jq -n --arg sha "$PTR_CURRENT" --argjson now "$(date -u +%s)" \
+      --argjson seats "$WL_SEATS" '{schema: 1, archive_sha256: $sha, stopped_at: $now, instances: $seats}')" || return 1
+    log info "workloads: clean stop recorded"
+    return 0
+  fi
+  log error "workloads: stopped without a clean-stop record; the next start needs workloads-recover"
+  return 1
+}
+
+wl_run_exit() { # rc ended : whatever way the supervisor ends
+  local rc=$1 ended=$2 started=$3
+  [[ $ended -eq 1 ]] && return 0
+  [[ $rc -ne 0 ]] || return 0
+  if [[ $started -eq 0 ]]; then
+    # Never healthy: nothing of ours is to keep running. Once the record is consumed the next start needs workloads-recover.
+    if [[ -e $DATA_REAL/clean-stop.json ]] || [[ ! -e $DATA_REAL && ! -L $DATA_REAL ]]; then
+      log error "workloads: start failed (rc $rc) before the daemon started; nothing was changed, the clean-stop record is untouched"
+    else
+      log error "workloads: start failed (rc $rc); its processes are stopped, inspect, then workloads-recover"
+    fi
+    canary_cgroup_stop || true
+    rm -f -- "$WL_PIDFILE"
+    wl_lxc_remove
+    [[ -e $WL_CGROUP ]] || wl_claim_release
+    WL_STATE=failed
+    wl_status_write "start failed"
+  else
+    # Containers may be running. They are not touched here: workloads-stop finishes the job on the operator's word.
+    log error "workloads: the supervisor ended unexpectedly (rc $rc); the daemon and its containers are NOT touched, workloads-stop clears them"
+    WL_STATE=failed
+    wl_status_write "supervisor ended"
+  fi
+}
+
+cmd_workloads_run() ( # internal: the supervisor, started detached by workloads-start / workloads-stop which hand it the lock
+  local mode=${1:-run} slot_real="" active_sha i deadline guard=0 started=0 ended=0 stop=0 rc
+  [[ $POLYSEAT_RELEASE_GATE == canary && $POLYSEAT_APPROVAL_MODE == owner && $# -le 1 && ( $mode == run || $mode == adopt ) ]] ||
+    die $EX_BLOCKED "workloads-run exists only in an owner-mode build, and is started by workloads-start and workloads-stop"
+  wl_log_enable
+  wl_enter
+  [[ -e /proc/self/fd/8 && /proc/self/fd/8 -ef $WL_LOCKFILE ]] ||
+    die $EX_BLOCKED "workloads-run is started by workloads-start and workloads-stop only"
+  flock -n 8 || die $EX_PENDING "workloads: the lock is not ours"
+  WL_SINCE=$(date -u +%s)
+  trap 'stop=1' TERM HUP INT
+  # shellcheck disable=SC2154  # rc is assigned inside the trap itself
+  trap 'rc=$?; wl_run_exit "$rc" "$ended" "$started"; exit "$rc"' EXIT
+  read_pointer
+  active_sha=$PTR_CURRENT
+  if [[ $mode == adopt ]]; then
+    started=1
+    log info "workloads: no supervisor is left; finishing the daemon's stop"
+    wl_stop_sequence && rc=0 || rc=$EX_HEALTH
+    ended=1
+    rm -f -- "$WL_STOPFILE" "$WL_STATUS"
+    wl_lxc_remove
+    [[ -e $WL_CGROUP ]] || wl_claim_release
+    exit "$rc"
+  fi
+  rm -f -- "$WL_STOPFILE" "$WL_STATUS"
+  WL_STATE=starting
+  wl_status_write
+  [[ -n $active_sha && $(current_sha_from_link) == "$active_sha" ]] || die $EX_BLOCKED "workloads: no active runtime bundle"
+  slot_real=$(readlink -f -- "$CURRENT") || exit $EX_BLOCKED
+  # Nothing may run from an earlier life, and nothing is changed before every check has passed.
+  ! wl_daemon_pid >/dev/null 2>&1 || die $EX_BLOCKED "workloads: a daemon is running"
+  wl_precheck || exit $EX_BLOCKED
+  wl_claim "$(bundle_manifest "$active_sha")" || exit $EX_BLOCKED
+  wl_lxc_remove
+  wl_lxc_prepare || exit $EX_BLOCKED
+  wl_modules_load || exit $EX_BLOCKED
+  canary_deny_tools_prepare || exit $EX_BLOCKED
+  subid_file_ensure "$SUBID_DIR/subuid" && subid_file_ensure "$SUBID_DIR/subgid" || exit $EX_BLOCKED
+  wl_state_prepare "$active_sha" || exit $EX_BLOCKED
+  if [[ ! -d $INCUS_DIR ]]; then
+    (umask 022; mkdir -- "$INCUS_DIR") || exit $EX_BLOCKED
+    chmod 0711 -- "$INCUS_DIR" || exit $EX_BLOCKED
+  fi
+  mkdir -p -- "$WL_CLIENT_DIR" || exit $EX_BLOCKED
+  wl_cgroup_prepare || exit $EX_BLOCKED
+  rm -f -- "$WL_PIDFILE"
+  wl_launch "$slot_real"
+  log info "workloads: daemon launched; waiting for it to become healthy"
+  deadline=$(( $(canary_monotonic_seconds) + WL_HEALTH_TIMEOUT ))
+  CANARY_HEALTH_DEADLINE=$deadline
+  for ((i = 0; i < WL_HEALTH_TIMEOUT * 2; i++)); do
+    sleep 0.5
+    (( $(canary_monotonic_seconds) < deadline )) || break
+    # The daemon creates its own socket with its default root-group mode: narrowed once, before any controller use.
+    if [[ -S $INCUS_DIR/unix.socket && ! -L $INCUS_DIR/unix.socket && $(stat -c %u -- "$INCUS_DIR/unix.socket") == 0 ]]; then
+      chmod 0600 -- "$INCUS_DIR/unix.socket" || break
+    fi
+    if (LOG_ENABLED=0; wl_health_check) 2>/dev/null; then started=1; break; fi
+    wl_daemon_pid >/dev/null || { [[ $i -gt 6 ]] && break; }
+  done
+  CANARY_HEALTH_DEADLINE=0
+  if [[ $started -ne 1 ]]; then
+    wl_health_check 2>/dev/null || true # once more, for the log: why
+    log error "workloads: the daemon did not become healthy within ${WL_HEALTH_TIMEOUT}s"
+    exit $EX_HEALTH
+  fi
+  wl_bootstrap || { log error "workloads: bootstrap of the workspace failed"; exit $EX_HEALTH; }
+  log info "workloads: daemon healthy (pid $(wl_daemon_pid)); policy check"
+  for ((i = 0; i < 3; i++)); do
+    wl_round
+    [[ $WL_STATE != degraded ]] && break
+    sleep 2
+  done
+  log info "workloads: up ($([[ $WL_POLICY_OK == true ]] && echo 'in policy' || echo 'OUTSIDE THE POLICY: offenders stopped'))"
+  while [[ ! -e $WL_STOPFILE && $stop -eq 0 ]]; do
+    wl_daemon_pid >/dev/null || { log error "workloads: the daemon exited on its own"; exit $EX_HEALTH; }
+    if (( ++guard % WL_GUARD_EVERY == 0 )); then wl_round; fi
+    sleep 2
+  done
+  log info "workloads: stop ($([[ -e $WL_STOPFILE ]] && echo 'stop requested' || echo 'signal'))"
+  wl_stop_sequence && rc=0 || rc=$EX_HEALTH
+  ended=1
+  rm -f -- "$WL_STOPFILE"
+  wl_lxc_remove
+  if [[ $rc -eq 0 ]]; then
+    rm -f -- "$WL_STATUS"
+  else
+    WL_STATE=failed
+    wl_status_write "stopped without a clean-stop record"
+  fi
+  [[ -e $WL_CGROUP ]] || wl_claim_release
+  exit "$rc"
+)
+
+wl_launch_detached() { # mode : the supervisor in its own session, the controller log for output, holding the lock (descriptor 8) we hold
+  local out="$LOG_DIR/$PLUGIN.log"
+  [[ -d $LOG_DIR && ! -L $LOG_DIR && ! -L $out ]] || { log error "workloads: the controller log is not usable"; return 1; }
+  POLYSEAT_DETACHED=1 setsid -f "$CTL_SELF" workloads-run "$1" >> "$out" 2>&1 < /dev/null 9>&-
+}
+
+cmd_workloads_start() { # [--boot] : check everything, launch the supervisor (detached, holding the lock), return
+  local boot=0 i
+  [[ $POLYSEAT_RELEASE_GATE == canary && $POLYSEAT_APPROVAL_MODE == owner ]] ||
+    die $EX_BLOCKED "workloads-start needs an owner-mode build"
+  case $# in
+    0) ;;
+    1) [[ $1 == --boot ]] || die $EX_USAGE "usage: workloads-start"; boot=1 ;;
+    *) die $EX_USAGE "usage: workloads-start" ;;
+  esac
+  wl_log_enable
+  wl_enter
+  exec 8> "$WL_LOCKFILE" || die $EX_BLOCKED "cannot open the workloads lock"
+  flock -n 8 || die $EX_PENDING "the workloads daemon is already running, or is being started or stopped"
+  { ! wl_daemon_pid >/dev/null 2>&1 && [[ ! -e $WL_CGROUP && ! -L $WL_CGROUP ]]; } ||
+    die $EX_BLOCKED "processes of an earlier run are still there; workloads-stop clears them"
+  wl_runtime_ready || die $EX_VERIFY "the runtime bundle cannot be used; nothing was started"
+  if [[ $boot -eq 1 ]]; then
+    # At array start the pools may still be coming up.
+    for ((i = 0; i < 24; i++)); do (LOG_ENABLED=0; persist_mount_check) >/dev/null 2>&1 && break; sleep 5; done
+  fi
+  wl_precheck || die $EX_BLOCKED "workloads prechecks failed; nothing was started"
+  rm -f -- "$WL_STOPFILE" "$WL_STATUS"
+  wl_launch_detached run || die $EX_BLOCKED "cannot launch the workloads supervisor"
+  log info "workloads-start: supervisor launched (detached)"
+  printf 'workloads starting: Incus comes up, then the listed instances that autostart; watch the Workloads card\n'
+}
+
+cmd_workloads_stop() { # [--wait SECONDS] : ask the supervisor to stop the daemon; with --wait (array stop) hold until it is gone, bounded
+  local wait=0 waited=0 start=$SECONDS
+  if [[ $# -gt 0 ]]; then
+    { [[ $# -eq 2 && $1 == --wait && $2 =~ ^[0-9]{1,3}$ ]] && (( 10#$2 >= 1 && 10#$2 <= 900 )); } ||
+      die $EX_USAGE "usage: workloads-stop [--wait SECONDS (1..900)]"
+    wait=$((10#$2))
+  fi
+  wl_log_enable
+  wl_enter
+  if ! wl_supervised; then
+    if ! wl_daemon_pid >/dev/null 2>&1 && [[ ! -e $WL_CGROUP && ! -L $WL_CGROUP ]]; then
+      rm -f -- "$WL_STOPFILE"
+      wl_claim_release
+      log info "workloads-stop: no workloads daemon is running"
+      return 0
+    fi
+    # The supervisor is gone but the daemon or its processes are not: the stop sequence runs in a supervisor of its own.
+    exec 8> "$WL_LOCKFILE" || die $EX_BLOCKED "cannot open the workloads lock"
+    if flock -n 8; then
+      log warn "workloads-stop: no supervisor; finishing the stop of what is left"
+      wl_launch_detached adopt || die $EX_BLOCKED "cannot launch the workloads supervisor"
+    fi
+    exec 8>&-
+  fi
+  if [[ $wait -eq 0 ]]; then
+    (umask 077; : > "$WL_STOPFILE") && printf 'stop requested; the instances stop one by one (up to %ss each), then Incus\n' "$WL_STOP_TIMEOUT"
+    return
+  fi
+  log info "workloads-stop: waiting up to ${wait}s for the daemon's clean stop"
+  while wl_supervised; do
+    # Counted in sleeps, not read from a clock with one-second granularity: the bound is never shorter than asked for.
+    if (( waited >= wait )); then
+      log error "workloads-stop: still running after ${wait}s"
+      return 1
+    fi
+    # Rewritten every round: a supervisor that is still starting removes an older request when it gets that far.
+    (umask 077; : > "$WL_STOPFILE")
+    sleep 2
+    waited=$(( waited + 2 ))
+  done
+  log info "workloads-stop: ended after $(( SECONDS - start ))s"
+}
+
+wl_mounts_below() { # mount points at or below the workspace in this mount namespace
+  awk -v r="$DATA_REAL" '$5 == r || index($5, r "/") == 1 { print $5 }' /proc/self/mountinfo
+}
+
+wl_nothing_runs() { # no daemon, no group, no process that belongs to the instance, nothing mounted below its directory
+  local proc pid cgroup mounts
+  ! wl_daemon_pid >/dev/null 2>&1 || { log error "workloads: the daemon is running"; return 1; }
+  [[ ! -e $WL_CGROUP && ! -L $WL_CGROUP ]] || { log error "workloads: $WL_CGROUP still exists"; return 1; }
+  for proc in "${WL_PROC:-/proc}"/[0-9]*; do
+    pid=${proc##*/}
+    [[ $pid == "$$" || $pid == "$BASHPID" ]] && continue
+    { cgroup=$(< "$proc/cgroup"); } 2>/dev/null || continue
+    [[ $cgroup == "0::/${WL_CGROUP##*/}"* ]] && { log error "workloads: process $pid is still in the workloads group"; return 1; }
+    if { tr '\0' '\n' < "$proc/environ"; } 2>/dev/null | grep -qxF "INCUS_DIR=$INCUS_DIR"; then
+      log error "workloads: process $pid still works on $INCUS_DIR"
+      return 1
+    fi
+  done
+  mounts=$(wl_mounts_below)
+  [[ -z $mounts ]] || { log error "workloads: still mounted below $DATA_REAL: $(head -n 3 <<< "$mounts" | tr '\n' ' ')"; return 1; }
+}
+
+cmd_workloads_recover() ( # the console: reopen a workspace whose last run left no clean-stop record, after checking that nothing of it is left
+  local version
+  [[ $POLYSEAT_RELEASE_GATE == canary && $POLYSEAT_APPROVAL_MODE == owner ]] || die $EX_BLOCKED "workloads-recover needs an owner-mode build"
+  require_approval workloads-recover
+  wl_log_enable
+  wl_enter
+  exec 8> "$WL_LOCKFILE" || die $EX_BLOCKED "cannot open the workloads lock"
+  flock -n 8 || die $EX_PENDING "the workloads daemon is running, or is being started or stopped"
+  ensure_state_dirs
+  read_pointer
+  [[ -n $PTR_CURRENT ]] || die $EX_BLOCKED "no runtime bundle is active"
+  persist_validate_dir "$WL_DATA_DIR" || exit $EX_BLOCKED
+  [[ -d $DATA_REAL && ! -L $DATA_REAL && -d $INCUS_DIR && ! -L $INCUS_DIR ]] || die $EX_BLOCKED "workloads-recover: there is no workspace to recover"
+  version=$(jq -er '.incus_version | select(type == "string" and length > 0)' "$(bundle_manifest "$PTR_CURRENT")") || die $EX_BLOCKED "the bundle names no Incus version"
+  jq -e --arg v "$version" '.schema == 1 and .kind == "workloads" and .incus_version == $v' "$DATA_REAL/workloads.json" >/dev/null 2>&1 ||
+    die $EX_BLOCKED "workloads-recover: workspace record missing or written by another Incus version"
+  [[ ! -e $DATA_REAL/clean-stop.json && ! -L $DATA_REAL/clean-stop.json ]] || die $EX_BLOCKED "workloads-recover: a clean-stop record exists; nothing to recover"
+  wl_nothing_runs || die $EX_BLOCKED "workloads-recover: something of the last run is still there; nothing was recorded"
+  write_json_atomic "$DATA_REAL/clean-stop.json" "$(jq -n --arg sha "$PTR_CURRENT" --argjson now "$(date -u +%s)" \
+    '{schema: 1, archive_sha256: $sha, stopped_at: $now, instances: [], recovered: true}')" || die $EX_CORRUPT "cannot write the record"
+  rm -f -- "$WL_STATUS" "$WL_STOPFILE"
+  wl_lxc_remove
+  wl_claim_release
+  log warn "workloads-recover: nothing runs; the workspace is reopened by the operator's word (the policy check runs at the next start)"
+  printf 'recovered: the next workloads-start reopens %s\n' "$WL_DATA_DIR"
+)
+
+cmd_workloads_status() { # read-only: one JSON object
+  local supervised=false pid="" cgroup=false file='{}' enabled=false state clean=null
+  wl_enter
+  wl_supervised && supervised=true
+  pid=$(wl_daemon_pid 2>/dev/null) || pid=""
+  [[ -e $WL_CGROUP || -L $WL_CGROUP ]] && cgroup=true
+  if [[ -f $WL_STATUS && ! -L $WL_STATUS ]]; then file=$(jq -c 'if type == "object" then . else {} end' "$WL_STATUS" 2>/dev/null) || file='{}'; fi
+  [[ $(cfg_get WORKLOADS_ENABLED no) == yes ]] && enabled=true
+  state=$(jq -r '.state // ""' <<< "$file")
+  if [[ $supervised == true ]]; then
+    case $state in starting | running | degraded | stopping) ;; *) state=starting ;; esac
+  elif [[ -n $pid || $cgroup == true ]]; then
+    state=orphaned
+  elif [[ $state == failed ]]; then
+    state=failed
+  else
+    state=stopped
+  fi
+  if [[ -d $DATA_REAL && ! -L $DATA_REAL ]]; then
+    clean=false
+    [[ -f $DATA_REAL/clean-stop.json && ! -L $DATA_REAL/clean-stop.json ]] && clean=true
+  fi
+  jq -n --arg state "$state" --arg pid "$pid" --argjson supervised "$supervised" --argjson cgroup "$cgroup" \
+    --argjson enabled "$enabled" --argjson clean "$clean" --argjson file "$file" '
+    {ok: true, state: $state, supervised: $supervised, enabled: $enabled, cgroup: $cgroup, clean_stop_recorded: $clean,
+     pid: (if $pid == "" then null else ($pid | tonumber) end), note: ($file.note // ""), since: ($file.since // null),
+     updated: ($file.updated // null), policy: ($file.policy // {ok: true, violations: []}), instances: ($file.instances // [])}'
+}
+
+workloads_boot() { # owner boot path: the permanent workloads daemon is the one thing that starts by itself (WORKLOADS_ENABLED)
+  local out="$LOG_DIR/$PLUGIN.log"
+  [[ -d $LOG_DIR && ! -L $LOG_DIR && ! -L $out ]] || { log error "boot: the controller log is not usable; the workloads daemon was not started"; return 1; }
+  log info "boot: WORKLOADS_ENABLED=yes; starting the workloads daemon (detached)"
+  POLYSEAT_DETACHED=1 setsid -f "$CTL_SELF" workloads-start --boot >> "$out" 2>&1 < /dev/null 9>&-
+}
+
+wl_runtime_change_guard() { # the runtime slot is replaced or removed only with no workloads daemon, none starting or stopping
+  exec 8> "$WL_LOCKFILE" || die $EX_BLOCKED "cannot open the workloads lock"
+  flock -n 8 || die $EX_PENDING "the workloads daemon is running or in transition; stop it first (workloads-stop)"
+  { ! wl_daemon_pid >/dev/null 2>&1 && [[ ! -e $WL_CGROUP && ! -L $WL_CGROUP ]]; } ||
+    die $EX_BLOCKED "workloads processes are still there; workloads-stop clears them first"
+}
+
 # --------------------------------------------------------- transaction ----
 # Only a service that was running is restarted after a switch/restore. Starting an
 # enabled service is the boot path's job (it runs once the pool is mounted); a plugin
@@ -4219,6 +5057,7 @@ cmd_activate() { # sha
     log info "bundle $target is already active"
     return 0
   fi
+  wl_runtime_change_guard
   materialize_slot "$target"
   rc=$?
   [[ $rc -eq 0 ]] || exit "$rc"
@@ -4265,6 +5104,7 @@ cmd_rollback() {
   [[ -n $PTR_CURRENT ]] || { log info "nothing to roll back"; return 0; }
   previous=$PTR_PREVIOUS bad=$PTR_CURRENT
   [[ -n $previous ]] || die $EX_BLOCKED "no previous bundle recorded"
+  wl_runtime_change_guard
   materialize_slot "$previous" || die $EX_VERIFY "previous bundle cannot be verified; refusing rollback"
   svc_pid >/dev/null && was=1
   write_journal rolling-back "$bad" "$previous" "$was"
@@ -4300,6 +5140,7 @@ cmd_recover() {
     return 0
   fi
   sweep_stale_incoming
+  wl_runtime_change_guard
   log warn "recovering unfinished '$JR_PHASE' transaction (target ${JR_TARGET:-none}): restoring ${JR_PREVIOUS:-<none>}"
   svc_pid >/dev/null && was=1
   [[ $JR_WAS_RUNNING -eq 1 ]] && was=1
@@ -4315,6 +5156,8 @@ cmd_uninstall() {
   read_journal
   [[ -z $JR_PHASE ]] || die $EX_PENDING "unfinished transaction; run recover first"
   read_pointer
+  # The runtime slot is the workloads daemon's binary: it is stopped (workloads-stop) before anything is removed.
+  wl_runtime_change_guard
   svc_stop full || die $EX_BLOCKED "could not stop the daemon; uninstall aborted before any removal"
   switch_current ""
   for f in "$SLOTS"/*; do
@@ -4338,7 +5181,9 @@ cmd_uninstall() {
   seat_image_remove_exact
   polyseatd_bundle_remove "$POLYSEATD_DIR.new"
   polyseatd_bundle_remove "$POLYSEATD_DIR"
-  rmdir -- "$RUN_DIR/client" 2>/dev/null || true
+  rmdir -- "$RUN_DIR/client" "$WL_CLIENT_DIR" 2>/dev/null || true
+  rm -f -- "$WL_STATUS" "$WL_STOPFILE" "$WL_PIDFILE"
+  wl_lxc_remove
   rmdir -- "$SLOTS" "$RAM_DIR" 2>/dev/null || true
   rmdir -- "$BUNDLE_DIR" "$STATE_DIR" 2>/dev/null || true
   log info "uninstalled; settings and DATA_DIR were not touched"
@@ -4352,6 +5197,8 @@ cmd_boot_owner() { # owner decision 2026-11-01: after a reboot nothing starts by
   if [[ -z $PTR_CURRENT ]]; then log info "boot: no bundle installed"; return 0; fi
   verify_bundle_files "$PTR_CURRENT" || die $EX_VERIFY "boot: bundle $PTR_CURRENT on the flash failed verification"
   log info "boot: bundle $PTR_CURRENT verified on the flash; nothing is started (a play session is started from the WebUI)"
+  # The one exception, by the owner's setting: the permanent workloads daemon (never a play session).
+  if [[ $(cfg_get WORKLOADS_ENABLED no) == yes ]]; then workloads_boot || log error "boot: the workloads daemon was not started"; fi
 }
 
 cmd_boot() {
@@ -4423,11 +5270,17 @@ cmd_config_set() { # KEY=VALUE...
   svc_pid >/dev/null 2>&1 && running=1
   for key in "${!change[@]}"; do
     current=$(cfg_get "$key" "")
-    if [[ $running -eq 1 && ${change[$key]} != "$current" ]] &&
-       [[ $(jq -r --arg k "$key" '.[$k].locked_while_running // false' "$SCHEMA") == true ]]; then
+    [[ ${change[$key]} != "$current" ]] || continue
+    [[ $(jq -r --arg k "$key" '.[$k].locked_while_running // false' "$SCHEMA") == true ]] || continue
+    if [[ $key == WORKLOADS_* ]]; then
+      ! wl_running || die $EX_BLOCKED "$key cannot change while the workloads daemon runs; stop it first"
+    elif [[ $running -eq 1 ]]; then
       die $EX_BLOCKED "$key cannot change while the service is running; stop it first"
     fi
   done
+  if [[ -n ${change[WORKLOADS_CPUS]+x} && -n ${change[WORKLOADS_CPUS]} ]]; then
+    play_cpu_ids "${change[WORKLOADS_CPUS]}" >/dev/null || die $EX_USAGE "WORKLOADS_CPUS names CPUs this host does not have"
+  fi
   if [[ -n ${change[PLAY_SEAT_CPUS]+x} ]]; then
     play_seat_cpus_parse "${change[PLAY_SEAT_CPUS]}" || die $EX_USAGE "PLAY_SEAT_CPUS names CPUs this host does not have, or is malformed"
   fi
@@ -4452,6 +5305,8 @@ cmd_config_set() { # KEY=VALUE...
 
 cmd_config_reset() {
   if svc_pid >/dev/null 2>&1; then die $EX_BLOCKED "stop the service before resetting settings"; fi
+  # An empty WORKLOADS_INSTANCES would stop every instance at the next policy check.
+  if wl_running; then die $EX_BLOCKED "stop the workloads daemon before resetting settings"; fi
   printf '%s\n' "# Managed by polyseatctl config-reset; all values use the plugin defaults." | write_cfg_atomic ||
     die $EX_CORRUPT "could not write settings"
   log info "settings reset to defaults (previous file kept as polyseat-unraid.cfg.bak)"
@@ -4506,13 +5361,14 @@ cmd_metrics() { # read-only
      data_dir:$data, incus:$inc}'
 }
 
-cmd_logs() { # [controller|incusd] [lines]
+cmd_logs() { # [controller|incusd|workloads] [lines]
   local which=${1:-controller} nlines=${2:-100} file
   [[ $nlines =~ ^[0-9]{1,3}$ && $nlines -ge 1 && $nlines -le 500 ]] || die $EX_USAGE "lines must be 1..500"
   case "$which" in
     controller) file="$LOG_DIR/$PLUGIN.log" ;;
     incusd) file="$LOG_DIR/incusd.log" ;;
-    *) die $EX_USAGE "usage: logs [controller|incusd] [lines]" ;;
+    workloads) file="$LOG_DIR/workloads-incusd.log" ;;
+    *) die $EX_USAGE "usage: logs [controller|incusd|workloads] [lines]" ;;
   esac
   [[ -f $file && ! -L $file ]] || return 0
   tail -n "$nlines" -- "$file" |
@@ -4871,6 +5727,8 @@ usage: polyseatctl COMMAND [args]
  owner mode: play-start (verify, stage, approve and launch a session from the files on the flash; no token)
              play-stop [--wait SECONDS] | play-status (aliases of polyseatd-stop/-status, no token)
              play-recover (after a session ended without a clean stop: prove nothing runs, restore the host, record it)
+             workloads-start | workloads-stop [--wait SECONDS] | workloads-status (the permanent Incus; docs/workloads.md)
+             workloads-recover --approve (reopen a workspace without a clean-stop record, once nothing of it runs)
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
 EOF
@@ -4902,7 +5760,8 @@ main() {
     config-get) cmd_config_get; return ;;
     stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke | seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session | steam-session-pin | \
     steam-session-status | steam-session-stop | persist-smoke | daemon-stage | polyseatd-session | polyseatd-play | \
-    polyseatd-status | polyseatd-stop | play-start | play-stop | play-status | play-recover) ;;
+    polyseatd-status | polyseatd-stop | play-start | play-stop | play-status | play-recover | \
+    workloads-start | workloads-stop | workloads-status | workloads-recover | workloads-run) ;;
     *) usage ;;
   esac
   require_mutation_allowed "$cmd" "${args[@]}"
@@ -4923,6 +5782,12 @@ main() {
       polyseatd-status | play-status) cmd_polyseatd_status; return ;;
       polyseatd-stop) cmd_polyseatd_stop; return ;;
       play-stop) cmd_play_stop "${args[@]}"; return ;;
+      # The permanent workloads daemon has a lock of its own: none of these queues behind a play session.
+      workloads-status) cmd_workloads_status; return ;;
+      workloads-start) cmd_workloads_start "${args[@]}"; return ;;
+      workloads-stop) cmd_workloads_stop "${args[@]}"; return ;;
+      workloads-recover) cmd_workloads_recover; return ;;
+      workloads-run) cmd_workloads_run "${args[@]}"; return ;;
       # A second click must be refused at once, not queued behind the running session for two minutes.
       play-start) play_lock_free || die $EX_PENDING "a play session or another controller operation is already running" ;;
       # Nothing is recovered under a live session: the lock is the first proof that none runs (the checks are the rest).
@@ -4953,6 +5818,8 @@ main() {
     polyseatd-play) cmd_polyseatd_play "${args[@]}"; owner_session_end $? ;;
     play-start) cmd_play_start "${args[@]}" ;;
     play-recover) cmd_play_recover "${args[@]}" ;;
+    workloads-start | workloads-stop | workloads-status | workloads-recover | workloads-run)
+      die $EX_BLOCKED "the workloads daemon needs an owner-mode canary build" ;;
     start)
       require_no_journal
       read_pointer

@@ -60,7 +60,10 @@ t('validate_setting accepts and rejects like the schema', function () {
              ['PLAY_SESSION_HOURS', '1'], ['PLAY_SESSION_HOURS', '6'], ['PLAY_SESSION_HOURS', '24'], ['PLAY_SESSION_HOURS', '06'],
              ['PLAY_CPU_PERFORMANCE', 'yes'], ['PLAY_CPU_PERFORMANCE', 'no'],
              ['PLAY_SEAT_CPUS', ''], ['PLAY_SEAT_CPUS', '0-15'], ['PLAY_SEAT_CPUS', '0,2,4-7'], ['PLAY_SEAT_CPUS', 'seat1=0-7;seat2=8-15'],
-             ['PLAY_SEAT_CPUS', 'seat-1=3']];
+             ['PLAY_SEAT_CPUS', 'seat-1=3'],
+             ['WORKLOADS_ENABLED', 'yes'], ['WORKLOADS_ENABLED', 'no'], ['WORKLOADS_INSTANCES', ''], ['WORKLOADS_INSTANCES', 'ubuntudev'],
+             ['WORKLOADS_INSTANCES', 'ubuntudev ubuntudev-test'], ['WORKLOADS_MEMORY_MB', '0'], ['WORKLOADS_MEMORY_MB', '28672'],
+             ['WORKLOADS_MEMORY_MB', '4194304'], ['WORKLOADS_CPUS', ''], ['WORKLOADS_CPUS', '0-15'], ['WORKLOADS_CPUS', '0-7,16-19']];
     $bad = [['SERVICE', 'maybe'], ['SERVICE', ''], ['ACCEPT_NO_LSM', 'YES'], ['HEALTH_TIMEOUT', '9'], ['HEALTH_TIMEOUT', '301'],
             ['HEALTH_TIMEOUT', '1e2'], ['HEALTH_TIMEOUT', '-10'], ['HEALTH_TIMEOUT', ' 30'], ['HEALTH_TIMEOUT', "30\n"],
             ['SUBID_COUNT', '1'], ['DATA_DIR', '/etc'], ['DATA_DIR', '/mnt/'], ['DATA_DIR', '/mnt/../etc'], ['DATA_DIR', '/mnt/a/../b'], ['DATA_DIR', '/mnt/a/..'], ['DATA_DIR', '/mnt/./a'], ['DATA_DIR', '/mnt/a/'], ['DATA_DIR', '/mnt//a'],
@@ -74,7 +77,12 @@ t('validate_setting accepts and rejects like the schema', function () {
             ['PLAY_CPU_PERFORMANCE', 'true'], ['PLAY_CPU_PERFORMANCE', 'YES'], ['PLAY_CPU_PERFORMANCE', ''],
             ['PLAY_SEAT_CPUS', '0-'], ['PLAY_SEAT_CPUS', '-3'], ['PLAY_SEAT_CPUS', '0 -3'], ['PLAY_SEAT_CPUS', 'seat1='], ['PLAY_SEAT_CPUS', 'Seat1=0-7'],
             ['PLAY_SEAT_CPUS', 'seat1=0-7;'], ['PLAY_SEAT_CPUS', 'seat1=0-7;seat2'], ['PLAY_SEAT_CPUS', '0-7;seat1=1'], ['PLAY_SEAT_CPUS', 'seat1=0-7,'],
-            ['PLAY_SEAT_CPUS', "0-15\n"], ['PLAY_SEAT_CPUS', '12345'], ['PLAY_SEAT_CPUS', str_repeat('1,', 200) . '1'], ['PLAY_SEAT_CPUS', '$(id)']];
+            ['PLAY_SEAT_CPUS', "0-15\n"], ['PLAY_SEAT_CPUS', '12345'], ['PLAY_SEAT_CPUS', str_repeat('1,', 200) . '1'], ['PLAY_SEAT_CPUS', '$(id)'],
+            ['WORKLOADS_ENABLED', 'true'], ['WORKLOADS_ENABLED', ''], ['WORKLOADS_INSTANCES', 'Ubuntudev'], ['WORKLOADS_INSTANCES', 'a  b'],
+            ['WORKLOADS_INSTANCES', ' a'], ['WORKLOADS_INSTANCES', 'a '], ['WORKLOADS_INSTANCES', "a\nb"], ['WORKLOADS_INSTANCES', 'a;b'],
+            ['WORKLOADS_INSTANCES', '-a'], ['WORKLOADS_INSTANCES', str_repeat('a ', 16) . 'a'], ['WORKLOADS_INSTANCES', str_repeat('a', 64)],
+            ['WORKLOADS_MEMORY_MB', '4194305'], ['WORKLOADS_MEMORY_MB', '28G'], ['WORKLOADS_MEMORY_MB', ''], ['WORKLOADS_CPUS', '0-'],
+            ['WORKLOADS_CPUS', '0-7;1'], ['WORKLOADS_CPUS', 'seat1=0-7'], ['WORKLOADS_CPUS', "0-7\n"], ['WORKLOADS_CPUS', '12345']];
     foreach ($good as [$k, $v]) { ok(psu_validate_setting($k, $v), "$k=$v should pass"); }
     foreach ($bad as [$k, $v]) { ok(!psu_validate_setting($k, $v), "$k=" . json_encode($v) . ' should fail'); }
 });
@@ -116,6 +124,8 @@ t('argument allowlist', function () use ($SHA) {
              ['activate', $SHA, '--approve'], ['rollback', '--approve'], ['recover', '--approve'], ['config-reset'],
              ['config-set', 'SERVICE=enabled'], ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=30'], ['polyseatd-status'], ['play-status'], ['play-start'], ['play-stop'], ['play-recover'],
              ['config-set', 'PLAY_CPU_PERCENT=50', 'PLAY_MEMORY_MB=8192', 'LIBRARY_PATH=/mnt/tank/games'],
+             ['workloads-status'], ['workloads-start'], ['workloads-stop'], ['logs', 'workloads', '200'],
+             ['config-set', 'WORKLOADS_ENABLED=yes', 'WORKLOADS_INSTANCES=ubuntudev', 'WORKLOADS_MEMORY_MB=28672', 'WORKLOADS_CPUS=0-15'],
              ['config-set', 'PLAY_SESSION_HOURS=12', 'PLAY_CPU_PERFORMANCE=yes', 'PLAY_SEAT_CPUS=seat1=0-7;seat2=8-15']];
     $bad = [[], ['uninstall', '--approve'], ['update', 'a', 'b', 'c', '--approve'], ['stage', 'a', 'b', 'c', '--approve'],
             ['boot'], ['status', '--json', 'x'], ['status', '-x'], ['activate', $SHA], ['activate', $SHA, '--approve', 'x'],
@@ -128,7 +138,11 @@ t('argument allowlist', function () use ($SHA) {
             ['config-set', 'PLAY_CPU_PERCENT=101'], ['config-set', 'LIBRARY_PATH=/etc'], ['config-set', 'PLAY_MEMORY_MB=8G'],
             ['play-start', '--approve'], ['play-start', 'x'], ['play-stop', '--wait', '300'], ['play-stop', 'x'], ['play-status', 'x'],
             ['play-recover', '--approve'], ['play-recover', 'x'], ['play-recover', '--force'], ['Play-Recover'],
-            ['config-set', 'PLAY_SESSION_HOURS=25'], ['config-set', 'PLAY_SEAT_CPUS=0-15;rm'], ['config-set', 'PLAY_CPU_PERFORMANCE=true']];
+            ['config-set', 'PLAY_SESSION_HOURS=25'], ['config-set', 'PLAY_SEAT_CPUS=0-15;rm'], ['config-set', 'PLAY_CPU_PERFORMANCE=true'],
+            ['workloads-start', '--boot'], ['workloads-start', '--approve'], ['workloads-stop', '--wait', '600'], ['workloads-stop', 'x'],
+            ['workloads-status', 'x'], ['workloads-status', '--json'], ['workloads-run'], ['workloads-run', 'run'], ['workloads-run', 'adopt'],
+            ['workloads-recover'], ['workloads-recover', '--approve'], ['logs', 'workloads', '0'], ['logs', 'workload', '10'],
+            ['config-set', 'WORKLOADS_INSTANCES=Bad Name'], ['config-set', 'WORKLOADS_CPUS=0-'], ['config-set', 'WORKLOADS_MEMORY_MB=8G']];
     foreach ($good as $args) { ok(psu_ctl_args_ok($args), json_encode($args) . ' should pass'); }
     foreach ($bad as $args) { ok(!psu_ctl_args_ok($args), json_encode($args) . ' should fail'); }
 });
@@ -401,6 +415,85 @@ t('theme and boot script helpers are whitelisted', function () {
     ok($threw, 'unknown init function rejected');
     $script = psu_boot_script('psu-tool', 'initTool', ['csrf' => '</script>']);
     ok(substr_count($script, '</script>') === 1, 'only the closing tag of the wrapper');
+});
+
+t('the workloads view is read-only, reduced to validated fields and tells "not in this build" from "unavailable"', function () {
+    $get = fn() => psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => 'workloads'], []);
+    stub_reset(['gate' => 'closed', 'workloads' => 'up']);
+    [$code, , $body] = $get();
+    $b = json_decode($body, true);
+    eq($code, 200);
+    eq($b['data']['state'], 'running');
+    eq($b['data']['enabled'], true);
+    eq($b['data']['policy_ok'], false);
+    eq($b['data']['clean_stop'], false);
+    eq($b['data']['instances'], [['name' => 'ubuntudev', 'status' => 'Running', 'ips' => ['192.168.178.144'], 'autostart' => true],
+                                 ['name' => 'test', 'status' => 'Stopped', 'ips' => [], 'autostart' => false]],
+       'only valid names and IPv4 addresses; the bad name, the IPv6 and the markup are dropped');
+    eq($b['data']['violations'], ['instance ubuntudev: device usb', 'instance x: <b>bad</b>?'], 'printable ASCII only (the page sets it as text)');
+    ok(is_int($b['now']));
+    stub_reset(['gate' => 'closed', 'workloads' => 'evil']);
+    [, , $body] = $get();
+    eq(json_decode($body, true)['data'], ['state' => 'stopped', 'enabled' => false, 'policy_ok' => true, 'violations' => [],
+                                          'instances' => [], 'clean_stop' => null, 'note' => '', 'updated' => null]);
+    stub_reset(['gate' => 'closed', 'workloads' => 'none']);
+    [$code, , $body] = $get();
+    eq([$code, json_decode($body, true)['data']], [200, null], 'a build without the daemon is an answer');
+    stub_reset(['gate' => 'closed', 'workloads' => 'broken']);
+    [$code, , $body] = $get();
+    eq([$code, json_decode($body, true)['error']], [502, 'unavailable']);
+    foreach (stub_calls() as $call) { eq($call, ['workloads-status']); }
+    // never by GET, and the internal and console verbs never by POST
+    stub_reset(['gate' => 'open']);
+    foreach (['workloads_start', 'workloads_stop', 'workloads-start', 'workloads-stop', 'workloads-run', 'workloads-recover', 'workloads_recover'] as $action) {
+        [$code] = psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => $action], []);
+        eq($code, 400, "GET $action");
+    }
+    foreach (['workloads-start', 'workloads-stop', 'workloads-run', 'workloads_run', 'workloads-recover', 'workloads_recover'] as $action) {
+        [$code] = post(['action' => $action]);
+        eq($code, 400, "POST $action");
+    }
+    eq(stub_calls(), []);
+});
+
+t('workloads start and stop: owner builds only, the stop with the typed phrase, nothing but the verb reaches the controller', function () {
+    stub_reset(['gate' => 'canary', 'mode' => 'owner']);
+    [$code, $b] = post(['action' => 'workloads_stop']);
+    eq([$code, $b['error']], [400, 'confirm']);
+    [$code, $b] = post(['action' => 'workloads_stop', 'confirm' => 'STOP']);
+    eq([$code, $b['error']], [400, 'confirm'], 'the generic phrase is not enough: the dev box goes down with it');
+    eq($b['expected_hint'], 'STOP WORKLOADS');
+    [$code] = post(['action' => 'workloads_stop', 'confirm' => 'STOP WORKLOADS']); eq($code, 200);
+    [$code] = post(['action' => 'workloads_start']); eq($code, 200);
+    eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), [['workloads-stop'], ['workloads-start']]);
+    stub_reset(['gate' => 'canary', 'mode' => 'signed']);
+    [$code, $b] = post(['action' => 'workloads_start']); eq([$code, $b['error']], [423, 'locked']);
+    [$code] = post(['action' => 'workloads_stop', 'confirm' => 'STOP WORKLOADS']); eq($code, 423);
+    stub_reset(['gate' => 'closed', 'mode' => 'owner']);
+    [$code] = post(['action' => 'workloads_start']); eq($code, 423);
+    stub_reset(['gate' => 'canary']);
+    [$code] = post(['action' => 'workloads_start']); eq($code, 423, 'a controller without a mode is not an owner build');
+    eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), []);
+    stub_reset(['gate' => 'canary', 'mode' => 'owner']);
+    [$code] = post(['action' => 'workloads_start', 'boot' => '1', 'wait' => '600', 'approve' => '1', 'args' => ['--approve']]); eq($code, 200);
+    eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), [['workloads-start']]);
+    eq(psu_confirm_phrase('workloads_stop'), 'STOP WORKLOADS');
+});
+
+t('the settings page has a Workloads tab', function () {
+    $schema = psu_schema();
+    $entries = [];
+    foreach ($schema as $key => $rule) {
+        $entries[] = ['key' => $key, 'type' => $rule['type'], 'tab' => $rule['tab'], 'title' => $rule['title'] ?? $key, 'label' => $rule['label'],
+                      'values' => $rule['values'] ?? null, 'min' => $rule['min'] ?? null, 'max' => $rule['max'] ?? null,
+                      'default' => $rule['default'], 'value' => $rule['default'], 'locked_while_running' => !empty($rule['locked_while_running'])];
+    }
+    $html = psu_render_settings_tabs($entries);
+    ok(strpos($html, 'data-tab="workloads"') !== false && strpos($html, '>Workloads</button>') !== false);
+    foreach (['WORKLOADS_ENABLED', 'WORKLOADS_INSTANCES', 'WORKLOADS_MEMORY_MB', 'WORKLOADS_CPUS'] as $key) {
+        ok(strpos($html, 'name="' . $key . '"') !== false, $key);
+    }
+    ok(strpos($html, 'placeholder="e.g. ubuntudev"') !== false);
 });
 
 exit($failures === 0 ? 0 : 1);

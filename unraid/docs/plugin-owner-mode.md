@@ -144,10 +144,19 @@ the CPUs the play cgroup may use (`0-27` on Tower) when saved and when a session
 every thread of every process in a seat's `lxc.payload.<seat>` cgroup that list with `taskset` (idempotent; nothing
 outside a seat payload cgroup is touched; affinity ends with the process, so there is nothing to restore).
 
+## The permanent Incus for the owner's own containers
+
+Separate from play, started with `workloads-start` (WebUI Workloads card) or at array start if `WORKLOADS_ENABLED=yes`, stopped
+cleanly before the array stops, never a play session: see [workloads.md](workloads.md). A play session and the workloads daemon
+run side by side (own `INCUS_DIR`, cgroup, lock, LXC state); `activate`, `rollback`, `recover` and `uninstall` refuse while the
+workloads daemon runs, because the runtime slot is its binary.
+
 ## Still needs an owner GO
 
 - The `.plg` itself: its install script must drop the `activate --approve` line; flash placement of the seat image and
   daemon; rendering and signing; the actual installation on Tower.
 - Setting `PLAY_CPU_PERFORMANCE=yes` and CPU pinning on Tower for the first time (granted in principle on 2026-11-01).
 - Lengthening `PLAY_SESSION_HOURS` beyond 6 on the real host.
+- The first start of the workloads daemon on Tower (kernel modules, a bridged container on br0), the quota of `cache/polyseat`, and the
+  migration itself ([workloads.md](workloads.md)).
 - Anything not listed above: GPU, VM and br0 rules stay as in [gpu-path.md](gpu-path.md) and [steam.md](steam.md).
