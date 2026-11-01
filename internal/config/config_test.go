@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The same binary is installed two ways and has to find its helpers under
@@ -168,5 +169,80 @@ func TestLoadReadsGPUAllCards(t *testing.T) {
 
 	if !cfg.GPUAllCards {
 		t.Error("the setting exists in name only: the file asked for every card and was ignored")
+	}
+}
+
+// Standby is off unless somebody turns it on, and a file that never mentions it
+// must not turn it on: seats that were running before the setting existed keep
+// running.
+func TestIdleStopIsOffByDefault(t *testing.T) {
+	if got := Default().IdleStop(); got != 0 {
+		t.Errorf("the default configuration stops idle seats after %v", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "polyseatd.json")
+
+	if err := os.WriteFile(path, []byte(`{"listen":"127.0.0.1:47800"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.IdleStopMinutes != 0 || cfg.IdleStop() != 0 {
+		t.Errorf("a file that does not mention standby has %d minutes of it", cfg.IdleStopMinutes)
+	}
+}
+
+// The range is checked where the file is read, so that a typo is an error at
+// start and not a seat that stops after a minute, or never.
+func TestIdleStopRange(t *testing.T) {
+	cases := []struct {
+		json    string
+		minutes int
+		wantErr bool
+	}{
+		{`{"idle_stop_minutes":0}`, 0, false},
+		{`{"idle_stop_minutes":1}`, 1, false},
+		{`{"idle_stop_minutes":30}`, 30, false},
+		{`{"idle_stop_minutes":1440}`, 1440, false},
+		{`{"idle_stop_minutes":1441}`, 0, true},
+		{`{"idle_stop_minutes":-1}`, 0, true},
+		{`{"idle_stop_minutes":"30"}`, 0, true},
+		{`{"idle_stop_minutes":1.5}`, 0, true},
+	}
+
+	for _, tc := range cases {
+		path := filepath.Join(t.TempDir(), "polyseatd.json")
+
+		if err := os.WriteFile(path, []byte(tc.json), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := Load(path)
+
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%s was accepted", tc.json)
+			}
+
+			continue
+		}
+
+		if err != nil {
+			t.Errorf("%s: %v", tc.json, err)
+
+			continue
+		}
+
+		if cfg.IdleStopMinutes != tc.minutes {
+			t.Errorf("%s: got %d minutes", tc.json, cfg.IdleStopMinutes)
+		}
+
+		if want := time.Duration(tc.minutes) * time.Minute; cfg.IdleStop() != want {
+			t.Errorf("%s: IdleStop is %v, want %v", tc.json, cfg.IdleStop(), want)
+		}
 	}
 }

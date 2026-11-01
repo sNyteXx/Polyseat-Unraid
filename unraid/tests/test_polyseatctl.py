@@ -294,19 +294,20 @@ class SettingsAndViewsTests(Base):
 
     def test_play_settings_default_to_unlimited_and_the_current_library(self):
         entries = {e["key"]: e for e in self.cfg()}
-        self.assertEqual([entries[k]["value"] for k in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "LIBRARY_PATH")],
-                         ["0", "0", "/mnt/download/polyseat-games"])
-        self.assertEqual({entries[k]["tab"] for k in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "LIBRARY_PATH")}, {"play"})
+        keys = ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "PLAY_IDLE_STOP_MINUTES", "LIBRARY_PATH")
+        self.assertEqual([entries[k]["value"] for k in keys], ["0", "0", "0", "/mnt/download/polyseat-games"])
+        self.assertEqual({entries[k]["tab"] for k in keys}, {"play"})
+        self.assertTrue(entries["PLAY_IDLE_STOP_MINUTES"]["locked_while_running"])
         self.assertOk(self.sb.ctl("config-set", "PLAY_CPU_PERCENT=50", "PLAY_MEMORY_MB=8192",
-                                  "LIBRARY_PATH=/mnt/tank/games"))
-        self.assertEqual([self.value(k) for k in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "LIBRARY_PATH")],
-                         ["50", "8192", "/mnt/tank/games"])
+                                  "PLAY_IDLE_STOP_MINUTES=45", "LIBRARY_PATH=/mnt/tank/games"))
+        self.assertEqual([self.value(k) for k in keys], ["50", "8192", "45", "/mnt/tank/games"])
 
     def test_play_settings_reject_bad_values_without_changing_anything(self):
         before = (self.sb.flash / "polyseat-unraid.cfg").read_text()
         for pair in ("PLAY_CPU_PERCENT=101", "PLAY_CPU_PERCENT=-1", "PLAY_CPU_PERCENT=", "PLAY_CPU_PERCENT=1.5",
                      "PLAY_CPU_PERCENT=1e1", "PLAY_CPU_PERCENT=%2050", "PLAY_MEMORY_MB=4194305", "PLAY_MEMORY_MB=8GB",
-                     "PLAY_MEMORY_MB=00000000000", "LIBRARY_PATH=/etc", "LIBRARY_PATH=/mnt/", "LIBRARY_PATH=/mnt/a/../b",
+                     "PLAY_MEMORY_MB=00000000000", "PLAY_IDLE_STOP_MINUTES=1441", "PLAY_IDLE_STOP_MINUTES=-1",
+                     "PLAY_IDLE_STOP_MINUTES=", "PLAY_IDLE_STOP_MINUTES=2h", "LIBRARY_PATH=/etc", "LIBRARY_PATH=/mnt/", "LIBRARY_PATH=/mnt/a/../b",
                      "LIBRARY_PATH=/mnt/a b", "LIBRARY_PATH=/mnt/a/", "PLAY_PIDS_MAX=1"):
             self.assertNotEqual(self.sb.ctl("config-set", pair).code, 0, pair)
         self.assertEqual((self.sb.flash / "polyseat-unraid.cfg").read_text(), before)

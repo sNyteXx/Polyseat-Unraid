@@ -285,12 +285,13 @@ class CanaryApprovalTests(unittest.TestCase):
     def test_only_the_owners_play_settings_may_be_added_and_only_with_valid_values(self):
         self.sign()
         for setting in ("PLAY_CPU_PERCENT=0", "PLAY_CPU_PERCENT=50", "PLAY_MEMORY_MB=8192",
-                        "LIBRARY_PATH=/mnt/download/polyseat-games"):
+                        "PLAY_IDLE_STOP_MINUTES=0", "PLAY_IDLE_STOP_MINUTES=30", "LIBRARY_PATH=/mnt/download/polyseat-games"):
             with self.subTest(setting=setting):
                 self.assertEqual(self.check("config-set", setting).returncode, 0)
         self.assertEqual(self.check("config-set", "SERVICE=disabled", "PLAY_CPU_PERCENT=25").returncode, 0)
         for setting in ("PLAY_CPU_PERCENT=101", "PLAY_CPU_PERCENT=-1", "PLAY_CPU_PERCENT=", "PLAY_CPU_PERCENT=1.5",
-                        "PLAY_MEMORY_MB=4194305", "PLAY_MEMORY_MB=abc", "LIBRARY_PATH=/etc", "LIBRARY_PATH=/mnt/../etc",
+                        "PLAY_MEMORY_MB=4194305", "PLAY_MEMORY_MB=abc",
+                        "PLAY_IDLE_STOP_MINUTES=1441", "PLAY_IDLE_STOP_MINUTES=", "PLAY_IDLE_STOP_MINUTES=1.5", "LIBRARY_PATH=/etc", "LIBRARY_PATH=/mnt/../etc",
                         "LIBRARY_PATH=/mnt/a/", "PLAY_PIDS_MAX=1", "PLAY_CPU_MAX=max", "PLAY_MEMORY_MAX=max"):
             with self.subTest(setting=setting):
                 self.assertEqual(self.check("config-set", setting).returncode, 2)

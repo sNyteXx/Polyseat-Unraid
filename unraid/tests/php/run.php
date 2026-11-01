@@ -55,6 +55,7 @@ t('validate_setting accepts and rejects like the schema', function () {
              ['HEALTH_TIMEOUT', '300'], ['SUBID_START', '100000'], ['SUBID_COUNT', '65536'],
              ['DATA_DIR', ''], ['DATA_DIR', '/mnt/cache/appdata/polyseat'], ['DATA_DIR', '/mnt/a/.hidden'], ['DATA_DIR', '/mnt/a/b..c'], ['DATA_DIR', '/mnt/disk1/a.b-c_d'],
              ['PLAY_CPU_PERCENT', '0'], ['PLAY_CPU_PERCENT', '100'], ['PLAY_CPU_PERCENT', '007'], ['PLAY_MEMORY_MB', '0'], ['PLAY_MEMORY_MB', '4194304'],
+             ['PLAY_IDLE_STOP_MINUTES', '0'], ['PLAY_IDLE_STOP_MINUTES', '1440'], ['PLAY_IDLE_STOP_MINUTES', '030'],
              ['LIBRARY_PATH', ''], ['LIBRARY_PATH', '/mnt/download/polyseat-games'], ['LIBRARY_PATH', '/mnt/disk1/a.b-c_d']];
     $bad = [['SERVICE', 'maybe'], ['SERVICE', ''], ['ACCEPT_NO_LSM', 'YES'], ['HEALTH_TIMEOUT', '9'], ['HEALTH_TIMEOUT', '301'],
             ['HEALTH_TIMEOUT', '1e2'], ['HEALTH_TIMEOUT', '-10'], ['HEALTH_TIMEOUT', ' 30'], ['HEALTH_TIMEOUT', "30\n"],
@@ -62,6 +63,7 @@ t('validate_setting accepts and rejects like the schema', function () {
             ['DATA_DIR', "/mnt/a\n"], ['DATA_DIR', '/mnt/a b'], ['DATA_DIR', '/mnt/a"b'], ['NOPE', '1'], ['', '1'],
             ['PLAY_CPU_PERCENT', '101'], ['PLAY_CPU_PERCENT', '-1'], ['PLAY_CPU_PERCENT', ''], ['PLAY_CPU_PERCENT', '5.5'], ['PLAY_CPU_PERCENT', '1e1'],
             ['PLAY_CPU_PERCENT', ' 5'], ['PLAY_CPU_PERCENT', "5\n"], ['PLAY_MEMORY_MB', '4194305'], ['PLAY_MEMORY_MB', '8G'], ['PLAY_MEMORY_MB', '99999999999'],
+            ['PLAY_IDLE_STOP_MINUTES', '1441'], ['PLAY_IDLE_STOP_MINUTES', ''], ['PLAY_IDLE_STOP_MINUTES', '5.5'], ['PLAY_IDLE_STOP_MINUTES', "30\n"],
             ['LIBRARY_PATH', '/etc'], ['LIBRARY_PATH', '/mnt/'], ['LIBRARY_PATH', '/mnt/a/../b'], ['LIBRARY_PATH', '/mnt/a/'], ['LIBRARY_PATH', "/mnt/a\n"],
             ['LIBRARY_PATH', '/mnt/a b'], ['PLAY_PIDS_MAX', '1']];
     foreach ($good as [$k, $v]) { ok(psu_validate_setting($k, $v), "$k=$v should pass"); }
