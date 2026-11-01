@@ -161,6 +161,17 @@ def rehearsal_check(data, commit, archive_sha, controller_sha):
     return evidence
 
 
+DAEMON_PIN = re.compile(rb'^POLYSEATD_SHA256="([0-9a-f]{64})?"$', re.MULTILINE)
+
+
+def pin_daemon(source, packaged):
+    """The one build-time difference besides the gate: CI pins the polyseatd it built in the same run."""
+    pins = DAEMON_PIN.findall(packaged)
+    if len(pins) != 1 or len(DAEMON_PIN.findall(source)) != 1 or not source.count(b'\nPOLYSEATD_SHA256=""\n'):
+        return source
+    return source.replace(b'\nPOLYSEATD_SHA256=""\n', b'\nPOLYSEATD_SHA256="' + pins[0] + b'"\n', 1)
+
+
 def source_check(package_data, plan_data, commit, image_facts):
     """Compare *all* packaged source files and the plan to the named Git commit."""
     def git(*args):
@@ -176,6 +187,7 @@ def source_check(package_data, plan_data, commit, image_facts):
         wanted = git("show", f"{commit}:{path}")
         if path == base + "scripts/polyseatctl":
             wanted = PACKAGE.render_gate(wanted, "closed", "canary")
+            wanted = pin_daemon(wanted, packaged[PACKAGE.BASE + "/" + path[len(base):]])
         if packaged[PACKAGE.BASE + "/" + path[len(base):]] != wanted:
             raise ValueError(f"controller source differs from named commit: {path}")
     if plan_data != git("show", f"{commit}:unraid/docs/production-canary-plan.md"):

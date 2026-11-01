@@ -389,3 +389,18 @@ class CanaryArtifactTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DaemonPinTests(unittest.TestCase):
+    """Step 3: the canary controller differs from its source by the gate and, if CI built one, the polyseatd pin."""
+
+    def test_only_a_valid_pin_on_the_empty_pin_line_is_accepted(self):
+        source = b'X=1\nPOLYSEATD_SHA256=""\nY=2\n'
+        pin = b"ab" * 32
+        packaged = source.replace(b'""', b'"' + pin + b'"')
+        self.assertEqual(ART.pin_daemon(source, packaged), packaged)
+        self.assertEqual(ART.pin_daemon(source, source), source)
+        for bad in (source.replace(b'""', b'"' + b"AB" * 32 + b'"'), source.replace(b'""', b'"' + b"ab" * 31 + b'"'),
+                    packaged + b'POLYSEATD_SHA256="' + pin + b'"\n'):
+            with self.subTest(bad=bad[-40:]):
+                self.assertNotEqual(ART.pin_daemon(source, bad), bad)
