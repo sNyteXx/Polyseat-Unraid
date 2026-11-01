@@ -1188,8 +1188,14 @@ class PlayTests(unittest.TestCase):
         return source_ctl(script, env=env)
 
     def test_seat_policy_allows_upstreams_seat_and_nothing_else(self):
-        res = self.guard([self.SEAT])
+        persisted = {"name": "polyseat-persist-cpu", "type": "container", "profiles": ["default"],
+                     "config": {"boot.autostart": "false", "security.privileged": "false", "security.nesting": "false",
+                                "limits.cpu": "2", "limits.memory": "2GiB", "limits.processes": "1024"},
+                     "devices": {"root": {"type": "disk", "path": "/", "pool": "default"}}}
+        res = self.guard([self.SEAT, persisted])  # step 2's persisted seat stays next to polyseatd's
         self.assertEqual(res.returncode, 0, res.stderr)
+        res = source_ctl('POLYSEAT_RELEASE_GATE=canary CANARY_OPERATION=8; play_seat_guard() { echo PLAY-GUARD; }; canary_profile_guard')
+        self.assertIn("PLAY-GUARD", res.stdout)
         bad = []
         for key, value in (("raw.lxc", "lxc.cap.drop ="), ("security.privileged", "true"), ("boot.autostart", "true"),
                            ("linux.kernel_modules", "kvm")):

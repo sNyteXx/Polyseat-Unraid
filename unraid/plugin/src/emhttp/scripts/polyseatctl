@@ -1643,6 +1643,8 @@ NFT
 canary_profile_guard() {
   local server projects profiles instances pools networks
   [[ $POLYSEAT_RELEASE_GATE == canary ]] || return 0
+  # A play session's Incus holds polyseatd's seats: the health check and every guard use the seat policy instead.
+  if [[ $CANARY_OPERATION -eq 8 ]]; then play_seat_guard; return; fi
   # The profiles and instances endpoints operate in the default project only.
   # Any additional project would bypass the checks below, so forbid it first.
   server=$(INCUS_CMD_TIMEOUT=5 run_incus query /1.0) || return 1
@@ -2946,6 +2948,8 @@ play_seat_guard() { # read-only: everything in Incus is either ours or exactly t
       (.key == "security.nesting" and (.value == "true" or .value == "false")) or
       (.key == "security.privileged" and .value == "false") or
       (.key == "limits.kernel.nice" and (.value | test("^[0-9]+$"))) or
+      ((.key == "limits.cpu" or .key == "limits.processes") and (.value | test("^[0-9]+$"))) or
+      (.key == "limits.memory" and (.value | test("^[0-9]+(MiB|GiB)$"))) or
       (.key == "nvidia.runtime" and (.value == "true" or .value == "false")) or
       (.key == "nvidia.driver.capabilities" and (.value | test("^[a-z0-9,]+$")))) | not)) | map("config " + .key);
     def devices_ok: to_entries | map(select(.value | device | not) | "device " + .key + " " + (.value | tostring));
