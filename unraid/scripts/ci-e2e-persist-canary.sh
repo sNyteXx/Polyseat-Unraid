@@ -278,7 +278,7 @@ ip link set br0 up
 lan=10.77.0.1
 psd="$fixture/mnt/cache/polyseat/polyseatd"
 install_run D '["stage","activate","seat-image-stage","daemon-stage","polyseatd-session"]'
-ctl daemon-stage "$daemon/polyseatd" --approve >> "$evidence/D-install.txt" 2>&1 || fail 'run D: daemon-stage'
+ctl daemon-stage "$daemon/polyseat-daemon.tar" --approve >> "$evidence/D-install.txt" 2>&1 || fail 'run D: daemon-stage'
 rc=0; ctl polyseatd-session --approve > "$evidence/D-no-password.txt" 2>&1 || rc=$?
 [[ $rc != 0 ]] || fail 'run D: started without a password'
 grep -q 'no password set' "$evidence/D-no-password.txt" || fail 'run D: refused for another reason than the missing password'
@@ -316,7 +316,7 @@ rc=0; wait "$session_pid" || rc=$?
 [[ $rc == 0 ]] || fail "run D failed (rc=$rc, see D-polyseatd-session.txt)"
 grep -q "^PASS: polyseatd served https://$lan:47800 on the LAN only" "$evidence/D-polyseatd-session.txt" || fail 'run D: no PASS'
 [[ ! -e /run/polyseat ]] || fail 'run D: /run/polyseat left behind'
-if pgrep -f "$fixture/var/lib/polyseat-unraid-daemon/polyseatd" >/dev/null; then fail 'run D: polyseatd survived'; fi
+if pgrep -f "$fixture/var/lib/polyseat-unraid-daemon/bin/polyseatd" >/dev/null; then fail 'run D: polyseatd survived'; fi
 jq -e '.instances == [{"name":"polyseat-persist-cpu","status":"Stopped","autostart":"false"}]' "$state/clean-stop.json" >/dev/null ||
   fail 'run D: no clean stop recorded'
 finish_run D

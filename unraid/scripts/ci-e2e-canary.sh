@@ -244,8 +244,8 @@ host_sha=$(printf '%s' "${uuid,,}" | sha256sum | awk '{print $1}')
 unset uuid
 mkdir -- "$work/package"
 # The upstream daemon built earlier in this job; the canary controller pins exactly this binary.
-[[ -f $proof/daemon/polyseatd && ! -L $proof/daemon/polyseatd ]] || fail 'polyseatd build missing'
-POLYSEATD_SHA256=$(sha256sum "$proof/daemon/polyseatd" | awk '{print $1}')
+[[ -f $proof/daemon/polyseat-daemon.tar && ! -L $proof/daemon/polyseat-daemon.tar ]] || fail 'daemon bundle missing'
+POLYSEATD_SHA256=$(sha256sum "$proof/daemon/polyseat-daemon.tar" | awk '{print $1}')
 export POLYSEATD_SHA256
 python3 "$GITHUB_WORKSPACE/unraid/scripts/build-canary-package.py" \
   --version "$(date -u +%Y.%m.%d).ci$GITHUB_RUN_ID" --out "$work/package" --acknowledge-artifacts-only

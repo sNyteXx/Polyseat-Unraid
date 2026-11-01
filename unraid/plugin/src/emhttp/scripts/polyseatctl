@@ -104,7 +104,8 @@ PERSIST_INSTANCE="polyseat-persist-cpu"
 PERSIST_MIN_FREE_KB=$((8 * 1024 * 1024))
 PERSIST_FRESH=0
 # Step 3 (owner, 2026-11-01: "muss in LAN sein"): upstream's polyseatd on the persistent Incus, its interface on the
-# LAN address of the host bridge only. The package build pins the exact daemon binary here; empty = no daemon.
+# LAN address of the host bridge only. The package build pins the exact daemon bundle (polyseat-daemon.tar:
+# polyseatd, upstream's input helpers and their interpreter) here; empty = no daemon.
 POLYSEATD_SHA256=""
 POLYSEATD_STATE="$PERSIST_MOUNT/polyseatd"
 POLYSEATD_LIBRARY="$PERSIST_MOUNT/library"
@@ -158,7 +159,7 @@ init_paths() {
   SEAT_IMAGE="$SEAT_DIR/image"
   SEAT_MANIFEST="$SEAT_DIR/manifest.json"
   POLYSEATD_DIR="$ROOT/var/lib/polyseat-unraid-daemon"
-  POLYSEATD_BIN="$POLYSEATD_DIR/polyseatd"
+  POLYSEATD_BIN="$POLYSEATD_DIR/bin/polyseatd"
   SEAT_EVIDENCE="$RUN_DIR/desktop-evidence"
   PIDFILE="$RUN_DIR/incusd.pid"
   LOCKFILE="$RUN_DIR/lock"
@@ -321,12 +322,12 @@ canary_approval_for() { # command args... (root only, non-sandbox)
     (.issued_at | type == "number" and . == floor) and
     (.expires_at | type == "number" and . == floor) and
     .issued_at <= $now and $now < .expires_at and
-    (.expires_at - .issued_at) <= 1800 and
+    (.expires_at - .issued_at) <= (if (.actions | index("polyseatd-play")) != null then 21600 else 1800 end) and
     (.actions | type == "array" and length <= 6 and length > 0 and
       (unique | length) == length and all(.[];
        . == "stage" or . == "activate" or . == "start" or . == "canary-smoke" or
        . == "seat-image-stage" or . == "desktop-smoke" or . == "gpu-smoke" or . == "steam-smoke" or . == "steam-session" or
-       . == "persist-smoke" or . == "daemon-stage" or . == "polyseatd-session" or
+       . == "persist-smoke" or . == "daemon-stage" or . == "polyseatd-session" or . == "polyseatd-play" or
        . == "config-set" or . == "config-reset")) and
     (.actions | index($action) != null)' "$CANARY_APPROVAL" >/dev/null 2>&1 ||
     die $EX_BLOCKED "canary approval expired, wrong host, invalid scope or bad schema"
@@ -336,7 +337,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
       [[ -f ${1:-} && ! -L ${1:-} ]] || die $EX_BLOCKED "canary stage archive unavailable"
       target=$(sha256sum -- "$1" | awk '{print $1}') ;;
     activate) target=${1:-} ;;
-    start | canary-smoke | daemon-stage | polyseatd-session)
+    start | canary-smoke | daemon-stage | polyseatd-session | polyseatd-play)
       read_pointer
       target=$PTR_CURRENT ;;
     seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session | persist-smoke)
@@ -1009,7 +1010,7 @@ canary_secure_path() { # existing absolute directory (ancestors included)
 
 canary_validate_data_dir() { # candidate, may be absent for the first start
   local requested=$1 parent
-  if [[ $CANARY_OPERATION -eq 6 || $CANARY_OPERATION -eq 7 ]]; then persist_validate_data_dir; return; fi
+  if [[ $CANARY_OPERATION -ge 6 && $CANARY_OPERATION -le 8 ]]; then persist_validate_data_dir; return; fi
   [[ -z $requested || $requested == "$CANARY_DATA_DIR" ]] || {
     log error "canary: only the fixed ephemeral workspace is allowed"; return 1;
   }
@@ -1135,6 +1136,17 @@ canary_command_allowed() {
     "query /1.0/instances/$STEAM_INSTANCE/state" | "query /1.0/instances/$PERSIST_INSTANCE/state")
       [[ $CANARY_OPERATION -ne 1 ]] && return 0 ;;
   esac
+  if [[ $CANARY_OPERATION -eq 8 ]]; then
+    case "$*" in
+      "storage create default dir source=$INCUS_DIR/storage-pools/default" | \
+      'profile device add default root disk path=/ pool=default' | \
+      "profile device add default eth0 nic nictype=bridged parent=$STEAM_NIC_PARENT name=eth0" | \
+      'query /1.0/storage-pools/default' | 'query /1.0/profiles/default' | 'admin shutdown --timeout 60') return 0 ;;
+    esac
+    [[ $# -eq 4 && $1 == stop && $2 =~ $PLAY_NAME_RE && "$3 $4" == '--timeout 60' ]] && return 0
+    [[ $# -eq 5 && $1 == stop && $2 =~ $PLAY_NAME_RE && "$3 $4 $5" == '--force --timeout 5' ]] && return 0
+    return 1
+  fi
   if [[ $CANARY_OPERATION -eq 7 ]]; then
     case "$*" in
       "stop $PERSIST_INSTANCE --force --timeout 5" | 'admin shutdown --timeout 60') return 0 ;;
@@ -1296,7 +1308,7 @@ canary_cgroup_prepare() {
 }
 
 # Exactly two fixed budgets exist: the CPU canary's (defaults above) and the desktop canary's.
-canary_budget_select() { # cpu|desktop|gpu|steam|persist
+canary_budget_select() { # cpu|desktop|gpu|steam|persist|play
   case "$1" in
     cpu) ;;
     desktop)
@@ -1309,6 +1321,9 @@ canary_budget_select() { # cpu|desktop|gpu|steam|persist
     persist)
       canary_budget_select desktop
       CANARY_INSTANCE=$PERSIST_INSTANCE ;;
+    play)
+      CANARY_CPUSET=$PLAY_CPUSET CANARY_CPU_MAX=$PLAY_CPU_MAX CANARY_MEMORY_MAX=$PLAY_MEMORY_MAX
+      CANARY_PIDS_MAX=$PLAY_PIDS_MAX CANARY_GPU_PCI=$GPU_CANARY_PCI CANARY_INSTANCE="" ;;
     steam)
       CANARY_CPU_MAX=$STEAM_CPU_MAX CANARY_MEMORY_MAX=$STEAM_MEMORY_MAX
       CANARY_PIDS_MAX=$STEAM_PIDS_MAX CANARY_DATA_MAX_KB=$STEAM_DATA_MAX_KB
@@ -1405,7 +1420,7 @@ canary_process_starttime() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
 
 canary_budget_check() {
   local kb bytes=0 file size
-  if [[ ${CANARY_OPERATION:-0} -eq 6 || ${CANARY_OPERATION:-0} -eq 7 ]]; then
+  if [[ ${CANARY_OPERATION:-0} -ge 6 && ${CANARY_OPERATION:-0} -le 8 ]]; then
     # Persistent state on the dataset: its quota caps the size; walking a seat's rootfs every second would not.
     kb=$(df -Pk -- "$DATA_REAL" 2>/dev/null | awk 'NR == 2 {print $4}')
     [[ $kb =~ ^[0-9]+$ && $kb -ge $PERSIST_MIN_FREE_KB ]] || return 1
@@ -1488,7 +1503,7 @@ canary_watchdog_start() {
   expiry=$(jq -er '.expires_at' "$CANARY_APPROVAL") || return 1
   now=$(date -u +%s) mono=$(canary_monotonic_seconds) || return 1
   remaining=$((expiry - now))
-  [[ $remaining -gt 0 && $remaining -le 1800 ]] || return 1
+  [[ $remaining -gt 0 && $remaining -le $(( CANARY_OPERATION == 8 ? PLAY_MAX_WINDOW : 1800 )) ]] || return 1
   # setsid via a function-exported bash keeps the supervisor independent of
   # SSH/interactive sessions. No child inherits controller lock descriptor 9.
   # shellcheck disable=SC2016  # arguments expand only in the child Bash
@@ -1807,6 +1822,7 @@ svc_start() {
       5) canary_approval_for steam-session ;;
       6) canary_approval_for persist-smoke ;;
       7) canary_approval_for polyseatd-session ;;
+      8) canary_approval_for polyseatd-play ;;
       *) canary_approval_for start ;;
     esac
     canary_host_pressure_check || { log error "canary: host memory/load outside approved safety window"; return 1; }
@@ -1823,7 +1839,8 @@ svc_start() {
     if lxc_hook_prepare "$(bundle_manifest "$active_sha")" "$slot_real"; then LXC_HOOK_READY=1
     else log warn "LXC nvidia hook unavailable: GPU seats cannot start"; fi
   fi
-  [[ ($CANARY_OPERATION -ne 3 && $CANARY_OPERATION -ne 4 && $CANARY_OPERATION -ne 5) || $LXC_HOOK_READY -eq 1 ]] ||
+  [[ ($CANARY_OPERATION -ne 3 && $CANARY_OPERATION -ne 4 && $CANARY_OPERATION -ne 5 && $CANARY_OPERATION -ne 8) ||
+     $LXC_HOOK_READY -eq 1 ]] ||
     { log error "gpu: LXC nvidia hook not ready"; return 1; }
   validate_data_dir || return 1
   if svc_pid >/dev/null; then
@@ -1841,7 +1858,7 @@ svc_start() {
     for tool in unshare setpriv mount umount setsid renice; do command -v "$tool" >/dev/null || return 1; done
     # Read-only topology checks first, so a mismatch leaves no one-shot state behind.
     canary_cgroup_precheck || return 1
-    if [[ $CANARY_OPERATION -eq 6 || $CANARY_OPERATION -eq 7 ]]; then persist_state_prepare "$active_sha" || return 1
+    if [[ $CANARY_OPERATION -ge 6 && $CANARY_OPERATION -le 8 ]]; then persist_state_prepare "$active_sha" || return 1
     else canary_fresh_state_prepare "$active_sha" || return 1; fi
     canary_deny_tools_prepare || return 1
     [[ -d $LOG_DIR && ! -L $LOG_DIR && $(stat -c %u -- "$LOG_DIR") == 0 ]] || return 1
@@ -2528,8 +2545,8 @@ persist_state_prepare() { # active sha : creates the workspace once; afterwards 
     { log error "persist: workspace record missing or written by another Incus version; no up- or downgrade here"; return 1; }
   stop=$DATA_REAL/clean-stop.json
   { [[ -f $stop && ! -L $stop && $(stat -c '%u %a' -- "$stop") == '0 600' ]] &&
-    jq -e --arg inst "$PERSIST_INSTANCE" '.schema == 1 and (.instances | type == "array" and length <= 1 and
-      all(.[]; .name == $inst and .status == "Stopped" and .autostart == "false"))' "$stop" >/dev/null 2>&1; } ||
+    jq -e --arg re "$PLAY_NAME_RE" '.schema == 1 and (.instances | type == "array" and (map(.name) | unique | length) == length and
+      all(.[]; (.name | test($re)) and .status == "Stopped" and .autostart == "false"))' "$stop" >/dev/null 2>&1; } ||
     { log error "persist: the previous run recorded no clean stop; inspection required, nothing was started"; return 1; }
   [[ -d $INCUS_DIR && ! -L $INCUS_DIR ]] || { log error "persist: the Incus directory is missing"; return 1; }
   # Consumed before the daemon starts: a crash from here on leaves no record, so the next run refuses again.
@@ -2545,9 +2562,9 @@ persist_instances() { # prints the persisted seats as [{name, status, autostart}
     select(length <= 1 and all(.[]; .name == $inst and .status == "Stopped" and .autostart == "false"))' <<< "$is"
 }
 
-persist_clean_stop() { # every seat stopped and non-autostarting, Incus shut down by itself, then the record
-  local seats pid i
-  seats=$(persist_instances) || { log error "persist: a seat still runs or would autostart; no clean stop"; return 1; }
+persist_clean_stop() { # [seats json] : every seat stopped and non-autostarting, Incus shut down by itself, then the record
+  local seats=${1:-} pid i
+  [[ -n $seats ]] || seats=$(persist_instances) || { log error "persist: a seat still runs or would autostart; no clean stop"; return 1; }
   pid=$(svc_pid) || { log error "persist: the daemon is gone before its shutdown"; return 1; }
   INCUS_CMD_TIMEOUT=90 run_incus admin shutdown --timeout 60 >/dev/null 2>&1 || log warn "persist: 'admin shutdown' reported an error"
   for ((i = 0; i < 60; i++)); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
@@ -2610,29 +2627,61 @@ cmd_persist_smoke() ( # step 2: a seat whose Incus database and rootfs persist o
 )
 
 # ------------------------------------------------------------ polyseatd ----
-polyseatd_verify() { # the staged binary is exactly the one the signed controller pins
-  [[ $POLYSEATD_SHA256 =~ ^[0-9a-f]{64}$ ]] || { log error "polyseatd: this controller pins no daemon"; return 1; }
-  [[ -f $POLYSEATD_BIN && ! -L $POLYSEATD_BIN && ! -L $POLYSEATD_DIR &&
-     $(stat -c '%u %a' -- "$POLYSEATD_DIR") == '0 700' && $(stat -c '%u %a' -- "$POLYSEATD_BIN") == '0 755' ]] ||
-    { log error "polyseatd: no staged daemon (daemon-stage first)"; return 1; }
-  [[ $(sha256sum < "$POLYSEATD_BIN" | cut -c1-64) == "$POLYSEATD_SHA256" ]] ||
-    { log error "polyseatd: the staged daemon differs from the pinned one"; return 1; }
+polyseatd_bundle_remove() { # dir : the exact entries a staging recorded, deepest first; no recursion
+  local dir=$1 entry
+  [[ -d $dir && ! -L $dir ]] || return 0
+  if [[ -f $dir/.entries && ! -L $dir/.entries ]]; then
+    while IFS= read -r entry; do
+      [[ $entry =~ ^(MANIFEST|(bin|etc|lib|py|rules)(/[A-Za-z0-9._+@-]+)*)$ ]] || continue
+      if [[ -d $dir/$entry && ! -L $dir/$entry ]]; then rmdir -- "$dir/$entry" 2>/dev/null || true
+      else rm -f -- "$dir/$entry"; fi
+    done < <(LC_ALL=C sort -r -- "$dir/.entries")
+  fi
+  rm -f -- "$dir/.entries" "$dir/.bundle-sha256" "$dir/polyseatd" "$dir/.incoming"
+  rmdir -- "$dir" 2>/dev/null || true
 }
 
-cmd_daemon_stage() ( # FILE : copies the pinned polyseatd into RAM after checking its hash
-  local src=${1:-} tmp
+polyseatd_verify() { # the staged bundle is exactly the one the signed controller pins, every file per its MANIFEST
+  [[ $POLYSEATD_SHA256 =~ ^[0-9a-f]{64}$ ]] || { log error "polyseatd: this controller pins no daemon"; return 1; }
+  [[ -d $POLYSEATD_DIR && ! -L $POLYSEATD_DIR && $(stat -c '%u %a' -- "$POLYSEATD_DIR") == '0 700' &&
+     -f $POLYSEATD_BIN && ! -L $POLYSEATD_BIN && $(stat -c '%u %a' -- "$POLYSEATD_BIN") == '0 755' &&
+     -f $POLYSEATD_DIR/.bundle-sha256 && $(< "$POLYSEATD_DIR/.bundle-sha256") == "$POLYSEATD_SHA256" ]] ||
+    { log error "polyseatd: no staged daemon bundle (daemon-stage first)"; return 1; }
+  (cd -- "$POLYSEATD_DIR" && sha256sum --check --strict --quiet MANIFEST >/dev/null 2>&1) ||
+    { log error "polyseatd: the staged bundle differs from its MANIFEST"; return 1; }
+}
+
+cmd_daemon_stage() ( # FILE : the pinned daemon bundle, checked, unpacked into RAM, every file verified
+  local src=${1:-} new type name target
   [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 1 ]] || die $EX_BLOCKED "daemon-stage needs a canary build and one file"
   require_approval daemon-stage
   require_no_journal
   [[ $POLYSEATD_SHA256 =~ ^[0-9a-f]{64}$ ]] || die $EX_BLOCKED "this controller pins no polyseatd"
-  [[ -f $src && ! -L $src ]] || die $EX_BLOCKED "daemon file unavailable"
-  [[ $(sha256sum < "$src" | cut -c1-64) == "$POLYSEATD_SHA256" ]] || die $EX_VERIFY "polyseatd differs from the controller's pin"
+  [[ -f $src && ! -L $src ]] || die $EX_BLOCKED "daemon bundle unavailable"
+  [[ $(sha256sum < "$src" | cut -c1-64) == "$POLYSEATD_SHA256" ]] || die $EX_VERIFY "the daemon bundle differs from the controller's pin"
+  # Only plain files, directories and links within their own directory, under the bundle's five trees.
+  # GNU tar -tv: MODE OWNER SIZE DATE TIME NAME [-> TARGET]; names with spaces are refused by the pattern anyway.
+  while read -r type _ _ _ _ name _ target; do
+    [[ $name =~ ^(MANIFEST|(bin|etc|lib|py|rules)(/[A-Za-z0-9._+@-]+)*/?)$ && /${name%/}/ != */../* && /${name%/}/ != */./* ]] ||
+      die $EX_VERIFY "unexpected bundle entry: $name"
+    case ${type:0:1} in
+      - | d) [[ -z $target ]] || die $EX_VERIFY "unexpected bundle entry: $name" ;;
+      l) [[ $target =~ ^[A-Za-z0-9._+@-]+$ && $target != . && $target != .. ]] || die $EX_VERIFY "bundle link leaves its directory: $name" ;;
+      *) die $EX_VERIFY "special file in the bundle: $name" ;;
+    esac
+  done < <(LC_ALL=C tar -tvf "$src" --numeric-owner --absolute-names)
   [[ ! -L $POLYSEATD_DIR ]] || die $EX_BLOCKED "refusing a symlinked daemon directory"
-  { (umask 077; mkdir -p -- "$POLYSEATD_DIR") && chmod 0700 -- "$POLYSEATD_DIR"; } || die $EX_BLOCKED "cannot create the daemon directory"
-  tmp="$POLYSEATD_DIR/.incoming"
-  rm -f -- "$tmp"
-  { cp -- "$src" "$tmp" && chmod 0755 -- "$tmp" && mv -f -- "$tmp" "$POLYSEATD_BIN"; } || die $EX_BLOCKED "cannot stage polyseatd"
-  polyseatd_verify || die $EX_VERIFY "staged polyseatd failed verification"
+  new="$POLYSEATD_DIR.new"
+  polyseatd_bundle_remove "$new"
+  [[ ! -e $new ]] || die $EX_BLOCKED "$new is in the way"
+  { (umask 077; mkdir -- "$new") && chmod 0700 -- "$new"; } || die $EX_BLOCKED "cannot create the staging directory"
+  LC_ALL=C tar -tf "$src" | sed 's#/$##' > "$new/.entries" || die $EX_BLOCKED "cannot list the bundle"
+  tar -xf "$src" -C "$new" --no-same-owner --same-permissions || { polyseatd_bundle_remove "$new"; die $EX_VERIFY "cannot unpack the bundle"; }
+  printf '%s\n' "$POLYSEATD_SHA256" > "$new/.bundle-sha256"
+  polyseatd_bundle_remove "$POLYSEATD_DIR"
+  [[ ! -e $POLYSEATD_DIR ]] || die $EX_BLOCKED "the old daemon directory could not be removed"
+  mv -- "$new" "$POLYSEATD_DIR" || die $EX_BLOCKED "cannot activate the bundle"
+  polyseatd_verify || die $EX_VERIFY "staged daemon bundle failed verification"
   log info "polyseatd $POLYSEATD_SHA256 staged in RAM"
 )
 
@@ -2685,8 +2734,9 @@ polyseatd_launch() { # config : setsid in its own child of the canary group, so 
   (
     if ! sandbox || ci_real_system; then printf '%s\n' "$BASHPID" > "$group/cgroup.procs" || exit 1; fi
     cd / || exit 1
-    exec setsid env -i PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$SAFE_PATH" HOME="$RUN_DIR" LANG=C \
-      INCUS_DIR="$INCUS_DIR" "$POLYSEATD_BIN" -config "$config" >> "$LOG_DIR/polyseatd.log" 2>&1 < /dev/null 9>&-
+    exec setsid env -i PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$POLYSEATD_DIR/bin:$CURRENT/payload/bin:$SAFE_PATH" \
+      HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" INCUS_CONF="$RUN_DIR/client" \
+      "$POLYSEATD_BIN" -config "$config" >> "$LOG_DIR/polyseatd.log" 2>&1 < /dev/null 9>&-
   ) &
   pid=$!
   printf '%s\n' "$pid" > "$RUN_DIR/polyseatd.pid"
@@ -2759,9 +2809,7 @@ cmd_polyseatd_session() ( # step 3: upstream's polyseatd, no seats, its interfac
   canary_profile_guard || exit $EX_HEALTH
   persist_instances > "$dir/instances-at-start.json" || { log error "polyseatd: a persisted seat runs or would autostart"; exit $EX_HEALTH; }
   cfg="$RUN_DIR/polyseatd.json"
-  (umask 077; jq -n --arg listen "$ip:$POLYSEATD_PORT" --arg state "$ROOT$POLYSEATD_STATE" --arg lib "$ROOT$POLYSEATD_LIBRARY" \
-    --arg uplink "$STEAM_NIC_PARENT" '{listen: $listen, state_dir: $state, library_dir: $lib, uplink: $uplink,
-      update_check: false, web_update: false, web_uninstall: false, web_lan_bridge: false}' > "$cfg") || exit $EX_HEALTH
+  polyseatd_config "$ip" "$cfg" || exit $EX_HEALTH
   cp -- "$cfg" "$dir/polyseatd.json"
   log info "polyseatd phase: start (https://$ip:$POLYSEATD_PORT, no seats)"
   pid=$(polyseatd_launch "$cfg") || exit $EX_HEALTH
@@ -2819,6 +2867,245 @@ cmd_polyseatd_stop() {
   [[ -f $RUN_DIR/polyseatd-status.json ]] || die $EX_BLOCKED "no polyseatd session is running"
   (umask 077; : > "$RUN_DIR/polyseatd-stop") && printf 'stop requested; polyseatd and Incus stop within a minute\n'
 }
+
+# ----------------------------------------------------------------- play ----
+# Steps 5+ (owner, 2026-11-01: "mach dass ich sauber spielen kann"): polyseatd builds and runs its own seats, with
+# keyboard, mouse and gamepads. The host pieces input needs exist only while a play session runs, and are put back
+# exactly afterwards: the console guard (owner GO), upstream's udev rule, its device-owner helper, the uhid module.
+PLAY_MAX_WINDOW=21600  # a signed play token may cover six hours; every other canary token at most 30 minutes
+PLAY_CPUSET="8-15"     # four P-cores with both threads; the VMs that need them have priority and stop the session
+PLAY_CPU_MAX="800000 100000"
+PLAY_MEMORY_MAX=$((10 * 1024 * 1024 * 1024))
+PLAY_PIDS_MAX=8192
+PLAY_TTY="/dev/tty1"
+PLAY_UDEV_RULE="/etc/udev/rules.d/72-polyseat-hide.rules"
+PLAY_HELPER_DIR="/usr/local/lib/polyseat"
+PLAY_NAME_RE='^[a-z0-9][a-z0-9-]{0,62}$'
+
+polyseatd_config() { # ip out : the bundle's own template with this host's values; host actions must stay off
+  local tpl=$POLYSEATD_DIR/etc/polyseatd.json.in
+  [[ -f $tpl && ! -L $tpl ]] || { log error "polyseatd: the bundle has no config template"; return 1; }
+  (umask 077; sed -e "s|@BUNDLE@|$POLYSEATD_DIR|g" -e "s|@LISTEN@|$1:$POLYSEATD_PORT|g" \
+    -e "s|@STATE@|$ROOT$POLYSEATD_STATE|g" -e "s|@LIBRARY@|$ROOT$POLYSEATD_LIBRARY|g" \
+    -e "s|@UPLINK@|$STEAM_NIC_PARENT|g" "$tpl" > "$2") || return 1
+  jq -e --arg listen "$1:$POLYSEATD_PORT" '.listen == $listen and .update_check == false and .web_update == false and
+    .web_uninstall == false and .web_lan_bridge == false and (tostring | test("@[A-Z]+@") | not)' "$2" >/dev/null ||
+    { log error "polyseatd: the generated config is not the expected one"; return 1; }
+}
+
+play_seat_guard() { # read-only: everything in Incus is either ours or exactly the shape upstream's seats have
+  local server projects profiles instances pools networks out
+  server=$(INCUS_CMD_TIMEOUT=5 run_incus query /1.0) || return 1
+  projects=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/projects?recursion=1') || return 1
+  profiles=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/profiles?recursion=1') || return 1
+  instances=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || return 1
+  pools=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/storage-pools?recursion=1') || return 1
+  networks=$(INCUS_CMD_TIMEOUT=5 run_incus query '/1.0/networks?recursion=1') || return 1
+  out=$(jq -rn --argjson server "$server" --argjson projects "$projects" --argjson profiles "$profiles" \
+    --argjson instances "$instances" --argjson pools "$pools" --argjson networks "$networks" \
+    --arg source "$INCUS_DIR/storage-pools/default" --arg gpupci "$GPU_CANARY_PCI" --arg nic "$STEAM_NIC_PARENT" \
+    --arg library "$ROOT$POLYSEATD_LIBRARY/" --arg namere "$PLAY_NAME_RE" '
+    def meta: if type == "object" and has("metadata") and has("type") then .metadata else . end;
+    def nic: .type == "nic" and .nictype == "bridged" and .parent == $nic and (.name == "eth0" or .name == "eth1") and
+      ((keys - ["type", "nictype", "parent", "name", "hwaddr"]) | length == 0);
+    def root: . == {type: "disk", path: "/", pool: "default"};
+    def device: root or nic or
+      (.type == "gpu" and .mode == "0666" and ((keys - ["type", "mode", "pci"]) | length == 0) and
+        ((has("pci") | not) or .pci == $gpupci)) or
+      (.type == "unix-char" and .mode == "0666" and .required == "false" and .source == .path and
+        (.source | test("^/dev/(uinput|uhid|ntsync|input/(event|js)[0-9]+|hidraw[0-9]+)$")) and
+        ((keys - ["type", "mode", "required", "source", "path"]) | length == 0)) or
+      (.type == "disk" and (.source | type == "string" and startswith($library)) and (.source | contains("/../") | not) and
+        ((keys - ["type", "source", "path", "readonly"]) | length == 0)) or
+      (. == {type: "disk", source: "/usr/share/nvidia", path: "/usr/share/nvidia", readonly: "true", required: "false"});
+    def config_ok: to_entries | map(select((
+      (.key | test("^(image|volatile|user)\\.")) or
+      (.key == "boot.autostart" and .value == "false") or
+      (.key == "security.nesting" and (.value == "true" or .value == "false")) or
+      (.key == "security.privileged" and .value == "false") or
+      (.key == "limits.kernel.nice" and (.value | test("^[0-9]+$"))) or
+      (.key == "nvidia.runtime" and (.value == "true" or .value == "false")) or
+      (.key == "nvidia.driver.capabilities" and (.value | test("^[a-z0-9,]+$")))) | not)) | map("config " + .key);
+    def devices_ok: to_entries | map(select(.value | device | not) | "device " + .key + " " + (.value | tostring));
+    [ (if ($server | meta | .config) == {} then empty else "server config" end),
+      (if ($projects | meta | map(.name)) == ["default"] then empty else "projects" end),
+      (if ($networks | meta | all(.[]; .managed == false)) then empty else "a managed network" end),
+      (if ($pools | meta | length == 1 and .[0].name == "default" and .[0].driver == "dir" and .[0].config.source == $source)
+        then empty else "storage pools" end),
+      (($profiles | meta) as $ps | if ($ps | length == 1 and .[0].name == "default" and (.[0].config // {}) == {} and
+        ((.[0].devices // {}) | to_entries | all(.[]; (.key == "root" and (.value | root)) or (.key == "eth0" and (.value | nic)))))
+        then empty else "profiles" end),
+      ($instances | meta | .[] | . as $i |
+        (if $i.type == "container" and ($i.name | test($namere)) and $i.profiles == ["default"] then empty
+         else "instance " + $i.name end),
+        ((($i.config // {}) | config_ok) + (($i.expanded_config // {}) | config_ok) +
+         (($i.devices // {}) | devices_ok) + (($i.expanded_devices // {}) | devices_ok) | unique | .[] | "instance " + $i.name + ": " + .))
+    ] | .[]') || { log error "play: the Incus policy could not be evaluated"; return 1; }
+  [[ -z $out ]] && return 0
+  log error "play: outside the seat policy: $(head -n 5 <<< "$out" | tr '\n' ';' | head -c 900)"
+  return 1
+}
+
+play_instances() { # prints [{name, status, autostart}]; with "stopped" fails unless every seat is stopped and non-autostarting
+  local is
+  is=$(INCUS_CMD_TIMEOUT=10 run_incus query '/1.0/instances?recursion=1') || return 1
+  jq -ec --arg re "$PLAY_NAME_RE" --arg want "${1:-}" '[(if type == "object" and .type == "sync" then .metadata else . end)[] |
+      {name, status, autostart: (.config["boot.autostart"] // "")}] |
+    select(all(.[]; (.name | test($re)) and .autostart == "false" and ($want != "stopped" or .status == "Stopped")))' <<< "$is"
+}
+
+play_real() { ! sandbox || ci_real_system; }  # modules and udev only on a real system
+
+play_host_on() { # console guard, uhid, udev rule, device-owner helper; every change recorded for play_host_off
+  local state=$RUN_DIR/play-host.json sysrq uhid=preloaded rule=present helper=present tty sysrq_file rule_file helper_dir
+  [[ ! -e $state ]] || { log error "play: an earlier session left its host changes unrestored ($state)"; return 1; }
+  tty=$(lxc_mount_real "$PLAY_TTY") sysrq_file=$(lxc_mount_real /proc/sys/kernel/sysrq)
+  rule_file=$(lxc_mount_real "$PLAY_UDEV_RULE") helper_dir=$(lxc_mount_real "$PLAY_HELPER_DIR")
+  sysrq=$(< "$sysrq_file") || return 1
+  [[ $sysrq =~ ^[0-9]+$ ]] || return 1
+  grep -q '^uhid ' /proc/modules || uhid=loaded
+  [[ -e $rule_file || -L $rule_file ]] || rule=added
+  [[ -e $helper_dir || -L $helper_dir ]] || helper=added
+  (umask 077; jq -n --arg sysrq "$sysrq" --arg uhid "$uhid" --arg rule "$rule" --arg helper "$helper" \
+    '{schema: 1, sysrq: $sysrq, uhid: $uhid, rule: $rule, helper: $helper}' > "$state") || return 1
+  # The console guard (owner GO 2026-11-01): no SysRq, and the text console's keyboard off, so that keys from a seat
+  # can neither reboot Unraid (Ctrl+Alt+Del, SysRq) nor type into its login prompt.
+  printf '0\n' > "$sysrq_file" || return 1
+  "$POLYSEATD_DIR/bin/polyseat-console" off "$tty" "$RUN_DIR/play-console.json" ||
+    { log error "play: cannot take the keyboard off $PLAY_TTY"; return 1; }
+  if [[ $uhid == loaded ]] && play_real; then modprobe uhid || { log error "play: cannot load uhid"; return 1; }; fi
+  if [[ $rule == added ]]; then
+    install -m 0644 -- "$POLYSEATD_DIR/rules/72-polyseat-hide.rules" "$rule_file" || return 1
+    if play_real; then udevadm control --reload || return 1; fi
+  fi
+  if [[ $helper == added ]]; then
+    install -d -m 0755 -- "$helper_dir" || return 1
+    { sed "1s|@BUNDLE@|$POLYSEATD_DIR|" -- "$POLYSEATD_DIR/lib/polyseat/device_owner.udev" > "$helper_dir/device_owner.py" &&
+      chmod 0755 -- "$helper_dir/device_owner.py"; } || return 1
+  fi
+  log info "play: console guard on (sysrq $sysrq -> 0, $PLAY_TTY keyboard off), uhid $uhid, udev rule $rule, helper $helper"
+}
+
+play_host_off() { # exactly what play_host_on recorded, nothing else
+  local state=$RUN_DIR/play-host.json sysrq uhid rule helper rc=0 rule_file helper_dir
+  [[ -f $state && ! -L $state ]] || return 0
+  rule_file=$(lxc_mount_real "$PLAY_UDEV_RULE") helper_dir=$(lxc_mount_real "$PLAY_HELPER_DIR")
+  sysrq=$(jq -r .sysrq "$state") uhid=$(jq -r .uhid "$state") rule=$(jq -r .rule "$state") helper=$(jq -r .helper "$state")
+  if [[ $helper == added ]]; then
+    rm -f -- "$helper_dir/device_owner.py"
+    rmdir -- "$helper_dir" || rc=1
+  fi
+  if [[ $rule == added ]]; then
+    rm -f -- "$rule_file"
+    if play_real; then udevadm control --reload || rc=1; fi
+  fi
+  if [[ $uhid == loaded ]] && play_real; then modprobe -r uhid 2>/dev/null || log warn "play: uhid is still in use; left loaded"; fi
+  if [[ -e $RUN_DIR/play-console.json ]]; then
+    "$POLYSEATD_DIR/bin/polyseat-console" restore "$RUN_DIR/play-console.json" || { log error "play: console keyboard not restored"; rc=1; }
+  fi
+  if [[ $sysrq =~ ^[0-9]+$ ]]; then printf '%s\n' "$sysrq" > "$(lxc_mount_real /proc/sys/kernel/sysrq)" || rc=1; else rc=1; fi
+  if [[ $rc -eq 0 ]]; then rm -f -- "$state"; log info "play: host restored (sysrq $sysrq, console keyboard, udev rule, helper)"; fi
+  return "$rc"
+}
+
+play_stop_seats() { # every running seat, through Incus (polyseatd leaves them running when it stops)
+  local seat
+  for seat in $(play_instances | jq -r '.[] | select(.status != "Stopped") | .name'); do
+    [[ $seat =~ $PLAY_NAME_RE ]] || continue
+    log info "play: stopping seat $seat"
+    INCUS_CMD_TIMEOUT=75 run_incus stop "$seat" --timeout 60 ||
+      INCUS_CMD_TIMEOUT=20 run_incus stop "$seat" --force --timeout 5 || log error "play: seat $seat did not stop"
+  done
+}
+
+cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, on the LAN, until the operator stops it
+  local dir="$RUN_DIR/play-evidence" ip pid="" cfg remaining deadline last guard=0 out i a
+  [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 0 ]] || die $EX_BLOCKED "polyseatd-play needs a canary build and takes no arguments"
+  require_approval polyseatd-play
+  require_no_journal
+  read_pointer
+  [[ -n $PTR_CURRENT && $(current_sha_from_link) == "$PTR_CURRENT" ]] || die $EX_BLOCKED "no active canary bundle"
+  { verify_bundle_files "$PTR_CURRENT" && verify_slot "$PTR_CURRENT"; } || die $EX_VERIFY "runtime bundle failed verification"
+  jq -e '.files | any(.[]; .path == "payload/share/lxc/hooks/nvidia" and .mode == 493)' \
+    "$(bundle_manifest "$PTR_CURRENT")" >/dev/null || die $EX_VERIFY "runtime bundle has no LXC nvidia hook"
+  ! svc_pid >/dev/null 2>&1 || die $EX_BLOCKED "a daemon is already running; polyseatd-play starts its own"
+  polyseatd_precheck || die $EX_BLOCKED "polyseatd prechecks failed; nothing was started"
+  ip=$(polyseatd_lan_ip) || die $EX_BLOCKED "no LAN address"
+  remaining=$(( $(jq -er .expires_at "$CANARY_APPROVAL") - $(date -u +%s) ))
+  (( remaining >= POLYSEATD_MIN_SECONDS + POLYSEATD_TEARDOWN_SECONDS )) ||
+    die $EX_BLOCKED "polyseatd-play needs $((POLYSEATD_MIN_SECONDS + POLYSEATD_TEARDOWN_SECONDS)) s left on the token, it has $remaining s"
+  if ! gpu_preflight_run "$GPU_CANARY_PCI"; then
+    for a in "${GPU_RES[@]}"; do [[ ${a%%$'\t'*} == FAIL ]] && log error "gpu-preflight: ${a#*$'\t'}"; done
+    die $EX_BLOCKED "GPU is not available for seats now; nothing was started"
+  fi
+  rm -f -- "$RUN_DIR/polyseatd-stop" "$RUN_DIR/polyseatd-status.json"
+  [[ ! -e $dir && ! -L $dir ]] || die $EX_BLOCKED "play evidence from an earlier run exists; collect it first"
+  (umask 077; mkdir -- "$dir") || die $EX_BLOCKED "cannot create evidence directory"
+  printf '%s\n' "${GPU_RES[@]}" > "$dir/gpu-preflight-before.txt"
+  canary_budget_select play
+  CANARY_OPERATION=8
+  # shellcheck disable=SC2154  # rc is assigned inside the trap itself
+  trap 'rc=$?; if [[ -n $pid ]]; then polyseatd_stop "$pid" || true; fi
+    if [[ $CANARY_RUN_OWNED -eq 1 ]]; then play_stop_seats || true; svc_stop full || rc=4; fi
+    play_host_off || rc=4; polyseatd_run_state_remove || true; rm -f -- "$RUN_DIR/polyseatd-status.json"; exit "$rc"' EXIT
+  svc_start || exit $EX_HEALTH
+  if ! INCUS_CMD_TIMEOUT=10 run_incus query /1.0/storage-pools/default >/dev/null 2>&1; then
+    run_incus storage create default dir "source=$INCUS_DIR/storage-pools/default" || exit $EX_HEALTH
+    run_incus profile device add default root disk path=/ pool=default || exit $EX_HEALTH
+  fi
+  # Seats reach their host over a bridged eth0 on the LAN bridge, so polyseatd makes no managed network or NAT.
+  if ! INCUS_CMD_TIMEOUT=10 run_incus query /1.0/profiles/default | jq -e '(.metadata // .).devices.eth0' >/dev/null 2>&1; then
+    run_incus profile device add default eth0 nic nictype=bridged "parent=$STEAM_NIC_PARENT" name=eth0 || exit $EX_HEALTH
+  fi
+  play_seat_guard || exit $EX_HEALTH
+  play_instances stopped > "$dir/seats-at-start.json" || { log error "play: a seat runs or would autostart"; exit $EX_HEALTH; }
+  play_host_on || exit $EX_HEALTH
+  cfg="$RUN_DIR/polyseatd.json"
+  polyseatd_config "$ip" "$cfg" || exit $EX_HEALTH
+  cp -- "$cfg" "$dir/polyseatd.json"
+  log info "play phase: start polyseatd (https://$ip:$POLYSEATD_PORT; seats build and start from its interface)"
+  pid=$(polyseatd_launch "$cfg") || exit $EX_HEALTH
+  for ((i = 0; i < 60; i++)); do
+    polyseatd_alive "$pid" || { log error "polyseatd: exited during start"; exit $EX_HEALTH; }
+    [[ $(polyseatd_listeners) == "$(polyseatd_hex_ip "$ip")" ]] && break
+    sleep 1
+  done
+  out=$(polyseatd_status "$ip" "$pid")
+  printf '%s\n' "$out" > "$dir/status-start.json"
+  jq -e --arg l "$(polyseatd_hex_ip "$ip")" '.alive and .listeners == [$l] and .session.setup == false' <<< "$out" >/dev/null ||
+    { log error "polyseatd: not serving exactly https://$ip:$POLYSEATD_PORT with a set password: $out"; exit $EX_HEALTH; }
+  (umask 077; printf '%s\n' "$out" > "$RUN_DIR/polyseatd-status.json")
+  log info "polyseatd: up at https://$ip:$POLYSEATD_PORT"
+  deadline=$(( $(jq -er .expires_at "$CANARY_APPROVAL") - POLYSEATD_TEARDOWN_SECONDS )) last=$(date -u +%s)
+  while (( $(date -u +%s) < deadline )) && [[ ! -e $RUN_DIR/polyseatd-stop ]]; do
+    polyseatd_alive "$pid" || { log error "polyseatd: exited on its own"; exit $EX_HEALTH; }
+    canary_budget_check || exit $EX_HEALTH
+    # polyseatd builds and changes seats through the Incus API itself: anything outside upstream's seat shape ends it.
+    if (( ++guard % 5 == 0 )); then play_seat_guard || exit $EX_HEALTH; fi
+    if (( $(date -u +%s) - last >= 30 )); then
+      last=$(date -u +%s)
+      out=$(polyseatd_status "$ip" "$pid" | jq -c --argjson seats "$(play_instances 2>/dev/null || echo null)" '. + {seats: $seats}')
+      (umask 077; printf '%s\n' "$out" > "$RUN_DIR/polyseatd-status.json.new") &&
+        mv -f -- "$RUN_DIR/polyseatd-status.json.new" "$RUN_DIR/polyseatd-status.json"
+    fi
+    sleep 2
+  done
+  log info "play phase: stop ($([[ -e $RUN_DIR/polyseatd-stop ]] && echo 'stop requested' || echo 'token time is up'))"
+  polyseatd_stop "$pid" || exit $EX_HEALTH
+  pid=""
+  head -c 4194304 -- "$LOG_DIR/polyseatd.log" > "$dir/polyseatd.log" 2>/dev/null || true
+  play_stop_seats
+  play_seat_guard || exit $EX_HEALTH
+  log info "play phase: clean stop"
+  persist_clean_stop "$(play_instances stopped)" || exit $EX_HEALTH
+  svc_stop full || exit $EX_HEALTH
+  play_host_off || exit $EX_HEALTH
+  polyseatd_run_state_remove || exit $EX_HEALTH
+  rm -f -- "$RUN_DIR/polyseatd-stop" "$RUN_DIR/polyseatd-status.json"
+  trap - EXIT
+  printf 'PASS: play session ended (polyseatd on https://%s:%s, seats stopped, Incus clean stop recorded, host restored).\n' \
+    "$ip" "$POLYSEATD_PORT"
+)
 
 # --------------------------------------------------------- transaction ----
 # Only a service that was running is restarted after a switch/restore. Starting an
@@ -3035,8 +3322,8 @@ cmd_uninstall() {
   subid_file_remove "$SUBID_DIR/subgid" || true
   rm -f -- "$PIDFILE"
   seat_image_remove_exact
-  rm -f -- "$POLYSEATD_BIN" "$POLYSEATD_DIR/.incoming"
-  rmdir -- "$POLYSEATD_DIR" 2>/dev/null || true
+  polyseatd_bundle_remove "$POLYSEATD_DIR.new"
+  polyseatd_bundle_remove "$POLYSEATD_DIR"
   rmdir -- "$RUN_DIR/client" 2>/dev/null || true
   rmdir -- "$SLOTS" "$RAM_DIR" 2>/dev/null || true
   rmdir -- "$BUNDLE_DIR" "$STATE_DIR" 2>/dev/null || true
@@ -3551,6 +3838,7 @@ usage: polyseatctl COMMAND [args]
              persist-smoke --approve (step 2: the Incus state persists on the cache dataset across runs)
              daemon-stage FILE --approve | polyseatd-session --approve (step 3: polyseatd on the LAN, no seats)
              polyseatd-status | polyseatd-stop
+             polyseatd-play --approve (polyseatd builds and runs seats with keyboard, mouse and gamepads; up to 6 h)
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
 EOF
@@ -3581,7 +3869,7 @@ main() {
     logs) cmd_logs "${args[@]}"; return ;;
     config-get) cmd_config_get; return ;;
     stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke | seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session | steam-session-pin | \
-    steam-session-status | steam-session-stop | persist-smoke | daemon-stage | polyseatd-session | \
+    steam-session-status | steam-session-stop | persist-smoke | daemon-stage | polyseatd-session | polyseatd-play | \
     polyseatd-status | polyseatd-stop) ;;
     *) usage ;;
   esac
@@ -3625,6 +3913,7 @@ main() {
     persist-smoke) cmd_persist_smoke "${args[@]}" ;;
     daemon-stage) cmd_daemon_stage "${args[@]}" ;;
     polyseatd-session) cmd_polyseatd_session "${args[@]}" ;;
+    polyseatd-play) cmd_polyseatd_play "${args[@]}" ;;
     start)
       require_no_journal
       read_pointer
