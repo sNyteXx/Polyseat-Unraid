@@ -415,8 +415,19 @@ func gpuDevice(root string, gpu GPU, all bool) map[string]string {
 		return device
 	}
 
+	// Every render node counts here, not only the cards a seat can be built
+	// on. An Intel iGPU next to an NVIDIA card is never what DetectGPU picks,
+	// but Incus hands it to the seat all the same, and wlroots then renders on
+	// it while Sunshine imports and encodes on the other card: a black stream
+	// and "Couldn't import RGB Image" in Sunshine's log, measured on an Unraid
+	// host with an i7-14700K and an RTX 5070 Ti on 2026-11-01.
+	nodes, err := filepath.Glob(filepath.Join(root, "class/drm/renderD*"))
+	if err != nil || len(nodes) < 2 {
+		return device
+	}
+
 	cards, err := supportedCards(root)
-	if err != nil || len(cards) < 2 {
+	if err != nil {
 		return device
 	}
 
