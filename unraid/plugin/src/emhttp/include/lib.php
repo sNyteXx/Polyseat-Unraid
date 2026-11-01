@@ -128,7 +128,8 @@ function psu_origin_ok(array $server): bool
 
 /* ------------------------------------------------------- controller calls ---- */
 
-const PSU_READ_COMMANDS = ['status', 'metrics', 'list', 'config-get', 'logs', 'diagnose', 'preflight', 'health', 'verify'];
+const PSU_READ_COMMANDS = ['status', 'metrics', 'list', 'config-get', 'logs', 'diagnose', 'preflight', 'health', 'verify',
+                           'polyseatd-status'];
 const PSU_WRITE_COMMANDS = ['start', 'stop', 'restart', 'activate', 'rollback', 'recover', 'config-set', 'config-reset'];
 
 /** Allowlist for every argument vector the WebUI may ever pass to polyseatctl. */
@@ -148,6 +149,7 @@ function psu_ctl_args_ok(array $args): bool
         case 'status':
             return $rest === [] || $rest === ['--json'];
         case 'metrics': case 'list': case 'config-get': case 'diagnose': case 'preflight': case 'health':
+        case 'polyseatd-status':
         case 'start': case 'stop': case 'restart': case 'config-reset':
             return $rest === [];
         case 'verify':
@@ -171,6 +173,32 @@ function psu_ctl_args_ok(array $args): bool
             return true;
     }
     return false;
+}
+
+/**
+ * What the Polyseat card may show of the controller's polyseatd-status file: a validated LAN address, whether the
+ * daemon is alive, the seats' names and states, and when the play approval ends. Everything else is dropped.
+ */
+function psu_play_view(array $status): array
+{
+    $url = $status['url'] ?? null;
+    $seats = null;
+    if (is_array($status['seats'] ?? null)) {
+        $seats = [];
+        foreach (array_slice($status['seats'], 0, 64) as $seat) {
+            if (is_array($seat) && is_string($seat['name'] ?? null) && is_string($seat['status'] ?? null)
+                && preg_match('/^[a-z0-9][a-z0-9-]{0,62}$/D', $seat['name']) === 1
+                && preg_match('/^[A-Za-z]{1,16}$/D', $seat['status']) === 1) {
+                $seats[] = ['name' => $seat['name'], 'status' => $seat['status']];
+            }
+        }
+    }
+    return [
+        'url' => is_string($url) && preg_match('~^https://[0-9]{1,3}(?:\.[0-9]{1,3}){3}:[0-9]{1,5}$~D', $url) === 1 ? $url : '',
+        'alive' => ($status['alive'] ?? false) === true,
+        'seats' => $seats,
+        'expires_at' => is_int($status['expires_at'] ?? null) ? $status['expires_at'] : null,
+    ];
 }
 
 /** @return array{code:int,out:string,err:string,timeout:bool} */
@@ -287,6 +315,16 @@ function psu_handle(array $server, array $get, array $post): array
             $result = psu_run_ctl(['logs', $which, $lines], 15);
             return $result['code'] === 0 ? $reply(200, ['ok' => true, 'data' => $result['out']]) : $reply(400, ['ok' => false, 'error' => 'params']);
         }
+        if ($action === 'play') {
+            // Read-only. The controller refuses (exit 2) when no play session runs, which is an answer, not a failure.
+            $result = psu_run_ctl(['polyseatd-status'], 15);
+            $data = psu_json_from($result);
+            if ($data !== null) {
+                return $reply(200, ['ok' => true, 'data' => psu_play_view($data), 'now' => time()]);
+            }
+            return $result['code'] === 2 ? $reply(200, ['ok' => true, 'data' => null, 'now' => time()])
+                                         : $reply(502, ['ok' => false, 'error' => 'unavailable']);
+        }
         if ($action === 'diag') {
             $result = psu_run_ctl(['diagnose'], 30);
             return $reply(200, ['ok' => true, 'data' => $result['out'] . $result['err']]);
@@ -402,7 +440,7 @@ function psu_boot_script(string $targetId, string $initFunction, array $config):
         . "document.head.appendChild(s);})();</script>";
 }
 
-const PSU_TAB_LABELS = ['general' => 'General', 'storage' => 'Storage & isolation', 'advanced' => 'Advanced'];
+const PSU_TAB_LABELS = ['general' => 'General', 'storage' => 'Storage & isolation', 'play' => 'Play', 'advanced' => 'Advanced'];
 
 /** One settings row from a config-get entry. Everything dynamic is escaped. */
 function psu_render_field(array $entry): string
@@ -423,7 +461,7 @@ function psu_render_field(array $entry): string
             . ' data-min="' . psu_e($entry['min'] ?? '') . '" data-max="' . psu_e($entry['max'] ?? '') . '">';
     } else {
         $control = '<input type="text" autocomplete="off" spellcheck="false"' . $attrs . ' value="' . psu_e($value) . '"'
-            . ' placeholder="/mnt/pool/polyseat">';
+            . ' placeholder="' . psu_e((string)($entry['default'] ?? '') !== '' ? $entry['default'] : '/mnt/pool/polyseat') . '">';
     }
     $default = $entry['default'] === '' ? '(none)' : (string)$entry['default'];
     $help = $label . '<br><span class="psu-muted">Default: ' . psu_e($default)

@@ -53,11 +53,17 @@ function post(array $fields, array $server = []): array
 t('validate_setting accepts and rejects like the schema', function () {
     $good = [['SERVICE', 'enabled'], ['SERVICE', 'disabled'], ['ACCEPT_NO_LSM', 'yes'], ['HEALTH_TIMEOUT', '10'],
              ['HEALTH_TIMEOUT', '300'], ['SUBID_START', '100000'], ['SUBID_COUNT', '65536'],
-             ['DATA_DIR', ''], ['DATA_DIR', '/mnt/cache/appdata/polyseat'], ['DATA_DIR', '/mnt/a/.hidden'], ['DATA_DIR', '/mnt/a/b..c'], ['DATA_DIR', '/mnt/disk1/a.b-c_d']];
+             ['DATA_DIR', ''], ['DATA_DIR', '/mnt/cache/appdata/polyseat'], ['DATA_DIR', '/mnt/a/.hidden'], ['DATA_DIR', '/mnt/a/b..c'], ['DATA_DIR', '/mnt/disk1/a.b-c_d'],
+             ['PLAY_CPU_PERCENT', '0'], ['PLAY_CPU_PERCENT', '100'], ['PLAY_CPU_PERCENT', '007'], ['PLAY_MEMORY_MB', '0'], ['PLAY_MEMORY_MB', '4194304'],
+             ['LIBRARY_PATH', ''], ['LIBRARY_PATH', '/mnt/download/polyseat-games'], ['LIBRARY_PATH', '/mnt/disk1/a.b-c_d']];
     $bad = [['SERVICE', 'maybe'], ['SERVICE', ''], ['ACCEPT_NO_LSM', 'YES'], ['HEALTH_TIMEOUT', '9'], ['HEALTH_TIMEOUT', '301'],
             ['HEALTH_TIMEOUT', '1e2'], ['HEALTH_TIMEOUT', '-10'], ['HEALTH_TIMEOUT', ' 30'], ['HEALTH_TIMEOUT', "30\n"],
             ['SUBID_COUNT', '1'], ['DATA_DIR', '/etc'], ['DATA_DIR', '/mnt/'], ['DATA_DIR', '/mnt/../etc'], ['DATA_DIR', '/mnt/a/../b'], ['DATA_DIR', '/mnt/a/..'], ['DATA_DIR', '/mnt/./a'], ['DATA_DIR', '/mnt/a/'], ['DATA_DIR', '/mnt//a'],
-            ['DATA_DIR', "/mnt/a\n"], ['DATA_DIR', '/mnt/a b'], ['DATA_DIR', '/mnt/a"b'], ['NOPE', '1'], ['', '1']];
+            ['DATA_DIR', "/mnt/a\n"], ['DATA_DIR', '/mnt/a b'], ['DATA_DIR', '/mnt/a"b'], ['NOPE', '1'], ['', '1'],
+            ['PLAY_CPU_PERCENT', '101'], ['PLAY_CPU_PERCENT', '-1'], ['PLAY_CPU_PERCENT', ''], ['PLAY_CPU_PERCENT', '5.5'], ['PLAY_CPU_PERCENT', '1e1'],
+            ['PLAY_CPU_PERCENT', ' 5'], ['PLAY_CPU_PERCENT', "5\n"], ['PLAY_MEMORY_MB', '4194305'], ['PLAY_MEMORY_MB', '8G'], ['PLAY_MEMORY_MB', '99999999999'],
+            ['LIBRARY_PATH', '/etc'], ['LIBRARY_PATH', '/mnt/'], ['LIBRARY_PATH', '/mnt/a/../b'], ['LIBRARY_PATH', '/mnt/a/'], ['LIBRARY_PATH', "/mnt/a\n"],
+            ['LIBRARY_PATH', '/mnt/a b'], ['PLAY_PIDS_MAX', '1']];
     foreach ($good as [$k, $v]) { ok(psu_validate_setting($k, $v), "$k=$v should pass"); }
     foreach ($bad as [$k, $v]) { ok(!psu_validate_setting($k, $v), "$k=" . json_encode($v) . ' should fail'); }
 });
@@ -97,14 +103,17 @@ t('argument allowlist', function () use ($SHA) {
     $good = [['status'], ['status', '--json'], ['metrics'], ['list'], ['config-get'], ['logs', 'controller', '100'],
              ['logs', 'incusd', '500'], ['diagnose'], ['verify', $SHA], ['start'], ['stop'], ['restart'],
              ['activate', $SHA, '--approve'], ['rollback', '--approve'], ['recover', '--approve'], ['config-reset'],
-             ['config-set', 'SERVICE=enabled'], ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=30']];
+             ['config-set', 'SERVICE=enabled'], ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=30'], ['polyseatd-status'],
+             ['config-set', 'PLAY_CPU_PERCENT=50', 'PLAY_MEMORY_MB=8192', 'LIBRARY_PATH=/mnt/tank/games']];
     $bad = [[], ['uninstall', '--approve'], ['update', 'a', 'b', 'c', '--approve'], ['stage', 'a', 'b', 'c', '--approve'],
             ['boot'], ['status', '--json', 'x'], ['status', '-x'], ['activate', $SHA], ['activate', $SHA, '--approve', 'x'],
             ['activate', 'abc', '--approve'], ['rollback'], ['recover'], ['logs', 'controller', '0'], ['logs', 'controller', '501'],
             ['logs', '../etc/passwd', '10'], ['logs', 'controller', '10', 'extra'], ['verify', 'abc'],
             ['config-set'], ['config-set', 'UNKNOWN=1'], ['config-set', 'SERVICE=maybe'], ['config-set', "SERVICE=enabled\nDATA_DIR=/mnt/x"],
             ['config-set', 'DATA_DIR=/mnt/a;rm -rf /'], ['status', "a\0b"], ['status', str_repeat('a', 301)],
-            ['start', '--now'], ['stop', ''], ['x' => 'status'], ['status', 5], ['STATUS'], ['status ']];
+            ['start', '--now'], ['stop', ''], ['x' => 'status'], ['status', 5], ['STATUS'], ['status '],
+            ['polyseatd-status', 'x'], ['polyseatd-status', '--json'], ['polyseatd-stop'], ['polyseatd-play'], ['polyseatd-session'],
+            ['config-set', 'PLAY_CPU_PERCENT=101'], ['config-set', 'LIBRARY_PATH=/etc'], ['config-set', 'PLAY_MEMORY_MB=8G']];
     foreach ($good as $args) { ok(psu_ctl_args_ok($args), json_encode($args) . ' should pass'); }
     foreach ($bad as $args) { ok(!psu_ctl_args_ok($args), json_encode($args) . ' should fail'); }
 });
@@ -138,11 +147,42 @@ t('GET views are read-only and validated', function () {
     [$code] = psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => 'activate', 'sha' => 'x'], []);
     eq($code, 400, 'mutating actions are not reachable by GET');
     foreach (stub_calls() as $call) {
-        ok(in_array($call[0], ['status', 'metrics', 'list', 'config-get', 'logs'], true), 'only read commands: ' . $call[0]);
+        ok(in_array($call[0], ['status', 'metrics', 'list', 'config-get', 'logs', 'polyseatd-status'], true), 'only read commands: ' . $call[0]);
     }
     [$code, $headers] = psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => 'status'], []);
     eq($headers['Cache-Control'], 'no-store');
     eq($headers['X-Content-Type-Options'], 'nosniff');
+});
+
+t('the play view is read-only, reduced to validated fields and tells "no session" from "unavailable"', function () {
+    $get = fn() => psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => 'play'], []);
+    stub_reset(['gate' => 'closed', 'play' => 'up']);
+    [$code, , $body] = $get();
+    $b = json_decode($body, true);
+    eq($code, 200);
+    eq($b['data'], ['url' => 'https://192.168.178.24:47800', 'alive' => true,
+                    'seats' => [['name' => 'seat1', 'status' => 'Running'], ['name' => 'seat2', 'status' => 'Stopped']],
+                    'expires_at' => 2000000000], 'only the validated fields; the bad seat name and the session blob are dropped');
+    ok(is_int($b['now']), 'server time for the remaining-time display');
+    stub_reset(['gate' => 'closed', 'play' => 'evil']);
+    [, , $body] = $get();
+    eq(json_decode($body, true)['data'], ['url' => '', 'alive' => true, 'seats' => null, 'expires_at' => null]);
+    stub_reset(['gate' => 'closed', 'play' => 'none']);
+    [$code, , $body] = $get();
+    eq([$code, json_decode($body, true)['data']], [200, null], 'no session is an answer');
+    stub_reset(['gate' => 'closed', 'play' => 'broken']);
+    [$code, , $body] = $get();
+    eq([$code, json_decode($body, true)['error']], [502, 'unavailable']);
+    foreach (stub_calls() as $call) { eq($call, ['polyseatd-status']); }
+    // The play verbs stay out of reach: not by GET, not by POST, not through the argument allowlist.
+    stub_reset(['gate' => 'open']);
+    foreach (['polyseatd_play', 'polyseatd-play', 'play_start', 'play_stop', 'polyseatd-stop'] as $action) {
+        [$code] = post(['action' => $action]);
+        eq($code, 400, $action);
+        [$code] = psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => $action], []);
+        eq($code, 400, "GET $action");
+    }
+    eq(stub_calls(), []);
 });
 
 t('POST rejects bad method, origin and csrf before anything else', function () use ($SHA) {
@@ -201,9 +241,11 @@ t('allowed actions reach the controller with exactly the validated vector', func
     [$code] = post(['action' => 'activate', 'sha' => $SHA, 'confirm' => 'ACTIVATE abababab']); eq($code, 200);
     [$code] = post(['action' => 'rollback', 'confirm' => 'ROLLBACK']); eq($code, 200);
     [$code] = post(['action' => 'config_apply', 'SERVICE' => 'enabled', 'HEALTH_TIMEOUT' => '45', 'EVIL' => 'x', 'psu_csrf2' => 'y']); eq($code, 200);
+    [$code] = post(['action' => 'config_apply', 'PLAY_CPU_PERCENT' => '50', 'PLAY_MEMORY_MB' => '0', 'LIBRARY_PATH' => '/mnt/tank/games']); eq($code, 200);
     $mutations = array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status'));
     eq($mutations, [['start'], ['stop'], ['activate', $SHA, '--approve'], ['rollback', '--approve'],
-                    ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=45']]);
+                    ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=45'],
+                    ['config-set', 'PLAY_CPU_PERCENT=50', 'PLAY_MEMORY_MB=0', 'LIBRARY_PATH=/mnt/tank/games']]);
 });
 
 t('bad parameters never reach the controller', function () use ($SHA) {
@@ -211,7 +253,8 @@ t('bad parameters never reach the controller', function () use ($SHA) {
     foreach ([['service', ['do' => 'uninstall']], ['service', ['do' => 'start --approve']], ['service', []],
               ['activate', ['sha' => 'zz', 'confirm' => 'ACTIVATE zz']], ['activate', ['sha' => strtoupper($SHA)]],
               ['config_apply', ['SERVICE' => 'nope']], ['config_apply', ['DATA_DIR' => '/etc']], ['config_apply', []],
-              ['config_apply', ['SERVICE' => ['enabled']]], ['nonsense', []], ['', []], ['update', ['archive' => '/x']],
+              ['config_apply', ['SERVICE' => ['enabled']]], ['config_apply', ['PLAY_CPU_PERCENT' => '101']],
+              ['config_apply', ['LIBRARY_PATH' => '/mnt/a/../b']], ['config_apply', ['PLAY_MEMORY_MB' => '-1']], ['nonsense', []], ['', []], ['update', ['archive' => '/x']],
               ['uninstall', ['confirm' => 'UNINSTALL']]] as [$action, $extra]) {
         [$code] = post(['action' => $action] + $extra);
         ok($code === 400, "$action should be 400, got $code");
@@ -237,6 +280,9 @@ t('rendering escapes hostile data', function () {
     $tabs = psu_render_settings_tabs([['key' => 'SERVICE', 'type' => 'enum', 'values' => ['enabled', 'disabled'], 'value' => 'enabled',
                                        'label' => 'L', 'default' => 'disabled', 'tab' => 'general']]);
     ok(strpos($tabs, 'role="tablist"') !== false && strpos($tabs, 'role="tabpanel"') !== false);
+    $play = psu_render_settings_tabs([['key' => 'PLAY_CPU_PERCENT', 'type' => 'int', 'min' => 0, 'max' => 100, 'value' => '0', 'title' => 'T',
+                                       'label' => 'L', 'default' => '0', 'tab' => 'play']]);
+    ok(strpos($play, 'data-tab="play"') !== false && strpos($play, '>Play</button>') !== false && strpos($play, 'name="PLAY_CPU_PERCENT"') !== false);
     $inline = psu_json_inline(['x' => '</script><img src=x onerror=alert(1)>', 'y' => "a'b\"c&d"]);
     ok(strpos($inline, '</script>') === false && strpos($inline, '<') === false && strpos($inline, "'") === false);
     eq(json_decode($inline, true)['x'], '</script><img src=x onerror=alert(1)>', 'round-trips');

@@ -12,6 +12,13 @@ case "$1" in
   list) echo '[]'; exit 0 ;;
   config-get) echo '[]'; exit 0 ;;
   logs) echo "line"; exit 0 ;;
+  polyseatd-status)
+    case "$(get play)" in
+      up) echo '{"ok":true,"url":"https://192.168.178.24:47800","alive":true,"pid":"4242","listeners":["x"],"session":{"setup":false,"note":"<script>"},"seats":[{"name":"seat1","status":"Running","autostart":"false"},{"name":"Bad Name","status":"Running"},{"name":"seat2","status":"Stopped"}],"expires_at":2000000000}'; exit 0 ;;
+      evil) echo '{"url":"javascript:alert(1)","alive":true,"seats":"x","expires_at":"soon"}'; exit 0 ;;
+      broken) exit 1 ;;
+      *) echo "no polyseatd session is running" >&2; exit 2 ;;
+    esac ;;
 esac
 if [[ -n $fail && $fail != 0 ]]; then get stderr | base64 -d >&2; exit "$fail"; fi
 echo "done" >&2
