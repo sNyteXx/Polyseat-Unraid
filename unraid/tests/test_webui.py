@@ -96,10 +96,17 @@ class SchemaConsistencyTests(unittest.TestCase):
                       "PLAY_CPU_PERFORMANCE": (["yes", "no"], ["true", "YES", "", "1"]),
                       # shape only here; the host's CPU count is the controller's own check (test_owner_mode)
                       "PLAY_SEAT_CPUS": (["", "0-15", "0,2,4-7", "seat1=0-7;seat2=8-15"],
-                                         ["0-", "-3", "seat1=", "Seat1=0-7", "seat1=0-7;", "0-7;seat1=1", "12345", "$(id)"])})
+                                         ["0-", "-3", "seat1=", "Seat1=0-7", "seat1=0-7;", "0-7;seat1=1", "12345", "$(id)"]),
+                      # the permanent workloads daemon (owner builds)
+                      "WORKLOADS_ENABLED": (["yes", "no"], ["true", "YES", "", "1"]),
+                      "WORKLOADS_INSTANCES": (["", "ubuntudev", "ubuntudev ubuntudev-test"],
+                                              ["Ubuntudev", "a  b", " a", "a ", "a;b", "-a", "a b c d e f g h i j k l m n o p q"]),
+                      "WORKLOADS_MEMORY_MB": (["0", "28672", "4194304"], ["4194305", "-1", "", "28G", "1e3"]),
+                      "WORKLOADS_CPUS": (["", "0-15", "0-7,16-19"], ["0-", "0-7;1", "seat1=0-7", "12345", "$(id)"])})
         for key, (good, bad) in cases.items():
             if key not in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "PLAY_IDLE_STOP_MINUTES", "LIBRARY_PATH", "PLAY_SESSION_HOURS",
-                           "PLAY_CPU_PERFORMANCE", "PLAY_SEAT_CPUS"):
+                           "PLAY_CPU_PERFORMANCE", "PLAY_SEAT_CPUS", "WORKLOADS_ENABLED", "WORKLOADS_INSTANCES",
+                           "WORKLOADS_MEMORY_MB", "WORKLOADS_CPUS"):
                 continue
             for value in good:
                 self.assertEqual(sb.ctl("config-set", f"{key}={value}").code, 0, (key, value))
@@ -113,7 +120,7 @@ class SchemaConsistencyTests(unittest.TestCase):
             self.assertRegex(key, r"^[A-Z_]+$")
             self.assertIn(rule["type"], ("enum", "int", "path", "string"))
             self.assertIn("default", rule)
-            self.assertIn(rule["tab"], ("general", "storage", "advanced", "play"))
+            self.assertIn(rule["tab"], ("general", "storage", "advanced", "play", "workloads"))
             if rule["type"] == "enum":
                 self.assertIn(rule["default"], rule["values"])
             if rule["type"] == "int":
@@ -156,10 +163,10 @@ class JsTests(unittest.TestCase):
     def test_confirmation_phrases_match_php(self):
         sha = "0123456789abcdef" * 4
         php = {"activate": f"ACTIVATE {sha[:8]}", "rollback": "ROLLBACK", "recover": "RECOVER", "stop": "STOP",
-               "restart": "RESTART", "config_reset": "RESET", "play_stop": "STOP"}
+               "restart": "RESTART", "config_reset": "RESET", "play_stop": "STOP", "workloads_stop": "STOP WORKLOADS"}
         out = self.run_node(f"""
           const PSU = require({json.dumps(str(JS))});
-          const a = ['activate','rollback','recover','stop','restart','config_reset','play_stop'];
+          const a = ['activate','rollback','recover','stop','restart','config_reset','play_stop','workloads_stop'];
           console.log(JSON.stringify(Object.fromEntries(a.map(x => [x, PSU.confirmPhrase(x, {json.dumps(sha)})]))));""")
         self.assertEqual(out, php)
 
@@ -177,10 +184,14 @@ class JsTests(unittest.TestCase):
             t('PLAY_IDLE_STOP_MINUTES','5.5'),
             t('LIBRARY_PATH','/mnt/download/polyseat-games'), t('LIBRARY_PATH','/etc'), t('LIBRARY_PATH',''),
             t('PLAY_SESSION_HOURS','24'), t('PLAY_SESSION_HOURS','25'), t('PLAY_CPU_PERFORMANCE','yes'), t('PLAY_CPU_PERFORMANCE','true'),
-            t('PLAY_SEAT_CPUS',''), t('PLAY_SEAT_CPUS','seat1=0-7;seat2=8-15'), t('PLAY_SEAT_CPUS','seat1='), t('PLAY_SEAT_CPUS','0-15\\n')]));""")
+            t('PLAY_SEAT_CPUS',''), t('PLAY_SEAT_CPUS','seat1=0-7;seat2=8-15'), t('PLAY_SEAT_CPUS','seat1='), t('PLAY_SEAT_CPUS','0-15\\n'),
+            t('WORKLOADS_ENABLED','yes'), t('WORKLOADS_ENABLED','true'), t('WORKLOADS_INSTANCES','ubuntudev ubuntudev-test'),
+            t('WORKLOADS_INSTANCES','Bad'), t('WORKLOADS_INSTANCES',''), t('WORKLOADS_MEMORY_MB','28672'), t('WORKLOADS_MEMORY_MB','4194305'),
+            t('WORKLOADS_CPUS','0-7,16-19'), t('WORKLOADS_CPUS','0-')]));""")
         self.assertEqual(out, [True, False, True, False, True, False, True, False,
                                True, True, False, False, True, False, False, True, True, False, False, True, False, True,
-                               True, False, True, False, True, True, False, False])
+                               True, False, True, False, True, True, False, False,
+                               True, False, True, False, True, True, False, True, False])
 
     def test_play_card_helpers(self):
         out = self.run_node(f"""
@@ -225,6 +236,33 @@ class JsTests(unittest.TestCase):
         self.assertEqual(out, [on, on, {"start": False, "stop": True}, off,        # owner: idle / no bundle / running / Incus up
                                off, {"start": False, "stop": True},                 # signed: never starts, can stop
                                off, off, off, off, off, off, off])
+
+    def test_workloads_card_helpers(self):
+        out = self.run_node(f"""
+          const PSU = require({json.dumps(str(JS))});
+          const up = {{ok: true, data: {{state: 'running', enabled: true, policy_ok: true, violations: [], note: '',
+                      instances: [{{name: 'ubuntudev', status: 'Running', ips: ['192.168.178.144'], autostart: true}}]}}}};
+          const st = (mode, gate) => ({{release_gate: gate || 'canary', approval_mode: mode}});
+          const at = (state) => ({{ok: true, data: {{state: state}}}});
+          console.log(JSON.stringify({{
+            up: PSU.workloadsView(up),
+            violation: PSU.workloadsView({{ok: true, data: {{state: 'running', policy_ok: false, violations: ['instance x: device usb']}}}}),
+            states: ['stopped', 'starting', 'running', 'degraded', 'stopping', 'failed', 'orphaned', 'nonsense'].map(x => PSU.workloadsView(at(x)).cls),
+            absent: PSU.workloadsView({{ok: true, data: null}}), bad: PSU.workloadsView({{ok: false}}), nothing: PSU.workloadsView(undefined),
+            buttons: ['stopped', 'failed', 'starting', 'running', 'degraded', 'stopping', 'orphaned'].map(x => PSU.workloadsButtons(st('owner'), at(x))),
+            other: [PSU.workloadsButtons(st('signed'), at('stopped')), PSU.workloadsButtons(st(undefined), at('running')),
+                    PSU.workloadsButtons(st('owner', 'closed'), at('stopped')), PSU.workloadsButtons(st('owner'), {{ok: true, data: null}}),
+                    PSU.workloadsButtons(st('owner'), {{ok: false}}), PSU.workloadsButtons(null, at('stopped')), PSU.workloadsButtons(st('owner'), undefined)]
+          }}));""")
+        self.assertEqual((out["up"]["text"], out["up"]["cls"], out["up"]["available"]), ("Running", "ok", True))
+        self.assertEqual(out["up"]["instances"][0]["name"], "ubuntudev")
+        self.assertEqual((out["violation"]["text"], out["violation"]["cls"]), ("Running, outside the policy", "crit"))
+        self.assertEqual(out["states"], ["muted", "warn", "ok", "warn", "warn", "crit", "crit", "muted"])
+        self.assertEqual((out["absent"]["available"], out["bad"]["cls"], out["nothing"]["cls"]), (False, "warn", "warn"))
+        on_start, on_stop, off = {"start": True, "stop": False}, {"start": False, "stop": True}, {"start": False, "stop": False}
+        # start only from a stopped (or failed: the controller says why) daemon; stop while anything of it may run
+        self.assertEqual(out["buttons"], [on_start, on_start, on_stop, on_stop, on_stop, off, on_stop])
+        self.assertEqual(out["other"], [off] * 7)
 
     def test_no_dynamic_html_sinks_or_external_requests(self):
         import re

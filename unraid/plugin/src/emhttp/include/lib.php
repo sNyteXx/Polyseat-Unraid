@@ -130,9 +130,9 @@ function psu_origin_ok(array $server): bool
 /* ------------------------------------------------------- controller calls ---- */
 
 const PSU_READ_COMMANDS = ['status', 'metrics', 'list', 'config-get', 'logs', 'diagnose', 'preflight', 'health', 'verify',
-                           'polyseatd-status', 'play-status'];
+                           'polyseatd-status', 'play-status', 'workloads-status'];
 const PSU_WRITE_COMMANDS = ['start', 'stop', 'restart', 'activate', 'rollback', 'recover', 'config-set', 'config-reset',
-                            'play-start', 'play-stop'];
+                            'play-start', 'play-stop', 'workloads-start', 'workloads-stop'];
 
 /** Allowlist for every argument vector the WebUI may ever pass to polyseatctl. */
 function psu_ctl_args_ok(array $args): bool
@@ -151,14 +151,15 @@ function psu_ctl_args_ok(array $args): bool
         case 'status':
             return $rest === [] || $rest === ['--json'];
         case 'metrics': case 'list': case 'config-get': case 'diagnose': case 'preflight': case 'health':
-        case 'polyseatd-status': case 'play-status':
+        case 'polyseatd-status': case 'play-status': case 'workloads-status':
         case 'start': case 'stop': case 'restart': case 'config-reset':
         case 'play-start': case 'play-stop': // no --approve and no --wait from the web: the controller writes its own approval
+        case 'workloads-start': case 'workloads-stop': // no --boot, --wait or --approve either; workloads-recover is console-only
             return $rest === [];
         case 'verify':
             return $rest === [] || (count($rest) === 1 && preg_match('/^[0-9a-f]{64}$/D', $rest[0]) === 1);
         case 'logs':
-            return count($rest) === 2 && in_array($rest[0], ['controller', 'incusd'], true)
+            return count($rest) === 2 && in_array($rest[0], ['controller', 'incusd', 'workloads'], true)
                 && preg_match('/^[0-9]{1,3}$/D', $rest[1]) === 1 && (int)$rest[1] >= 1 && (int)$rest[1] <= 500;
         case 'activate':
             return count($rest) === 2 && preg_match('/^[0-9a-f]{64}$/D', $rest[0]) === 1 && $rest[1] === '--approve';
@@ -201,6 +202,53 @@ function psu_play_view(array $status): array
         'alive' => ($status['alive'] ?? false) === true,
         'seats' => $seats,
         'expires_at' => is_int($status['expires_at'] ?? null) ? $status['expires_at'] : null,
+    ];
+}
+
+/**
+ * What the Workloads card may show of workloads-status: the daemon's state, whether it starts at array start, whether the
+ * policy holds (and the first violations, as text), and each instance's name, state and IPv4 addresses. Everything else
+ * is dropped.
+ */
+function psu_workloads_view(array $status): array
+{
+    $states = ['stopped', 'starting', 'running', 'degraded', 'stopping', 'failed', 'orphaned'];
+    $state = is_string($status['state'] ?? null) && in_array($status['state'], $states, true) ? $status['state'] : 'stopped';
+    $instances = [];
+    if (is_array($status['instances'] ?? null)) {
+        foreach (array_slice($status['instances'], 0, 32) as $inst) {
+            if (!is_array($inst) || !is_string($inst['name'] ?? null) || !is_string($inst['status'] ?? null)
+                || preg_match('/^[a-z0-9][a-z0-9-]{0,62}$/D', $inst['name']) !== 1
+                || preg_match('/^[A-Za-z]{1,16}$/D', $inst['status']) !== 1) {
+                continue;
+            }
+            $ips = [];
+            foreach (array_slice(is_array($inst['ips'] ?? null) ? $inst['ips'] : [], 0, 8) as $ip) {
+                if (is_string($ip) && preg_match('/^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/D', $ip) === 1) {
+                    $ips[] = $ip;
+                }
+            }
+            $instances[] = ['name' => $inst['name'], 'status' => $inst['status'], 'ips' => $ips,
+                            'autostart' => ($inst['autostart'] ?? '') === 'true'];
+        }
+    }
+    $violations = [];
+    if (is_array($status['policy']['violations'] ?? null)) {
+        foreach (array_slice($status['policy']['violations'], 0, 5) as $text) {
+            if (is_string($text)) {
+                $violations[] = substr(preg_replace('/[^\x20-\x7e]/', '?', $text) ?? '', 0, 200);
+            }
+        }
+    }
+    return [
+        'state' => $state,
+        'enabled' => ($status['enabled'] ?? false) === true,
+        'policy_ok' => ($status['policy']['ok'] ?? true) !== false,
+        'violations' => $violations,
+        'instances' => $instances,
+        'clean_stop' => is_bool($status['clean_stop_recorded'] ?? null) ? $status['clean_stop_recorded'] : null,
+        'note' => substr(preg_replace('/[^\x20-\x7e]/', '?', is_string($status['note'] ?? null) ? $status['note'] : '') ?? '', 0, 120),
+        'updated' => is_int($status['updated'] ?? null) ? $status['updated'] : null,
     ];
 }
 
@@ -284,6 +332,7 @@ function psu_confirm_phrase(string $action, string $subject = ''): string
         case 'recover': return 'RECOVER';
         case 'stop': return 'STOP';
         case 'play_stop': return 'STOP';
+        case 'workloads_stop': return 'STOP WORKLOADS'; // not STOP: the containers of the owner's dev box go down with it
         case 'restart': return 'RESTART';
         case 'config_reset': return 'RESET';
     }
@@ -325,6 +374,16 @@ function psu_handle(array $server, array $get, array $post): array
             $data = psu_json_from($result);
             if ($data !== null) {
                 return $reply(200, ['ok' => true, 'data' => psu_play_view($data), 'now' => time()]);
+            }
+            return $result['code'] === 2 ? $reply(200, ['ok' => true, 'data' => null, 'now' => time()])
+                                         : $reply(502, ['ok' => false, 'error' => 'unavailable']);
+        }
+        if ($action === 'workloads') {
+            // Read-only. The controller refuses (exit 2) in a build without the workloads daemon; the card then hides itself.
+            $result = psu_run_ctl(['workloads-status'], 15);
+            $data = psu_json_from($result);
+            if ($data !== null) {
+                return $reply(200, ['ok' => true, 'data' => psu_workloads_view($data), 'now' => time()]);
             }
             return $result['code'] === 2 ? $reply(200, ['ok' => true, 'data' => null, 'now' => time()])
                                          : $reply(502, ['ok' => false, 'error' => 'unavailable']);
@@ -372,6 +431,13 @@ function psu_handle(array $server, array $get, array $post): array
         case 'play_stop':
             $args = ['play-stop'];
             $phrase = psu_confirm_phrase('play_stop');
+            break;
+        case 'workloads_start':
+            $args = ['workloads-start'];
+            break;
+        case 'workloads_stop':
+            $args = ['workloads-stop'];
+            $phrase = psu_confirm_phrase('workloads_stop');
             break;
         case 'rollback':
             $args = ['rollback', '--approve'];
@@ -423,8 +489,14 @@ function psu_handle(array $server, array $get, array $post): array
                             'detail' => 'This build needs a signed approval: start the session on the console.']);
     }
 
-    // play-start verifies and stages hundreds of MB from the flash drive before it returns.
-    $slow = in_array($action, ['service', 'activate', 'rollback', 'recover', 'play_start'], true);
+    // The permanent workloads daemon exists only where an admin's click is the approval too.
+    if (in_array($action, ['workloads_start', 'workloads_stop'], true) && ($status['approval_mode'] ?? 'signed') !== 'owner') {
+        return $reply(423, ['ok' => false, 'error' => 'locked',
+                            'detail' => 'This build has no workloads daemon: it needs an owner-mode build.']);
+    }
+
+    // play-start verifies and stages hundreds of MB from the flash drive before it returns; workloads-start verifies the runtime.
+    $slow = in_array($action, ['service', 'activate', 'rollback', 'recover', 'play_start', 'workloads_start'], true);
     $result = psu_run_ctl($args, $slow ? 240 : 30);
     if ($result['timeout']) {
         return $reply(504, ['ok' => false, 'error' => 'timeout']);
@@ -459,7 +531,8 @@ function psu_boot_script(string $targetId, string $initFunction, array $config):
         . "document.head.appendChild(s);})();</script>";
 }
 
-const PSU_TAB_LABELS = ['general' => 'General', 'storage' => 'Storage & isolation', 'play' => 'Play', 'advanced' => 'Advanced'];
+const PSU_TAB_LABELS = ['general' => 'General', 'storage' => 'Storage & isolation', 'play' => 'Play', 'workloads' => 'Workloads',
+                        'advanced' => 'Advanced'];
 
 /** One settings row from a config-get entry. Everything dynamic is escaped. */
 function psu_render_field(array $entry): string
@@ -481,7 +554,8 @@ function psu_render_field(array $entry): string
     } else {
         $control = '<input type="text" autocomplete="off" spellcheck="false"' . $attrs . ' value="' . psu_e($value) . '"'
             . ' placeholder="' . psu_e((string)($entry['default'] ?? '') !== '' ? $entry['default']
-                : (($entry['type'] ?? '') === 'string' ? 'e.g. 0-15 or seat1=0-7;seat2=8-15' : '/mnt/pool/polyseat')) . '">';
+                : ($key === 'WORKLOADS_INSTANCES' ? 'e.g. ubuntudev'
+                : (($entry['type'] ?? '') === 'string' ? 'e.g. 0-15 or seat1=0-7;seat2=8-15' : '/mnt/pool/polyseat'))) . '">';
     }
     $default = $entry['default'] === '' ? '(none)' : (string)$entry['default'];
     $help = $label . '<br><span class="psu-muted">Default: ' . psu_e($default)

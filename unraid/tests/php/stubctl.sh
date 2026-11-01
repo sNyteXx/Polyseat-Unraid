@@ -19,6 +19,13 @@ case "$1" in
       broken) exit 1 ;;
       *) echo "no polyseatd session is running" >&2; exit 2 ;;
     esac ;;
+  workloads-status)
+    case "$(get workloads)" in
+      up) echo '{"ok":true,"state":"running","supervised":true,"enabled":true,"cgroup":true,"clean_stop_recorded":false,"pid":4711,"note":"","since":1,"updated":1900000000,"policy":{"ok":false,"violations":["instance ubuntudev: device usb","instance x: <b>bad</b>\u0001"]},"instances":[{"name":"ubuntudev","type":"container","status":"Running","autostart":"true","ips":["192.168.178.144","fe80::1","300.1.1","<i>"]},{"name":"Bad Name","status":"Running","ips":[]},{"name":"test","status":"Stopped","autostart":"false","ips":"x"}]}'; exit 0 ;;
+      evil) echo '{"state":"<script>","enabled":"yes","policy":"x","instances":"x","note":5}'; exit 0 ;;
+      broken) exit 1 ;;
+      *) echo "the workloads daemon exists only in an owner-mode build" >&2; exit 2 ;;
+    esac ;;
 esac
 if [[ -n $fail && $fail != 0 ]]; then get stderr | base64 -d >&2; exit "$fail"; fi
 echo "done" >&2
