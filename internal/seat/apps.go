@@ -995,30 +995,13 @@ const entryPrefix = "polyseat-game-"
 // that is current, and a game whose name or artwork changed writes a new one
 // and takes the old one away.
 func (p *Provisioner) writeGameEntries(ctx context.Context, games []Game) error {
-	want := map[string][]byte{}
-
 	// What the seat can already start without any help from here. Steam and
 	// Lutris both offer to make a shortcut for a game, and somebody who took
 	// them up on it should get one entry rather than two: this launcher lists
 	// every desktop entry it finds, and ours is a different file, so nothing
 	// downstream would have merged them. Ours is the one that stands down,
 	// because theirs is the one they asked for.
-	execs := p.foreignEntries(ctx)
-
-	for _, g := range games {
-		if strings.TrimSpace(g.Name) == "" || strings.TrimSpace(g.Launch) == "" {
-			continue
-		}
-
-		if alreadyListed(execs, g.Launch) {
-			continue
-		}
-
-		body := desktopEntry(g)
-		sum := sha1.Sum(body)
-
-		want[fmt.Sprintf("%s/%s%x.desktop", entryDir, entryPrefix, sum[:8])] = body
-	}
+	want := wantedEntries(games, p.foreignEntries(ctx))
 
 	// As the player, like the writes and the removals below: the directory is
 	// theirs, and root listing it would follow a link they put there.
@@ -1079,6 +1062,36 @@ func (p *Provisioner) writeGameEntries(ctx context.Context, games []Game) error 
 	}
 
 	return nil
+}
+
+// wantedEntries is the entries to write for these games, by path, given the
+// commands of the entries the seat already has.
+func wantedEntries(games []Game, execs string) map[string][]byte {
+	want := map[string][]byte{}
+
+	for _, g := range games {
+		if strings.TrimSpace(g.Name) == "" || strings.TrimSpace(g.Launch) == "" {
+			continue
+		}
+
+		// It came from an entry, so it is in the launcher already. Compared
+		// here rather than left to alreadyListed, which only looks at the last
+		// word, and a ROM's path with a space in it does not end in one.
+		if g.Source == desktopSource {
+			continue
+		}
+
+		if alreadyListed(execs, g.Launch) {
+			continue
+		}
+
+		body := desktopEntry(g)
+		sum := sha1.Sum(body)
+
+		want[fmt.Sprintf("%s/%s%x.desktop", entryDir, entryPrefix, sum[:8])] = body
+	}
+
+	return want
 }
 
 // foreignEntries collects the commands of every desktop entry in the seat that

@@ -897,6 +897,15 @@ short script that sets the cap and replaces itself with the game, rather
 than through an `env` line, because the launcher's way of starting an entry
 cannot carry the dollar sign in `LD_PRELOAD`.
 
+**It also runs the other way, for a shortcut no scan can see.** Eden writes a
+desktop entry per game, and nothing can be asked about those: the emulator is one
+AppImage and the game is an argument. So an entry in `~/.local/share/applications`
+with `Game` in its categories becomes a card in Moonlight, unless it is hidden or
+names a `steam://` or `lutris:` target, which the scans answer better, or its
+program is gone. The Exec line is translated rather than copied, because Sunshine
+expands `$` itself and Boost counts every double quote, so `\"` does not survive.
+No entry is generated for these, since the entry they came from is already there.
+
 **The pictures differ because the menus draw differently.** A client draws every
 entry as a portrait card, which is what the covers are for; that launcher draws
 a grid of square icons at a fixed size, and a cover put through it comes out as
@@ -1123,6 +1132,15 @@ Somebody else's choice wins. A setting that names a tool which is not ours stays
 because a seat where the player picked Proton Experimental on purpose is not a
 seat with a broken setting. What does get rewritten is a setting naming one of
 our own builds under an older, versioned name.
+
+The same pass keeps Steam's screensaver off running games. Steam counts input, a
+cutscene has none, and after five minutes of one the screensaver came up over
+the game. The switch is `Customization/Screensaver/WhileInGame` in that same
+file, per installation and on until somebody turns it off, so a seat nobody has
+signed in to yet can be given it too: Steam reads it from a file holding nothing
+else and keeps it when it writes the file out. This one is not somebody else's
+choice to keep, so a seat where it was turned on gets it turned off again. The
+idle screensaver over Steam's own menus is a different setting and stays.
 
 That versioned name is the reason the tool's own manifest is rewritten too.
 Upstream names it after the version and the instruction set, so every update

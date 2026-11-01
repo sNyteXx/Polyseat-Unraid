@@ -563,6 +563,9 @@ func (p *Provisioner) installedGames(ctx context.Context) []Game {
 	// directory it is in.
 	games = append(games, p.appImageGames(ctx)...)
 
+	// Last, so that a shortcut never takes a name away from a scanned game.
+	games = append(games, p.desktopGames(ctx, games)...)
+
 	games = dedupeGames(games)
 
 	sort.Slice(games, func(i, j int) bool { return games[i].Name < games[j].Name })

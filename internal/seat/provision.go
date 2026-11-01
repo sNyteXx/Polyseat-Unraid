@@ -1246,16 +1246,15 @@ func (p *Provisioner) stepProton(ctx context.Context) error {
 	// common pass is the one that finds the current build already there, and a
 	// seat that came out of an older generation, or whose Steam was running the
 	// last time this ran, still needs its setting.
+	//
+	// The rest of Steam's configuration does not depend on Proton, so a seat
+	// without a build gets that much.
 	_, code, err := p.Client.Try(ctx, p.name(), "test", "-d", protonDir+"/"+protonName)
 	if err != nil {
 		return err
 	}
 
-	if code != 0 {
-		return nil
-	}
-
-	return p.stepSteamPlay(ctx)
+	return p.stepSteamConfig(ctx, code == 0)
 }
 
 // stepGEProton adds GE-Proton to the seat, or takes it away again.
@@ -1622,7 +1621,8 @@ const steamScriptPath = "/usr/local/bin/polyseat-steam"
 // to run everything else with.
 const steamConfigPath = steamRoot + "/config/config.vdf"
 
-// stepSteamPlay makes Proton CachyOS the seat's default.
+// stepSteamConfig makes Proton CachyOS the seat's default, when the seat has it,
+// and keeps Steam's screensaver off running games.
 //
 // Otherwise the tool is merely present, and every game still runs under Valve's
 // Proton until somebody walks through Steam's settings with a gamepad, which is
@@ -1633,27 +1633,30 @@ const steamConfigPath = steamRoot + "/config/config.vdf"
 // underneath a running Steam is not merely ignored, it is reverted along with
 // anything else that changed in between. Provisioning is a reliable moment for
 // it: the session has just been rebuilt and nothing has started Steam yet.
-func (p *Provisioner) stepSteamPlay(ctx context.Context) error {
+func (p *Provisioner) stepSteamConfig(ctx context.Context, proton bool) error {
 	quiet, err := p.steamQuiet(ctx)
 	if err != nil {
 		return err
 	}
 
 	if !quiet {
-		p.Log("the default Proton stays as it is for now")
+		p.Log("Steam's configuration stays as it is for now")
 
 		return nil
 	}
 
-	return p.setCompatTool(ctx)
+	return p.writeSteamConfig(ctx, proton)
 }
 
-// setCompatTool writes the default into Steam's configuration, once Steam is
-// known not to be running.
+// writeSteamConfig changes Steam's configuration, once Steam is known not to be
+// running.
+//
+// One read and one write for both settings, so that a file neither of them
+// changes is not touched at all.
 //
 // Read and written as the player, see writeHome. The file sits five levels
 // down in a home the player owns, and any of those levels can be a link.
-func (p *Provisioner) setCompatTool(ctx context.Context) error {
+func (p *Provisioner) writeSteamConfig(ctx context.Context, proton bool) error {
 	// A seat whose Steam has never started has no file, which is not a problem
 	// to report: it is the ordinary state of a seat being built, and the setting
 	// is written into a file Steam then fills in around.
@@ -1668,14 +1671,25 @@ func (p *Provisioner) setCompatTool(ctx context.Context) error {
 		return nil
 	}
 
-	updated, changed, err := SetCompatTool(existing, protonName)
+	updated, mapped := existing, false
+
+	if proton {
+		updated, mapped, err = SetCompatTool(updated, protonName)
+		if err != nil {
+			p.Log("! Steam's configuration was left alone because it could not be read: %v", err)
+
+			return nil
+		}
+	}
+
+	updated, silenced, err := SetScreensaverOff(updated)
 	if err != nil {
 		p.Log("! Steam's configuration was left alone because it could not be read: %v", err)
 
 		return nil
 	}
 
-	if !changed {
+	if !mapped && !silenced {
 		return nil
 	}
 
@@ -1688,7 +1702,13 @@ func (p *Provisioner) setCompatTool(ctx context.Context) error {
 		return err
 	}
 
-	p.Log("Proton CachyOS is now what this seat runs Windows games with")
+	if mapped {
+		p.Log("Proton CachyOS is now what this seat runs Windows games with")
+	}
+
+	if silenced {
+		p.Log("Steam's screensaver no longer starts over a running game")
+	}
 
 	return nil
 }
