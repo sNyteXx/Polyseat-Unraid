@@ -3664,7 +3664,7 @@ cmd_play_start() ( # owner mode: verify and stage what is on the flash, approve 
 )
 
 cmd_play_stop() { # [--wait SECONDS] : ask the session to stop; with --wait (array stop) hold until it is gone, bounded
-  local wait=0 deadline start=$SECONDS
+  local wait=0 waited=0 start=$SECONDS
   if [[ $# -gt 0 ]]; then
     { [[ $# -eq 2 && $1 == --wait && $2 =~ ^[0-9]{1,3}$ ]] && (( 10#$2 >= 1 && 10#$2 <= 600 )); } ||
       die $EX_USAGE "usage: play-stop [--wait SECONDS (1..600)]"
@@ -3674,15 +3674,16 @@ cmd_play_stop() { # [--wait SECONDS] : ask the session to stop; with --wait (arr
   [[ -d $LOG_DIR && ! -L $LOG_DIR ]] && LOG_ENABLED=1
   if play_lock_free; then log info "play-stop: no session or controller operation is running"; return 0; fi
   log info "play-stop: a session or operation is running; asking it to stop and waiting up to ${wait}s"
-  deadline=$(( SECONDS + wait ))
   while ! play_lock_free; do
-    if (( SECONDS >= deadline )); then
+    # Counted in sleeps, not read from a clock with one-second granularity: the bound is never shorter than asked for.
+    if (( waited >= wait )); then
       log error "play-stop: still running after ${wait}s; the emergency stop follows"
       return 1
     fi
     # Rewritten every round: a session that is still starting removes an older request when it gets that far.
     if [[ -d $RUN_DIR && ! -L $RUN_DIR ]]; then (umask 077; : > "$RUN_DIR/polyseatd-stop"); fi
     sleep 2
+    waited=$(( waited + 2 ))
   done
   log info "play-stop: ended after $(( SECONDS - start ))s"
 }
