@@ -388,6 +388,20 @@ func (p *Provisioner) waitSystemd(ctx context.Context) error {
 // is what its callers want. Should a third caller ever need this, the two are
 // worth folding together then.
 func (p *Provisioner) restartContainer(ctx context.Context) error {
+	if err := p.stopContainer(ctx); err != nil {
+		return err
+	}
+
+	if err := p.Client.Start(ctx, p.name()); err != nil {
+		return err
+	}
+
+	return p.waitSystemd(ctx)
+}
+
+// stopContainer is restartContainer's first half: the session first, then the
+// container, killed when it overruns.
+func (p *Provisioner) stopContainer(ctx context.Context) error {
 	p.Log("restarting the container so the new configuration takes effect")
 
 	if _, _, err := p.Client.Try(ctx, p.name(), append(playerPrefix(p.uid),
@@ -407,11 +421,7 @@ func (p *Provisioner) restartContainer(ctx context.Context) error {
 		}
 	}
 
-	if err := p.Client.Start(ctx, p.name()); err != nil {
-		return err
-	}
-
-	return p.waitSystemd(ctx)
+	return nil
 }
 
 // ------------------------------------------------------------------- network
@@ -2569,17 +2579,44 @@ func (p *Provisioner) stepGPU(ctx context.Context) error {
 		devices[k] = v
 	}
 
-	changed, err := p.Client.Configure(ctx, p.name(), config, devices)
-	if err != nil {
-		return err
-	}
-
 	// nvidia.runtime, security.nesting and limits.kernel.nice only take effect
 	// on a fresh start, and a device that was just added is not in a running
 	// container either, so a change here costs a restart. Nothing changed means
 	// nothing to restart, which is what keeps re-provisioning a healthy seat
 	// from interrupting it.
-	if changed {
+	//
+	// The change is made with the container stopped rather than live. Adding a
+	// disk device to a running container mounts it in through LXC's mount
+	// injection, and where the host's root is an initramfs (Unraid) moving a
+	// mount taken from it, such as the NVIDIA profiles, into the container
+	// fails with EINVAL. The same mount set up while the container starts
+	// works, and the restart happens either way.
+	pending, err := p.Client.Pending(ctx, p.name(), config, devices)
+	if err != nil {
+		return err
+	}
+
+	if pending {
+		if err := p.stopContainer(ctx); err != nil {
+			return err
+		}
+	}
+
+	changed, err := p.Client.Configure(ctx, p.name(), config, devices)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case pending:
+		if err := p.Client.Start(ctx, p.name()); err != nil {
+			return err
+		}
+
+		if err := p.waitSystemd(ctx); err != nil {
+			return err
+		}
+	case changed:
 		if err := p.restartContainer(ctx); err != nil {
 			return err
 		}
