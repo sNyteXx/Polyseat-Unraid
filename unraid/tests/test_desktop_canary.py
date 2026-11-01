@@ -970,6 +970,8 @@ class PolyseatdTests(unittest.TestCase):
         state = d / "mnt/cache/polyseat/polyseatd"
         state.mkdir(parents=True)
         state.chmod(0o700)
+        (d / "mnt/download/polyseat-games").mkdir(parents=True)
+        (d / "mnt/download/polyseat-games").chmod(0o755)
         if creds:
             (state / "credentials.json").write_text(json.dumps(
                 {"username": "owner", "algorithm": "argon2id", "salt": "c2FsdA==", "hash": "aGFzaA=="}))
@@ -980,7 +982,7 @@ class PolyseatdTests(unittest.TestCase):
           init_paths 2>/dev/null; ROOT="$1"; POLYSEATD_DIR="$1/var/lib/polyseat-unraid-daemon" POLYSEATD_BIN="$POLYSEATD_DIR/bin/polyseatd"
           POLYSEATD_SHA256="$2" LISTENERS=$3
           me=$(id -u)
-          stat() { local out; out=$(command stat "$@") || return; printf '%s\n' "${out//$me /0 }"; }
+          stat() { local out; out=$(command stat "$@") || return; printf '%s\n' "${out//$me/0}"; }
           polyseatd_lan_ip() { echo 192.168.178.24; }
           polyseatd_listeners() { printf '%s' "$LISTENERS"; }
           polyseatd_precheck
@@ -1135,7 +1137,7 @@ class PlayTests(unittest.TestCase):
                         "uinput": {"type": "unix-char", "source": "/dev/uinput", "path": "/dev/uinput", "mode": "0666", "required": "false"},
                         "polyseat-event7": {"type": "unix-char", "source": "/dev/input/event7", "path": "/dev/input/event7",
                                             "mode": "0666", "required": "false"},
-                        "library": {"type": "disk", "source": "/mnt/cache/polyseat/library/seats/seat1", "path": "/srv/library"},
+                        "library": {"type": "disk", "source": "/mnt/download/polyseat-games/library/seats/seat1", "path": "/srv/library"},
                         "nvidia-profiles": {"type": "disk", "source": "/usr/share/nvidia", "path": "/usr/share/nvidia",
                                             "readonly": "true", "required": "false"}}}
     PROFILE = {"name": "default", "config": {}, "devices": {
@@ -1240,6 +1242,20 @@ class PlayTests(unittest.TestCase):
         self.assertIn("OFF sysrq=1 rule=n helper=n state=n", res.stdout)
         self.assertEqual((d / "console.log").read_text().split()[0:2], ["off", f"{d}/dev/tty1"])
         self.assertIn("restore", (d / "console.log").read_text())
+
+    def test_play_is_unlimited_but_keeps_the_memory_floor(self):
+        res = source_ctl(r"""
+          POLYSEAT_RELEASE_GATE=canary; canary_budget_select play
+          printf '%s|%s|%s|%s|%s\n' "$CANARY_CPUSET" "$CANARY_CPU_MAX" "$CANARY_MEMORY_MAX" "$CANARY_PIDS_MAX" "$CANARY_GPU_PCI"
+        """)
+        self.assertEqual(res.stdout.strip(), "0-27|max 100000|max|max|0000:01:00.0")
+        script = r"""
+          CANARY_OPERATION=$1 CANARY_HOST_MIN_AVAILABLE_KB=$2 CANARY_HOST_MAX_LOAD=0
+          canary_host_pressure_check
+        """
+        self.assertEqual(source_ctl(script, "8", "1").returncode, 0)          # any load
+        self.assertNotEqual(source_ctl(script, "8", str(2 ** 50)).returncode, 0)  # but never below the memory floor
+        self.assertNotEqual(source_ctl(script, "4", "1").returncode, 0)       # other operations keep the load limit
 
     def test_a_clean_stop_record_may_name_upstreams_seats(self):
         d = PersistentStateTests.workspace(self)

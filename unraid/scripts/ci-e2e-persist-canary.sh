@@ -28,7 +28,9 @@ done
 [[ -c /dev/zfs ]] || fail 'ZFS kernel module not loaded'
 [[ $(stat -f -c %T /sys/fs/cgroup) == cgroup2fs ]] || fail 'unified cgroup v2 required'
 if pgrep -x incusd >/dev/null; then fail 'another Incus daemon already exists'; fi
-if zpool list -H -o name cache >/dev/null 2>&1; then fail 'a pool named cache already exists'; fi
+if zpool list -H -o name cache >/dev/null 2>&1 || zpool list -H -o name download >/dev/null 2>&1; then
+  fail 'a pool named cache or download already exists'
+fi
 
 proof="$GITHUB_WORKSPACE/incus-build-proof"
 source_ctl="$GITHUB_WORKSPACE/unraid/plugin/src/emhttp/scripts/polyseatctl"
@@ -54,7 +56,7 @@ work=$(mktemp -d /tmp/polyseat-persist-e2e-XXXXXXXX)
 evidence="$proof/persist-canary-e2e"
 [[ ! -e $evidence ]] || fail 'stale persist evidence'
 mkdir -- "$evidence"
-fixture="" passed=0 workload="" watchdog="" pool_file=""
+fixture="" passed=0 workload="" watchdog="" pool_file="" library_pool_file=""
 
 # Tower-like PATH, exactly as in ci-e2e-desktop-canary.sh (programs recorded read-only on the Unraid host).
 tower_tools="$GITHUB_WORKSPACE/unraid/abi/unraid-7.3.3-x86_64.tools"
@@ -97,7 +99,9 @@ cleanup() {
     fi
   done
   ip link del br0 2>/dev/null
+  zpool list -H -o name download >/dev/null 2>&1 && zpool destroy -f download
   zpool list -H -o name cache >/dev/null 2>&1 && zpool destroy -f cache
+  [[ -n ${library_pool_file:-} ]] && rm -f -- "$library_pool_file"
   [[ -n $pool_file ]] && rm -f -- "$pool_file"
   rm -f -- "$work/release-key" "$work/approval-key"
   find "$evidence" -type f -exec chmod a+r -- {} +
@@ -162,6 +166,14 @@ chmod 0755 "$fixture/mnt/cache/polyseat"
 [[ $(findmnt -n -o SOURCE,FSTYPE --mountpoint "$fixture/mnt/cache/polyseat" | tr -s ' ') == 'cache/polyseat zfs' ]] ||
   fail 'fixture dataset not mounted as on Tower'
 zfs get -H -o property,value quota,used,available,compression,xattr cache/polyseat > "$evidence/dataset.txt"
+# The games library (owner 2026-11-01): its own dataset on the pool `download`, as on Tower.
+library_pool_file="$work/download.zpool"
+truncate -s 8G "$library_pool_file"
+zpool create -f -o ashift=12 -O mountpoint="$fixture/mnt/download" -O compression=lz4 download "$library_pool_file"
+chmod 0777 "$fixture/mnt/download"
+zfs create -o quota=4G -o recordsize=1M download/polyseat-games
+chown 0:0 "$fixture/mnt/download/polyseat-games"
+chmod 0755 "$fixture/mnt/download/polyseat-games"
 step zfs-dataset-like-tower
 
 tar --extract --xz --file "$controller_package" --directory "$fixture" --no-same-owner

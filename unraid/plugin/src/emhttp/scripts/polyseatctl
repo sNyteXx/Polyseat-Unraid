@@ -108,7 +108,11 @@ PERSIST_FRESH=0
 # polyseatd, upstream's input helpers and their interpreter) here; empty = no daemon.
 POLYSEATD_SHA256=""
 POLYSEATD_STATE="$PERSIST_MOUNT/polyseatd"
-POLYSEATD_LIBRARY="$PERSIST_MOUNT/library"
+# Games (owner 2026-11-01): upstream's shared library on the download pool, its own dataset with a 500 GB quota. The
+# pool and every seat's copies live in it, so ZFS block cloning keeps one copy per game however many seats have it.
+POLYSEATD_LIBRARY_DATASET="download/polyseat-games"
+POLYSEATD_LIBRARY_MOUNT="/mnt/download/polyseat-games"
+POLYSEATD_LIBRARY="$POLYSEATD_LIBRARY_MOUNT/library"
 POLYSEATD_PORT=47800
 POLYSEATD_RUN_STATE="/run/polyseat"
 POLYSEATD_MIN_SECONDS=600
@@ -1322,7 +1326,7 @@ canary_budget_select() { # cpu|desktop|gpu|steam|persist|play
       canary_budget_select desktop
       CANARY_INSTANCE=$PERSIST_INSTANCE ;;
     play)
-      CANARY_CPUSET=$PLAY_CPUSET CANARY_CPU_MAX=$PLAY_CPU_MAX CANARY_MEMORY_MAX=$PLAY_MEMORY_MAX
+      CANARY_CPUSET=$CANARY_HOST_CPUSET CANARY_CPU_MAX=$PLAY_CPU_MAX CANARY_MEMORY_MAX=$PLAY_MEMORY_MAX
       CANARY_PIDS_MAX=$PLAY_PIDS_MAX CANARY_GPU_PCI=$GPU_CANARY_PCI CANARY_INSTANCE="" ;;
     steam)
       CANARY_CPU_MAX=$STEAM_CPU_MAX CANARY_MEMORY_MAX=$STEAM_MEMORY_MAX
@@ -1441,8 +1445,10 @@ canary_budget_check() {
 
 canary_host_pressure_check() {
   awk -v minimum="$CANARY_HOST_MIN_AVAILABLE_KB" \
-    '$1 == "MemAvailable:" { ok = ($2 >= minimum) } END { exit !ok }' /proc/meminfo &&
-    awk -v maximum="$CANARY_HOST_MAX_LOAD" '{ exit !($1 <= maximum) }' /proc/loadavg
+    '$1 == "MemAvailable:" { ok = ($2 >= minimum) } END { exit !ok }' /proc/meminfo || return 1
+  # A play session may load the host fully on purpose (owner 2026-11-01); only the memory floor applies to it.
+  [[ ${CANARY_OPERATION:-0} -eq 8 ]] && return 0
+  awk -v maximum="$CANARY_HOST_MAX_LOAD" '{ exit !($1 <= maximum) }' /proc/loadavg
 }
 
 # Step 4: every start of a GPU container passes the LXC nvidia hook, polyseatd's own starts included. The supervisor
@@ -2714,8 +2720,23 @@ polyseatd_precheck() { # read-only before anything starts: binary, password, LAN
   jq -e '(.username | type == "string" and length > 0) and .algorithm == "argon2id" and
     (.hash | type == "string" and length > 0)' "$creds" >/dev/null 2>&1 ||
     { log error "polyseatd: credentials.json is not a usable password record"; return 1; }
+  polyseatd_library_check || return 1
   polyseatd_lan_ip >/dev/null || return 1
   [[ -z $(polyseatd_listeners) ]] || { log error "polyseatd: port $POLYSEATD_PORT is already in use"; return 1; }
+}
+
+polyseatd_library_check() { # read-only: the games dataset is mounted at its root, has a quota and only root writes its root
+  local mount=$ROOT$POLYSEATD_LIBRARY_MOUNT src quota mode
+  if ! sandbox || ci_real_system; then
+    src=$(findmnt -n -o SOURCE,FSTYPE,TARGET --mountpoint "$mount" 2>/dev/null | tr -s ' ')
+    [[ $src == "$POLYSEATD_LIBRARY_DATASET zfs $mount" ]] ||
+      { log error "polyseatd: $POLYSEATD_LIBRARY_MOUNT is not the mounted $POLYSEATD_LIBRARY_DATASET dataset ('$src')"; return 1; }
+    quota=$(zfs get -Hp -o value quota "$POLYSEATD_LIBRARY_DATASET" 2>/dev/null) || quota=''
+    [[ $quota =~ ^[1-9][0-9]*$ ]] || { log error "polyseatd: $POLYSEATD_LIBRARY_DATASET has no quota"; return 1; }
+  fi
+  { [[ -d $mount && ! -L $mount && $(stat -c '%u %g' -- "$mount") == '0 0' ]] && mode=$(stat -c %a -- "$mount") &&
+    (( (8#$mode & 8#022) == 0 )); } ||
+    { log error "polyseatd: $POLYSEATD_LIBRARY_MOUNT must be root:root and writable by root only"; return 1; }
 }
 
 polyseatd_alive() { # pid : the exact staged binary, in its own child of the canary group
@@ -2873,10 +2894,11 @@ cmd_polyseatd_stop() {
 # keyboard, mouse and gamepads. The host pieces input needs exist only while a play session runs, and are put back
 # exactly afterwards: the console guard (owner GO), upstream's udev rule, its device-owner helper, the uhid module.
 PLAY_MAX_WINDOW=21600  # a signed play token may cover six hours; every other canary token at most 30 minutes
-PLAY_CPUSET="8-15"     # four P-cores with both threads; the VMs that need them have priority and stop the session
-PLAY_CPU_MAX="800000 100000"
-PLAY_MEMORY_MAX=$((10 * 1024 * 1024 * 1024))
-PLAY_PIDS_MAX=8192
+# Owner 2026-11-01: a play session uses as much CPU and memory as it needs. What stays: the VMs' priority on the GPU,
+# and the stop when the host itself would run out of memory (MemAvailable below CANARY_HOST_MIN_AVAILABLE_KB).
+PLAY_CPU_MAX="max 100000"
+PLAY_MEMORY_MAX="max"
+PLAY_PIDS_MAX="max"
 PLAY_TTY="/dev/tty1"
 PLAY_UDEV_RULE="/etc/udev/rules.d/72-polyseat-hide.rules"
 PLAY_HELPER_DIR="/usr/local/lib/polyseat"
