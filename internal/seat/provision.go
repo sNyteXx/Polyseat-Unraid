@@ -424,6 +424,29 @@ func (p *Provisioner) stopContainer(ctx context.Context) error {
 	return nil
 }
 
+// nvidiaICDPaths are where a host's NVIDIA driver may put its Vulkan manifest:
+// distribution packages under /usr/share, NVIDIA's own installer (Unraid's
+// driver plugin, for one) under /etc.
+var nvidiaICDPaths = []string{"/usr/share/vulkan/icd.d/nvidia_icd.json", "/etc/vulkan/icd.d/nvidia_icd.json"}
+
+// readFirst reads the first of paths that exists, or reports why none did.
+func readFirst(paths []string) ([]byte, error) {
+	var first error
+
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return data, nil
+		}
+
+		if first == nil {
+			first = err
+		}
+	}
+
+	return nil, first
+}
+
 // ------------------------------------------------------------------- network
 
 func (p *Provisioner) stepNetwork(ctx context.Context) error {
@@ -2770,7 +2793,7 @@ func (p *Provisioner) stepNvidiaUserspace(ctx context.Context) error {
 	// The Vulkan manifest carries the driver's API version, so it is copied
 	// from the host rather than generated. That also keeps it in step when the
 	// host driver is updated and the seat is provisioned again.
-	icd, err := os.ReadFile("/usr/share/vulkan/icd.d/nvidia_icd.json")
+	icd, err := readFirst(nvidiaICDPaths)
 	if err != nil {
 		p.Log("! no Vulkan manifest on the host, Vulkan will not work inside the seat: %v", err)
 	} else {

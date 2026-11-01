@@ -919,7 +919,8 @@ ensure_lxc_rootfs_mount() { # manifest
   [[ $logical == "$LXC_STATE_PARENT/rootfs" ]] || { log error "unexpected lxc_rootfs_mount in manifest"; return 1; }
   real=$(lxc_mount_real "$logical") parent=$(lxc_mount_real "$LXC_STATE_PARENT")
   if [[ -L $parent || -L $real ]]; then log error "refusing a symlinked LXC state directory"; return 1; fi
-  (umask 022; mkdir -p -- "$parent" && mkdir -p -- "$real") || { log error "cannot create $logical"; return 1; }
+  (umask 022; mkdir -p -- "$parent" && mkdir -p -- "$real" && mkdir -p -- "$parent/root") ||
+    { log error "cannot create $logical"; return 1; }
 }
 
 remove_lxc_rootfs_mount() {
@@ -934,6 +935,7 @@ remove_lxc_rootfs_mount() {
   rmdir -- "$(lxc_mount_real "$CANARY_DENY_DIR")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")" 2>/dev/null || true
+  rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/root")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT")" 2>/dev/null || true
 }
 
@@ -1742,7 +1744,12 @@ health_check() {
 }
 
 canary_launch() { # resolved slot; called in the disposable launch subshell
-  local slot_real=$1 parent_mnt_ns
+  local slot_real=$1 parent_mnt_ns switch_root=""
+  # Play (operation 8): Unraid's root is the initramfs, where pivot_root is refused. LXC then starts containers with a
+  # chroot fallback that makes every mount private, so nothing Incus adds to a running seat (a disk, an input device)
+  # can reach it (Tower run 26). In this daemon's own mount namespace only, the root becomes a bind of itself first
+  # (switch_root's trick), and LXC can pivot again.
+  [[ $CANARY_OPERATION -eq 8 ]] && switch_root=$(lxc_mount_real "$LXC_STATE_PARENT/root")
   parent_mnt_ns=$(readlink /proc/self/ns/mnt) || return 1
   [[ $parent_mnt_ns =~ ^mnt:\[[0-9]+\]$ ]] || return 1
   [[ ! -e $RUN_DIR/canary-emergency-stop ]] && canary_watchdog_check || return 1
@@ -1759,9 +1766,16 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   exec setsid env -i PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
     INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
     INCUS_LXC_HOOK="$(lxc_mount_real "$LXC_HOOK_DIR")" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
+    POLYSEAT_SWITCH_ROOT="$switch_root" \
     setpriv --bounding-set=-sys_module,-sys_rawio \
     unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private \
     bash -u -o pipefail -c '
+      if [[ -n $POLYSEAT_SWITCH_ROOT && -z ${POLYSEAT_SWITCHED:-} ]]; then
+        mount -n --rbind / "$POLYSEAT_SWITCH_ROOT" || exit 1
+        mount -n --make-rprivate "$POLYSEAT_SWITCH_ROOT" || exit 1
+        cd "$POLYSEAT_SWITCH_ROOT" && mount -n --move . / || exit 1
+        exec chroot . /usr/bin/env POLYSEAT_SWITCHED=1 /bin/bash -u -o pipefail -c "$BASH_EXECUTION_STRING" "$0" "$@"
+      fi
       # /proc is still the outer proc mount here, so its self/stat yields the
       # HOST pid even though $$ is already 1 in the new PID namespace.
       read -r host_pid unused < /proc/self/stat || exit 1

@@ -64,6 +64,15 @@ CANARY_NAMESPACE_LINES = (
     "umount -n /sys/fs/cgroup || private_mount_failure unmount-cgroup",
     "mount -n -t cgroup2 -o nosuid,nodev,noexec none /sys/fs/cgroup || private_mount_failure cgroup",
 )
+# Play only (operation 8): inside the daemon's own namespace, its root becomes a bind of itself so that LXC can
+# pivot_root on Unraid's initramfs (Tower run 26). Reviewed like the lines above: exact text, order, guards.
+CANARY_SWITCH_ROOT_LINES = (
+    'if [[ -n $POLYSEAT_SWITCH_ROOT && -z ${POLYSEAT_SWITCHED:-} ]]; then',
+    'mount -n --rbind / "$POLYSEAT_SWITCH_ROOT" || exit 1',
+    'mount -n --make-rprivate "$POLYSEAT_SWITCH_ROOT" || exit 1',
+    'cd "$POLYSEAT_SWITCH_ROOT" && mount -n --move . / || exit 1',
+    'exec chroot . /usr/bin/env POLYSEAT_SWITCHED=1 /bin/bash -u -o pipefail -c "$BASH_EXECUTION_STRING" "$0" "$@"',
+)
 CANARY_NAMESPACE_GUARDS = (
     'parent_mnt_ns=$(readlink /proc/self/ns/mnt) || return 1',
     'child_mnt_ns=$(readlink /proc/self/ns/mnt) || private_mount_failure namespace',
@@ -79,13 +88,14 @@ def reviewed_canary_namespace_line(function: str, line: str, body: str) -> bool:
     This is intentionally not a global exemption for mount flags or the canary
     function: targets, options, namespace isolation and command order are exact.
     """
-    if function != "canary_launch" or line.strip() not in CANARY_NAMESPACE_LINES:
+    if function != "canary_launch" or line.strip() not in CANARY_NAMESPACE_LINES + CANARY_SWITCH_ROOT_LINES:
         return False
     wrapper = (
         CANARY_NAMESPACE_GUARDS[0],
         "setpriv --bounding-set=-sys_module,-sys_rawio \\",
         CANARY_NAMESPACE_LINES[0],
         "bash -u -o pipefail -c '",
+        *CANARY_SWITCH_ROOT_LINES,
         *CANARY_NAMESPACE_GUARDS[1:4],
         CANARY_NAMESPACE_LINES[1],
         CANARY_NAMESPACE_LINES[2],
@@ -97,6 +107,12 @@ def reviewed_canary_namespace_line(function: str, line: str, body: str) -> bool:
         return False
     positions = [active.index(item) for item in wrapper]
     return positions == sorted(positions)
+
+
+PLAY_UHID_LINES = {
+    "play_host_on": 'if [[ $uhid == loaded ]] && play_real; then modprobe uhid || { log error "play: cannot load uhid"; return 1; }; fi',
+    "play_host_off": 'if [[ $uhid == loaded ]] && play_real; then modprobe -r uhid 2>/dev/null || log warn "play: uhid is still in use; left loaded"; fi',
+}
 
 
 def run(*args, cwd=None):
@@ -343,7 +359,14 @@ class DenylistTests(unittest.TestCase):
                         if (path.name == "polyseatctl" and function in GPU_READONLY_FUNCTIONS
                                 and pattern in GPU_READONLY_PATTERNS):
                             continue
+                        # Owner 2026-11-01: a play session loads uhid for gamepads and unloads it if it loaded it.
+                        if (path.name == "polyseatctl" and pattern == r"\bmodprobe\b" and function in PLAY_UHID_LINES
+                                and line.strip() == PLAY_UHID_LINES[function]):
+                            continue
                         # The controller may *read* or log about these; it may not run them.
+                        if pattern == r"\bmodprobe\b":
+                            self.assertRegex(line, r"^\s*(CANARY_DENIED_TOOLS=|#)", f"{path.name}: {line}")
+                            continue
                         self.assertRegex(line, r"(log |echo |printf |die |#|\".*\"|'.*')",
                                          f"{path.name}: {line}")
                 if line == "}":
@@ -388,8 +411,13 @@ class DenylistTests(unittest.TestCase):
 
     def test_namespace_exception_is_narrow_and_requires_private_wrapper(self):
         body = "\n".join((CANARY_NAMESPACE_GUARDS[0], "setpriv --bounding-set=-sys_module,-sys_rawio \\",
-                          CANARY_NAMESPACE_LINES[0], "bash -u -o pipefail -c '",
+                          CANARY_NAMESPACE_LINES[0], "bash -u -o pipefail -c '", *CANARY_SWITCH_ROOT_LINES,
                           *CANARY_NAMESPACE_GUARDS[1:4], *CANARY_NAMESPACE_LINES[1:], CANARY_NAMESPACE_GUARDS[4]))
+        for line in CANARY_SWITCH_ROOT_LINES:
+            self.assertTrue(reviewed_canary_namespace_line("canary_launch", line, body))
+            for other in CANARY_SWITCH_ROOT_LINES:
+                self.assertFalse(reviewed_canary_namespace_line("canary_launch", line, body.replace(other, "")))
+        self.assertFalse(reviewed_canary_namespace_line("canary_launch", 'mount -n --rbind / /mnt/user', body))
         for line in CANARY_NAMESPACE_LINES:
             self.assertTrue(reviewed_canary_namespace_line("canary_launch", line, body))
             self.assertFalse(reviewed_canary_namespace_line("svc_start", line, body))
