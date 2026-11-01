@@ -370,7 +370,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
           case "$arg" in
             SERVICE=disabled | "DATA_DIR=$CANARY_DATA_DIR" | ACCEPT_NO_LSM=yes | ACCEPT_NO_LSM=no) ;;
             # The owner's play session settings; values are the schema's, nothing else widens.
-            PLAY_CPU_PERCENT=* | PLAY_MEMORY_MB=* | LIBRARY_PATH=*)
+            PLAY_CPU_PERCENT=* | PLAY_MEMORY_MB=* | PLAY_IDLE_STOP_MINUTES=* | LIBRARY_PATH=*)
               schema_validate "${arg%%=*}" "${arg#*=}" || die $EX_BLOCKED "canary refuses an invalid play setting" ;;
             *) die $EX_BLOCKED "canary accepts only fixed DATA_DIR, disabled SERVICE, LSM acknowledgement and the play settings" ;;
           esac
@@ -3003,6 +3003,7 @@ PLAY_MAX_WINDOW=21600  # a signed play token may cover six hours; every other ca
 # Owner 2026-11-01: a play session uses as much CPU and memory as it needs. What stays: the VMs' priority on the GPU,
 # and the stop when the host itself would run out of memory (MemAvailable below CANARY_HOST_MIN_AVAILABLE_KB).
 # The owner may cap both (PLAY_CPU_PERCENT of the whole host, PLAY_MEMORY_MB; 0 = unlimited, the default).
+# PLAY_IDLE_STOP_MINUTES is polyseatd's own standby (idle_stop_minutes; 0 = off, the default): it stops a seat nobody uses.
 PLAY_CPU_MAX="max 100000"
 PLAY_MEMORY_MAX="max"
 PLAY_PIDS_MAX="max"
@@ -3014,13 +3015,17 @@ PLAY_SESSION_STOP="sudo -u player env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSIO
 PLAY_NAME_RE='^[a-z0-9][a-z0-9-]{0,62}$'
 
 polyseatd_config() { # ip out : the bundle's own template with this host's values; host actions must stay off
-  local tpl=$POLYSEATD_DIR/etc/polyseatd.json.in
+  local tpl=$POLYSEATD_DIR/etc/polyseatd.json.in idle
   [[ -f $tpl && ! -L $tpl ]] || { log error "polyseatd: the bundle has no config template"; return 1; }
+  idle=$(cfg_get PLAY_IDLE_STOP_MINUTES 0)
+  schema_validate PLAY_IDLE_STOP_MINUTES "$idle" || { log error "polyseatd: PLAY_IDLE_STOP_MINUTES '$idle' is not usable"; return 1; }
+  idle=$((10#$idle)) # a leading zero is no octal and no invalid JSON number
   (umask 077; sed -e "s|@BUNDLE@|$POLYSEATD_DIR|g" -e "s|@LISTEN@|$1:$POLYSEATD_PORT|g" \
     -e "s|@STATE@|$ROOT$POLYSEATD_STATE|g" -e "s|@LIBRARY@|$ROOT$POLYSEATD_LIBRARY|g" \
-    -e "s|@UPLINK@|$STEAM_NIC_PARENT|g" "$tpl" > "$2") || return 1
-  jq -e --arg listen "$1:$POLYSEATD_PORT" '.listen == $listen and .update_check == false and .web_update == false and
-    .web_uninstall == false and .web_lan_bridge == false and (tostring | test("@[A-Z]+@") | not)' "$2" >/dev/null ||
+    -e "s|@UPLINK@|$STEAM_NIC_PARENT|g" -e "s|@IDLE@|$idle|g" "$tpl" > "$2") || return 1
+  jq -e --arg listen "$1:$POLYSEATD_PORT" --argjson idle "$idle" '.listen == $listen and .update_check == false and
+    .web_update == false and .web_uninstall == false and .web_lan_bridge == false and (.idle_stop_minutes // 0) == $idle and
+    (tostring | test("@[A-Z]+@") | not)' "$2" >/dev/null ||
     { log error "polyseatd: the generated config is not the expected one"; return 1; }
 }
 

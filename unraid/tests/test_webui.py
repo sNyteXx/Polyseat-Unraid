@@ -88,10 +88,11 @@ class SchemaConsistencyTests(unittest.TestCase):
         # Play settings: the same bounds as the PHP and JS validators (run.php, test_setting_validation_mirrors_schema).
         cases.update({"PLAY_CPU_PERCENT": (["0", "1", "100", "007"], ["101", "-1", "", "5.5", "1e1", " 5"]),
                       "PLAY_MEMORY_MB": (["0", "1024", "4194304"], ["4194305", "-1", "", "8G", "99999999999"]),
+                      "PLAY_IDLE_STOP_MINUTES": (["0", "1", "1440", "030"], ["1441", "-1", "", "30m", "1e1", " 5"]),
                       "LIBRARY_PATH": (["", "/mnt/download/polyseat-games", "/mnt/disk1/a.b-c_d"],
                                        ["/etc", "/mnt/", "/mnt/a/../b", "/mnt/a/", "/mnt//a", "/mnt/a b"])})
         for key, (good, bad) in cases.items():
-            if key not in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "LIBRARY_PATH"):
+            if key not in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "PLAY_IDLE_STOP_MINUTES", "LIBRARY_PATH"):
                 continue
             for value in good:
                 self.assertEqual(sb.ctl("config-set", f"{key}={value}").code, 0, (key, value))
@@ -164,9 +165,11 @@ class JsTests(unittest.TestCase):
             t('DATA_DIR','/mnt/cache/a'), t('DATA_DIR','/etc'), t('DATA_DIR',''), t('NOPE','1'),
             t('PLAY_CPU_PERCENT','0'), t('PLAY_CPU_PERCENT','100'), t('PLAY_CPU_PERCENT','101'), t('PLAY_CPU_PERCENT','5.5'),
             t('PLAY_MEMORY_MB','4194304'), t('PLAY_MEMORY_MB','4194305'), t('PLAY_MEMORY_MB',''),
+            t('PLAY_IDLE_STOP_MINUTES','0'), t('PLAY_IDLE_STOP_MINUTES','1440'), t('PLAY_IDLE_STOP_MINUTES','1441'),
+            t('PLAY_IDLE_STOP_MINUTES','5.5'),
             t('LIBRARY_PATH','/mnt/download/polyseat-games'), t('LIBRARY_PATH','/etc'), t('LIBRARY_PATH','')]));""")
         self.assertEqual(out, [True, False, True, False, True, False, True, False,
-                               True, True, False, False, True, False, False, True, False, True])
+                               True, True, False, False, True, False, False, True, True, False, False, True, False, True])
 
     def test_play_card_helpers(self):
         out = self.run_node(f"""

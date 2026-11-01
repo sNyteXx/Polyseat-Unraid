@@ -1148,13 +1148,57 @@ class PolyseatdTests(unittest.TestCase):
         self.assertIn('polyseatd_config "$ip" "$cfg"', body)
         config = text[text.index("polyseatd_config() {"):text.index("play_seat_guard() {")]
         for flag in ('.listen == $listen', ".update_check == false", ".web_update == false", ".web_uninstall == false",
-                     ".web_lan_bridge == false", 'test("@[A-Z]+@") | not'):
+                     ".web_lan_bridge == false", ".idle_stop_minutes", 'test("@[A-Z]+@") | not'):
             self.assertIn(flag, config)
         self.assertIn('.listeners == [$l] and .session.setup == false', body)
         loop = body[body.index("while (( $(date -u +%s) < deadline ))"):body.index("done", body.index("while (( $(date"))]
         for needle in ("canary_profile_guard", "persist_instances", "canary_budget_check", "polyseatd_alive"):
             self.assertIn(needle, loop)
         self.assertLess(body.index('polyseatd_stop "$pid" || exit'), body.index("persist_clean_stop"))
+
+    def polyseatd_config(self, cfg=None, template=None):
+        """polyseatd_config run on the real bundle template, with the real schema; returns (rc, config or None)."""
+        d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-config"))
+        self.addCleanup(shutil.rmtree, d)
+        if template is None:
+            build = (CTL.parents[4] / "scripts/build-daemon-bundle.sh").read_text()
+            template = re.search(r"<<'JSON'\n(.*?)\nJSON\n", build, re.DOTALL).group(1)
+        (d / "etc").mkdir()
+        (d / "etc/polyseatd.json.in").write_text(template + "\n")
+        if cfg is not None:
+            (d / "cfg").write_text("".join(f'{k}="{v}"\n' for k, v in cfg.items()))
+        res = source_ctl(r"""
+          POLYSEATD_DIR="$1/etc/.."; CFG="$1/cfg" SCHEMA="$2"; ROOT=""; POLYSEATD_PORT=47800
+          POLYSEATD_STATE=/state; POLYSEATD_LIBRARY=/library; STEAM_NIC_PARENT=br0
+          log() { :; }
+          polyseatd_config 192.168.1.5 "$1/out"
+        """, str(d), str(CTL.parent.parent / "schema.json"))
+        out = d / "out"
+        return res.returncode, json.loads(out.read_text()) if res.returncode == 0 else None
+
+    def test_the_daemon_config_carries_the_standby_setting(self):
+        rc, conf = self.polyseatd_config()
+        self.assertEqual(rc, 0)
+        self.assertEqual(conf["idle_stop_minutes"], 0)  # off unless the owner turns it on
+        self.assertFalse(conf["web_update"] or conf["web_uninstall"] or conf["web_lan_bridge"] or conf["update_check"])
+        for value, want in (("0", 0), ("30", 30), ("1440", 1440), ("007", 7)):
+            with self.subTest(value=value):
+                rc, conf = self.polyseatd_config({"PLAY_IDLE_STOP_MINUTES": value})
+                self.assertEqual((rc, conf and conf["idle_stop_minutes"]), (0, want))
+        for value in ("1441", "-1", "5.5", "abc", "$(id)", " 30"):
+            with self.subTest(value=value):
+                self.assertEqual(self.polyseatd_config({"PLAY_IDLE_STOP_MINUTES": value})[0], 1)
+
+    def test_the_daemon_config_keeps_refusing_a_surviving_placeholder_and_an_old_template(self):
+        build = (CTL.parents[4] / "scripts/build-daemon-bundle.sh").read_text()
+        template = re.search(r"<<'JSON'\n(.*?)\nJSON\n", build, re.DOTALL).group(1)
+        self.assertEqual(template.count("@IDLE@"), 1)
+        self.assertEqual(self.polyseatd_config(template=template.replace("@LISTEN@", "@LISTEN@@NEW@"))[0], 1)
+        # A bundle from before the setting has no field: fine while standby is off, refused once it is asked for.
+        old = template.replace(',\n "idle_stop_minutes": @IDLE@', "")
+        self.assertNotEqual(old, template)
+        self.assertEqual(self.polyseatd_config(template=old)[0], 0)
+        self.assertEqual(self.polyseatd_config({"PLAY_IDLE_STOP_MINUTES": "30"}, template=old)[0], 1)
 
     def test_run_state_cleanup_removes_plain_files_only(self):
         d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-run"))

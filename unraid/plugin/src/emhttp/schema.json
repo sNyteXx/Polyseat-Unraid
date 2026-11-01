@@ -80,6 +80,16 @@
     "locked_while_running": true,
     "title": "Play memory limit (MB)"
   },
+  "PLAY_IDLE_STOP_MINUTES": {
+    "type": "int",
+    "min": 0,
+    "max": 1440,
+    "default": "0",
+    "tab": "play",
+    "label": "Standby: stop a seat that has had no Moonlight client and no game running for this many minutes, to free its memory and CPU (0 = never). A stopped seat cannot be woken from Moonlight; start it from Polyseat's page or the Polyseat card before connecting.",
+    "locked_while_running": true,
+    "title": "Seat standby (minutes)"
+  },
   "LIBRARY_PATH": {
     "type": "path",
     "pattern": "^/mnt/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+)*$",

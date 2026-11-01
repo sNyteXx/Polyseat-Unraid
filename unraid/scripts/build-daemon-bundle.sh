@@ -30,12 +30,13 @@ done
 { printf '#!@BUNDLE@/py/bin/python3 -I\n'; tail -n +2 "$repo/spike/m2-input-broker/device_owner.py"; } > "$b/lib/polyseat/device_owner.udev"
 chmod 0644 "$b/lib/polyseat/device_owner.udev"
 install -m 0644 "$repo/host/72-polyseat-hide.rules" "$b/rules/72-polyseat-hide.rules"
-# The daemon's fixed settings on Unraid; the controller fills in @BUNDLE@, @LISTEN@, @STATE@, @LIBRARY@ and @UPLINK@.
+# The daemon's fixed settings on Unraid; the controller fills in @BUNDLE@, @LISTEN@, @STATE@, @LIBRARY@, @UPLINK@ and @IDLE@.
 # Host actions stay off (prepare, update, restart, uninstall, LAN bridge answer 403); the helpers use this Python.
 cat > "$b/etc/polyseatd.json.in" <<'JSON'
 {"listen": "@LISTEN@", "state_dir": "@STATE@", "library_dir": "@LIBRARY@", "uplink": "@UPLINK@",
  "helper_dir": "@BUNDLE@/lib/polyseat", "python": "@BUNDLE@/py/bin/python3",
- "update_check": false, "web_update": false, "web_uninstall": false, "web_lan_bridge": false}
+ "update_check": false, "web_update": false, "web_uninstall": false, "web_lan_bridge": false,
+ "idle_stop_minutes": @IDLE@}
 JSON
 curl -fsSL --retry 3 -o "$work/python.tar.gz" "$PYTHON_STANDALONE_URL"
 printf '%s  %s\n' "$PYTHON_STANDALONE_SHA256" "$work/python.tar.gz" | sha256sum --check --strict --quiet
