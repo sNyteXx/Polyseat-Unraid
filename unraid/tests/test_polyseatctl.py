@@ -292,6 +292,25 @@ class SettingsAndViewsTests(Base):
             self.assertNotEqual(result.code, 0, pair)
         self.assertEqual((self.sb.flash / "polyseat-unraid.cfg").read_text(), before)
 
+    def test_play_settings_default_to_unlimited_and_the_current_library(self):
+        entries = {e["key"]: e for e in self.cfg()}
+        self.assertEqual([entries[k]["value"] for k in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "LIBRARY_PATH")],
+                         ["0", "0", "/mnt/download/polyseat-games"])
+        self.assertEqual({entries[k]["tab"] for k in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "LIBRARY_PATH")}, {"play"})
+        self.assertOk(self.sb.ctl("config-set", "PLAY_CPU_PERCENT=50", "PLAY_MEMORY_MB=8192",
+                                  "LIBRARY_PATH=/mnt/tank/games"))
+        self.assertEqual([self.value(k) for k in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "LIBRARY_PATH")],
+                         ["50", "8192", "/mnt/tank/games"])
+
+    def test_play_settings_reject_bad_values_without_changing_anything(self):
+        before = (self.sb.flash / "polyseat-unraid.cfg").read_text()
+        for pair in ("PLAY_CPU_PERCENT=101", "PLAY_CPU_PERCENT=-1", "PLAY_CPU_PERCENT=", "PLAY_CPU_PERCENT=1.5",
+                     "PLAY_CPU_PERCENT=1e1", "PLAY_CPU_PERCENT=%2050", "PLAY_MEMORY_MB=4194305", "PLAY_MEMORY_MB=8GB",
+                     "PLAY_MEMORY_MB=00000000000", "LIBRARY_PATH=/etc", "LIBRARY_PATH=/mnt/", "LIBRARY_PATH=/mnt/a/../b",
+                     "LIBRARY_PATH=/mnt/a b", "LIBRARY_PATH=/mnt/a/", "PLAY_PIDS_MAX=1"):
+            self.assertNotEqual(self.sb.ctl("config-set", pair).code, 0, pair)
+        self.assertEqual((self.sb.flash / "polyseat-unraid.cfg").read_text(), before)
+
     def test_data_dir_must_exist_and_subid_range_must_fit(self):
         self.assertNotEqual(self.sb.ctl("config-set", "DATA_DIR=/mnt/cache/nope").code, 0)
         result = self.sb.ctl("config-set", "SUBID_START=4000000000", "SUBID_COUNT=1000000000")

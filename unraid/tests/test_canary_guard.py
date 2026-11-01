@@ -230,6 +230,7 @@ class CanaryApprovalTests(unittest.TestCase):
           POLYSEAT_ROOT="$2"
           POLYSEAT_RELEASE_GATE=canary
           init_paths
+          SCHEMA="$(dirname -- "$1")/../schema.json"   # init_paths cannot find it from a sourced copy
           canary_host_sha256() { printf '%s\n' 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'; }
           canary_approval_for "${@:3}"
         '''
@@ -280,6 +281,20 @@ class CanaryApprovalTests(unittest.TestCase):
         self.assertEqual(self.check("config-set", "DATA_DIR=/mnt/user/bad").returncode, 2)
         self.assertEqual(self.check("config-set", "DATA_DIR=/mnt/cache/appdata/polyseat-canary").returncode, 2)
         self.assertEqual(self.check("config-set", "DATA_DIR=/var/lib/polyseat-unraid-canary").returncode, 0)
+
+    def test_only_the_owners_play_settings_may_be_added_and_only_with_valid_values(self):
+        self.sign()
+        for setting in ("PLAY_CPU_PERCENT=0", "PLAY_CPU_PERCENT=50", "PLAY_MEMORY_MB=8192",
+                        "LIBRARY_PATH=/mnt/download/polyseat-games"):
+            with self.subTest(setting=setting):
+                self.assertEqual(self.check("config-set", setting).returncode, 0)
+        self.assertEqual(self.check("config-set", "SERVICE=disabled", "PLAY_CPU_PERCENT=25").returncode, 0)
+        for setting in ("PLAY_CPU_PERCENT=101", "PLAY_CPU_PERCENT=-1", "PLAY_CPU_PERCENT=", "PLAY_CPU_PERCENT=1.5",
+                        "PLAY_MEMORY_MB=4194305", "PLAY_MEMORY_MB=abc", "LIBRARY_PATH=/etc", "LIBRARY_PATH=/mnt/../etc",
+                        "LIBRARY_PATH=/mnt/a/", "PLAY_PIDS_MAX=1", "PLAY_CPU_MAX=max", "PLAY_MEMORY_MAX=max"):
+            with self.subTest(setting=setting):
+                self.assertEqual(self.check("config-set", setting).returncode, 2)
+        self.assertEqual(self.check("config-set", "PLAY_CPU_PERCENT=25", "HEALTH_TIMEOUT=300").returncode, 2)
 
     def test_restart_and_boot_cannot_be_authorized(self):
         for action in ("restart", "boot", "update", "rollback"):

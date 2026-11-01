@@ -59,5 +59,34 @@
     "label": "Number of subordinate UIDs/GIDs reserved for containers",
     "locked_while_running": true,
     "title": "Subordinate ID count"
+  },
+  "PLAY_CPU_PERCENT": {
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "default": "0",
+    "tab": "play",
+    "label": "Share of the whole host's CPU that a play session may use (0 = unlimited). Applies to the next play session.",
+    "locked_while_running": true,
+    "title": "Play CPU limit (%)"
+  },
+  "PLAY_MEMORY_MB": {
+    "type": "int",
+    "min": 0,
+    "max": 4194304,
+    "default": "0",
+    "tab": "play",
+    "label": "Memory a play session may use, in MB (0 = unlimited). The stop when the host itself runs low on memory stays. Applies to the next play session.",
+    "locked_while_running": true,
+    "title": "Play memory limit (MB)"
+  },
+  "LIBRARY_PATH": {
+    "type": "path",
+    "pattern": "^/mnt/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+)*$",
+    "default": "/mnt/download/polyseat-games",
+    "tab": "play",
+    "label": "Game library: the mount point of its own ZFS dataset, with a quota, owned by root, under /mnt. Checked when a play session starts.",
+    "locked_while_running": true,
+    "title": "Game library path"
   }
 }

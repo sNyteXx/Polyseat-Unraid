@@ -982,14 +982,61 @@ class PolyseatdTests(unittest.TestCase):
         script = r"""
           POLYSEAT_RELEASE_GATE=canary ROOT="$1"
           init_paths 2>/dev/null; ROOT="$1"; POLYSEATD_DIR="$1/var/lib/polyseat-unraid-daemon" POLYSEATD_BIN="$POLYSEATD_DIR/bin/polyseatd"
-          POLYSEATD_SHA256="$2" LISTENERS=$3
+          POLYSEATD_SHA256="$2" LISTENERS=$3 SCHEMA="$4"   # init_paths cannot find the schema from a sourced copy
           me=$(id -u)
           stat() { local out; out=$(command stat "$@") || return; printf '%s\n' "${out//$me/0}"; }
           polyseatd_lan_ip() { echo 192.168.178.24; }
           polyseatd_listeners() { printf '%s' "$LISTENERS"; }
           polyseatd_precheck
         """
-        return source_ctl(script, str(d), pin, listeners)
+        return source_ctl(script, str(d), pin, listeners, str(CTL.parent.parent / "schema.json"))
+
+    def library(self, path="/mnt/download/polyseat-games", mounted=None, fstype="zfs", quota="500000000000", cfg=None, mode=0o755):
+        """polyseatd_library_check as on a real host, with the mount table and zfs answering from the fixture."""
+        d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-lib"))
+        self.addCleanup(shutil.rmtree, d)
+        (d / "boot/config/plugins/polyseat-unraid").mkdir(parents=True)
+        if cfg is not None:
+            (d / "boot/config/plugins/polyseat-unraid/polyseat-unraid.cfg").write_text(f'LIBRARY_PATH="{cfg}"\n')
+        mount = d / path.lstrip("/")
+        mount.mkdir(parents=True)
+        mount.chmod(mode)
+        script = r"""
+          POLYSEAT_RELEASE_GATE=canary ROOT="$1"
+          init_paths 2>/dev/null; ROOT="$1"; SCHEMA="$2"; CFG="$1/boot/config/plugins/polyseat-unraid/polyseat-unraid.cfg"
+          me=$(id -u)
+          stat() { local out; out=$(command stat "$@") || return; printf '%s\n' "${out//$me/0}"; }
+          ci_real_system() { return 0; }
+          findmnt() { [[ -n $DATASET ]] && printf '%s %s %s\n' "$DATASET" "$FSTYPE" "$ROOT$MOUNTED"; }
+          zfs() { [[ $* == "get -Hp -o value quota $DATASET" ]] && printf '%s\n' "$QUOTA"; }
+          polyseatd_library_check && echo "OK $POLYSEATD_LIBRARY_MOUNT $POLYSEATD_LIBRARY"
+        """
+        env = {"PATH": "/usr/bin:/bin", "DATASET": mounted if mounted is not None else "download/polyseat-games",
+               "FSTYPE": fstype, "QUOTA": quota, "MOUNTED": path}
+        return source_ctl(script, str(d), str(CTL.parent.parent / "schema.json"), env=env), d
+
+    def test_the_library_is_the_setting_and_its_dataset_comes_from_the_mount_table(self):
+        res, _ = self.library()                                                  # the default: today's dataset
+        self.assertIn("OK /mnt/download/polyseat-games /mnt/download/polyseat-games/library", res.stdout, res.stderr)
+        res, _ = self.library("/mnt/tank/games/steam", mounted="tank/games/steam", cfg="/mnt/tank/games/steam")
+        self.assertIn("OK /mnt/tank/games/steam /mnt/tank/games/steam/library", res.stdout, res.stderr)
+        res, _ = self.library("/mnt/tank/games/steam", mounted="tank/games/steam", cfg="")  # empty = the default path
+        self.assertNotEqual(res.returncode, 0)
+
+    def test_the_library_still_needs_a_dataset_of_its_own_a_quota_and_a_root_only_root(self):
+        mine = "/mnt/tank/games"
+        for kwargs, needle in (({"fstype": "fuse.shfs"}, "not the mount point of a ZFS dataset"),
+                               ({"mounted": "tank"}, "not the mount point of a ZFS dataset"),    # a pool root has no quota of its own
+                               ({"mounted": "tank/ga mes"}, "not the mount point of a ZFS dataset"),
+                               ({"mounted": ""}, "not the mount point of a ZFS dataset"),
+                               ({"quota": "0"}, "has no quota"), ({"quota": "-"}, "has no quota"),
+                               ({"mode": 0o775}, "root:root and writable by root only"),
+                               ({"cfg": "/etc"}, "not a path under /mnt"), ({"cfg": "/mnt/a/../b"}, "not a path under /mnt")):
+            with self.subTest(**kwargs):
+                args = {"path": mine, "mounted": "tank/games", "cfg": mine, **kwargs}
+                res, _ = self.library(**args)
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn(needle, res.stderr)
 
     def test_precheck_needs_the_pin_the_staged_binary_a_password_and_a_free_port(self):
         self.assertEqual(self.fixture().returncode, 0, self.fixture().stderr)
@@ -1306,12 +1353,24 @@ class PlayTests(unittest.TestCase):
         self.assertEqual((d / "console.log").read_text().split()[0:2], ["off", f"{d}/dev/tty1"])
         self.assertIn("restore", (d / "console.log").read_text())
 
-    def test_play_is_unlimited_but_keeps_the_memory_floor(self):
+    def play_budget(self, cfg=None, cpuset=None):
+        """The play budget as the controller selects it, with the real schema and an optional settings file."""
+        d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-budget"))
+        self.addCleanup(shutil.rmtree, d)
+        if cfg is not None:
+            (d / "cfg").write_text("".join(f'{k}="{v}"\n' for k, v in cfg.items()))
         res = source_ctl(r"""
-          POLYSEAT_RELEASE_GATE=canary; canary_budget_select play
+          POLYSEAT_RELEASE_GATE=canary; CFG="$1/cfg" SCHEMA="$2"; [[ -z $3 ]] || CANARY_HOST_CPUSET=$3
+          canary_budget_select play || { echo REFUSED; exit 0; }
           printf '%s|%s|%s|%s|%s\n' "$CANARY_CPUSET" "$CANARY_CPU_MAX" "$CANARY_MEMORY_MAX" "$CANARY_PIDS_MAX" "$CANARY_GPU_PCI"
-        """)
-        self.assertEqual(res.stdout.strip(), "0-27|max 100000|max|max|0000:01:00.0")
+        """, str(d), str(CTL.parent.parent / "schema.json"), cpuset or "")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return res.stdout.strip()
+
+    def test_play_is_unlimited_but_keeps_the_memory_floor(self):
+        self.assertEqual(self.play_budget(), "0-27|max 100000|max|max|0000:01:00.0")
+        self.assertEqual(self.play_budget({"PLAY_CPU_PERCENT": "0", "PLAY_MEMORY_MB": "0"}),
+                         "0-27|max 100000|max|max|0000:01:00.0")  # the explicit defaults are today's values
         script = r"""
           CANARY_OPERATION=$1 CANARY_HOST_MIN_AVAILABLE_KB=$2 CANARY_HOST_MAX_LOAD=0
           canary_host_pressure_check
@@ -1319,6 +1378,33 @@ class PlayTests(unittest.TestCase):
         self.assertEqual(source_ctl(script, "8", "1").returncode, 0)          # any load
         self.assertNotEqual(source_ctl(script, "8", str(2 ** 50)).returncode, 0)  # but never below the memory floor
         self.assertNotEqual(source_ctl(script, "4", "1").returncode, 0)       # other operations keep the load limit
+
+    def test_play_limits_become_exact_cgroup_values_and_bad_ones_refuse(self):
+        # percent of the whole host (28 CPUs here): quota = percent * CPUs * 1000 per 100000 us period
+        self.assertEqual(self.play_budget({"PLAY_CPU_PERCENT": "50"}), "0-27|1400000 100000|max|max|0000:01:00.0")
+        self.assertEqual(self.play_budget({"PLAY_CPU_PERCENT": "100"}), "0-27|2800000 100000|max|max|0000:01:00.0")
+        self.assertEqual(self.play_budget({"PLAY_CPU_PERCENT": "007"}), "0-27|196000 100000|max|max|0000:01:00.0")
+        self.assertEqual(self.play_budget({"PLAY_CPU_PERCENT": "25"}, cpuset="0-3,8-11"), "0-3,8-11|200000 100000|max|max|0000:01:00.0")
+        self.assertEqual(self.play_budget({"PLAY_MEMORY_MB": "8192"}), "0-27|max 100000|8589934592|max|0000:01:00.0")
+        self.assertEqual(self.play_budget({"PLAY_CPU_PERCENT": "10", "PLAY_MEMORY_MB": "1"}),
+                         "0-27|280000 100000|1048576|max|0000:01:00.0")
+        for cfg in ({"PLAY_CPU_PERCENT": "101"}, {"PLAY_CPU_PERCENT": "-5"}, {"PLAY_CPU_PERCENT": "5%"},
+                    {"PLAY_MEMORY_MB": "4194305"}, {"PLAY_MEMORY_MB": "8G"}, {"PLAY_MEMORY_MB": "$(id)"}):
+            with self.subTest(cfg=cfg):
+                self.assertEqual(self.play_budget(cfg), "REFUSED")
+        self.assertEqual(self.play_budget({"PLAY_CPU_PERCENT": "50"}, cpuset="garbage"), "REFUSED")
+        self.assertEqual(self.play_budget({"PLAY_CPU_PERCENT": "50"}, cpuset="5-2"), "REFUSED")
+        # 0 stays unlimited whatever the cpuset reads like; the other budgets never see the play settings
+        self.assertEqual(self.play_budget({"PLAY_CPU_PERCENT": "0"}, cpuset="garbage"), "garbage|max 100000|max|max|0000:01:00.0")
+
+    def test_the_same_values_that_created_the_cgroup_are_the_ones_it_is_checked_against(self):
+        text = CTL.read_text()
+        rest = text.replace(text[text.index("play_limits() {"):text.index("# Exactly two fixed budgets")], "")
+        self.assertEqual(re.findall(r"^\s*(PLAY_(?:CPU|MEMORY)_MAX)=", rest, re.M), ["PLAY_CPU_MAX", "PLAY_MEMORY_MAX"])
+        self.assertIn("CANARY_CPU_MAX=$PLAY_CPU_MAX CANARY_MEMORY_MAX=$PLAY_MEMORY_MAX", text)
+        play = re.search(r"^cmd_polyseatd_play\(\) \([^\n]*\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
+        self.assertLess(play.index("play_limits ||"), play.index("mkdir -- \"$dir\""))  # a bad value starts nothing
+        self.assertIn("canary_budget_select play || exit", play)
 
     def test_a_clean_stop_record_may_name_upstreams_seats(self):
         d = PersistentStateTests.workspace(self)

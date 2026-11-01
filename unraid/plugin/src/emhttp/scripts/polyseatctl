@@ -113,7 +113,8 @@ POLYSEATD_NAMESPACE="polyseat-unraid-daemon"
 POLYSEATD_STATE="$PERSIST_MOUNT/polyseatd"
 # Games (owner 2026-11-01): upstream's shared library on the download pool, its own dataset with a 500 GB quota. The
 # pool and every seat's copies live in it, so ZFS block cloning keeps one copy per game however many seats have it.
-POLYSEATD_LIBRARY_DATASET="download/polyseat-games"
+# The mount is the LIBRARY_PATH setting (the schema default is this one); polyseatd_library_resolve applies it and the
+# dataset is derived from what is mounted there.
 POLYSEATD_LIBRARY_MOUNT="/mnt/download/polyseat-games"
 POLYSEATD_LIBRARY="$POLYSEATD_LIBRARY_MOUNT/library"
 POLYSEATD_PORT=47800
@@ -368,7 +369,10 @@ canary_approval_for() { # command args... (root only, non-sandbox)
         for arg in "$@"; do
           case "$arg" in
             SERVICE=disabled | "DATA_DIR=$CANARY_DATA_DIR" | ACCEPT_NO_LSM=yes | ACCEPT_NO_LSM=no) ;;
-            *) die $EX_BLOCKED "canary accepts only fixed DATA_DIR, disabled SERVICE and LSM acknowledgement" ;;
+            # The owner's play session settings; values are the schema's, nothing else widens.
+            PLAY_CPU_PERCENT=* | PLAY_MEMORY_MB=* | LIBRARY_PATH=*)
+              schema_validate "${arg%%=*}" "${arg#*=}" || die $EX_BLOCKED "canary refuses an invalid play setting" ;;
+            *) die $EX_BLOCKED "canary accepts only fixed DATA_DIR, disabled SERVICE, LSM acknowledgement and the play settings" ;;
           esac
         done
       fi
@@ -1318,6 +1322,34 @@ canary_cgroup_prepare() {
   fi
 }
 
+cpuset_count() { # "0-3,8" -> 5 : the number of CPUs a cpuset list names
+  local part lo hi n=0
+  local -a parts
+  IFS=, read -ra parts <<< "$1"
+  for part in "${parts[@]}"; do
+    if [[ $part =~ ^([0-9]+)-([0-9]+)$ ]]; then lo=${BASH_REMATCH[1]} hi=${BASH_REMATCH[2]}
+    elif [[ $part =~ ^[0-9]+$ ]]; then lo=$part hi=$part
+    else return 1; fi
+    (( 10#$hi >= 10#$lo )) || return 1
+    n=$(( n + 10#$hi - 10#$lo + 1 ))
+  done
+  (( n > 0 )) && printf '%s\n' "$n"
+}
+
+# The owner's play limits (settings PLAY_CPU_PERCENT of the whole host, PLAY_MEMORY_MB; 0 = unlimited, the default).
+# The one place that turns them into cgroup values, so cgroup creation and canary_cgroup_check can never disagree.
+play_limits() {
+  local pct mb cpus
+  pct=$(cfg_get PLAY_CPU_PERCENT 0) mb=$(cfg_get PLAY_MEMORY_MB 0)
+  schema_validate PLAY_CPU_PERCENT "$pct" && schema_validate PLAY_MEMORY_MB "$mb" || return 1
+  PLAY_CPU_MAX="max 100000" PLAY_MEMORY_MAX="max"
+  if (( 10#$pct > 0 )); then
+    cpus=$(cpuset_count "$CANARY_HOST_CPUSET") || return 1
+    PLAY_CPU_MAX="$(( 10#$pct * cpus * 1000 )) 100000"
+  fi
+  (( 10#$mb == 0 )) || PLAY_MEMORY_MAX=$(( 10#$mb * 1048576 ))
+}
+
 # Exactly two fixed budgets exist: the CPU canary's (defaults above) and the desktop canary's.
 canary_budget_select() { # cpu|desktop|gpu|steam|persist|play
   case "$1" in
@@ -1333,6 +1365,7 @@ canary_budget_select() { # cpu|desktop|gpu|steam|persist|play
       canary_budget_select desktop
       CANARY_INSTANCE=$PERSIST_INSTANCE ;;
     play)
+      play_limits || return 1
       CANARY_CPUSET=$CANARY_HOST_CPUSET CANARY_CPU_MAX=$PLAY_CPU_MAX CANARY_MEMORY_MAX=$PLAY_MEMORY_MAX
       CANARY_PIDS_MAX=$PLAY_PIDS_MAX CANARY_GPU_PCI=$GPU_CANARY_PCI CANARY_INSTANCE="" ;;
     steam)
@@ -2775,16 +2808,27 @@ polyseatd_precheck() { # read-only before anything starts: binary, password, LAN
   [[ -z $(polyseatd_listeners) ]] || { log error "polyseatd: port $POLYSEATD_PORT is already in use"; return 1; }
 }
 
-polyseatd_library_check() { # read-only: the games dataset is mounted at its root, has a quota and only root writes its root
-  local mount=$ROOT$POLYSEATD_LIBRARY_MOUNT src quota mode
+polyseatd_library_resolve() { # the LIBRARY_PATH setting (else the default) is the library mount; fails closed on a bad value
+  local path
+  path=$(cfg_get LIBRARY_PATH "$POLYSEATD_LIBRARY_MOUNT")
+  schema_validate LIBRARY_PATH "$path" || { log error "polyseatd: LIBRARY_PATH '$path' is not a path under /mnt"; return 1; }
+  POLYSEATD_LIBRARY_MOUNT=$path POLYSEATD_LIBRARY="$path/library"
+}
+
+polyseatd_library_check() { # read-only: a dataset of its own is mounted at the library path, has a quota and only root writes its root
+  local mp dataset fstype target src quota mode
+  polyseatd_library_resolve || return 1
+  mp=$ROOT$POLYSEATD_LIBRARY_MOUNT
   if ! sandbox || ci_real_system; then
-    src=$(findmnt -n -o SOURCE,FSTYPE,TARGET --mountpoint "$mount" 2>/dev/null | tr -s ' ')
-    [[ $src == "$POLYSEATD_LIBRARY_DATASET zfs $mount" ]] ||
-      { log error "polyseatd: $POLYSEATD_LIBRARY_MOUNT is not the mounted $POLYSEATD_LIBRARY_DATASET dataset ('$src')"; return 1; }
-    quota=$(zfs get -Hp -o value quota "$POLYSEATD_LIBRARY_DATASET" 2>/dev/null) || quota=''
-    [[ $quota =~ ^[1-9][0-9]*$ ]] || { log error "polyseatd: $POLYSEATD_LIBRARY_DATASET has no quota"; return 1; }
+    src=$(findmnt -n -o SOURCE,FSTYPE,TARGET --mountpoint "$mp" 2>/dev/null | tr -s ' ')
+    read -r dataset fstype target <<< "$src"
+    # A child dataset, never a pool root: the quota is what bounds the library. The name comes from the mount table.
+    [[ $fstype == zfs && $target == "$mp" && $dataset =~ ^[A-Za-z0-9_.:-]+(/[A-Za-z0-9_.:-]+)+$ ]] ||
+      { log error "polyseatd: $POLYSEATD_LIBRARY_MOUNT is not the mount point of a ZFS dataset of its own ('$src')"; return 1; }
+    quota=$(zfs get -Hp -o value quota "$dataset" 2>/dev/null) || quota=''
+    [[ $quota =~ ^[1-9][0-9]*$ ]] || { log error "polyseatd: $dataset has no quota"; return 1; }
   fi
-  { [[ -d $mount && ! -L $mount && $(stat -c '%u %g' -- "$mount") == '0 0' ]] && mode=$(stat -c %a -- "$mount") &&
+  { [[ -d $mp && ! -L $mp && $(stat -c '%u %g' -- "$mp") == '0 0' ]] && mode=$(stat -c %a -- "$mp") &&
     (( (8#$mode & 8#022) == 0 )); } ||
     { log error "polyseatd: $POLYSEATD_LIBRARY_MOUNT must be root:root and writable by root only"; return 1; }
 }
@@ -2956,6 +3000,7 @@ cmd_polyseatd_stop() {
 PLAY_MAX_WINDOW=21600  # a signed play token may cover six hours; every other canary token at most 30 minutes
 # Owner 2026-11-01: a play session uses as much CPU and memory as it needs. What stays: the VMs' priority on the GPU,
 # and the stop when the host itself would run out of memory (MemAvailable below CANARY_HOST_MIN_AVAILABLE_KB).
+# The owner may cap both (PLAY_CPU_PERCENT of the whole host, PLAY_MEMORY_MB; 0 = unlimited, the default).
 PLAY_CPU_MAX="max 100000"
 PLAY_MEMORY_MAX="max"
 PLAY_PIDS_MAX="max"
@@ -3119,7 +3164,7 @@ play_stop_seats() { # every running seat, through Incus (polyseatd leaves them r
 }
 
 cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, on the LAN, until the operator stops it
-  local dir="$RUN_DIR/play-evidence" ip pid="" cfg remaining deadline last guard=0 out i a
+  local dir="$RUN_DIR/play-evidence" ip pid="" cfg remaining expires deadline last guard=0 out i a
   [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 0 ]] || die $EX_BLOCKED "polyseatd-play needs a canary build and takes no arguments"
   require_approval polyseatd-play
   require_no_journal
@@ -3130,8 +3175,10 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
     "$(bundle_manifest "$PTR_CURRENT")" >/dev/null || die $EX_VERIFY "runtime bundle has no LXC nvidia hook"
   ! svc_pid >/dev/null 2>&1 || die $EX_BLOCKED "a daemon is already running; polyseatd-play starts its own"
   polyseatd_precheck || die $EX_BLOCKED "polyseatd prechecks failed; nothing was started"
+  play_limits || die $EX_BLOCKED "PLAY_CPU_PERCENT or PLAY_MEMORY_MB is not usable; nothing was started"
   ip=$(polyseatd_lan_ip) || die $EX_BLOCKED "no LAN address"
-  remaining=$(( $(jq -er .expires_at "$CANARY_APPROVAL") - $(date -u +%s) ))
+  expires=$(jq -er .expires_at "$CANARY_APPROVAL") || die $EX_BLOCKED "no usable approval expiry"
+  remaining=$(( expires - $(date -u +%s) ))
   (( remaining >= POLYSEATD_MIN_SECONDS + POLYSEATD_TEARDOWN_SECONDS )) ||
     die $EX_BLOCKED "polyseatd-play needs $((POLYSEATD_MIN_SECONDS + POLYSEATD_TEARDOWN_SECONDS)) s left on the token, it has $remaining s"
   if ! gpu_preflight_run "$GPU_CANARY_PCI"; then
@@ -3142,7 +3189,7 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
   [[ ! -e $dir && ! -L $dir ]] || die $EX_BLOCKED "play evidence from an earlier run exists; collect it first"
   (umask 077; mkdir -- "$dir") || die $EX_BLOCKED "cannot create evidence directory"
   printf '%s\n' "${GPU_RES[@]}" > "$dir/gpu-preflight-before.txt"
-  canary_budget_select play
+  canary_budget_select play || exit $EX_BLOCKED
   CANARY_OPERATION=8
   # shellcheck disable=SC2154  # rc is assigned inside the trap itself
   trap 'rc=$?; if [[ -n $pid ]]; then polyseatd_stop "$pid" || true; fi
@@ -3174,9 +3221,10 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
   printf '%s\n' "$out" > "$dir/status-start.json"
   jq -e --arg l "$(polyseatd_hex_ip "$ip")" '.alive and .listeners == [$l] and .session.setup == false' <<< "$out" >/dev/null ||
     { log error "polyseatd: not serving exactly https://$ip:$POLYSEATD_PORT with a set password: $out"; exit $EX_HEALTH; }
-  (umask 077; printf '%s\n' "$out" > "$RUN_DIR/polyseatd-status.json")
+  # The WebUI reads this file: the token's end lets it show the time left.
+  (umask 077; jq -c --argjson expires "$expires" '. + {expires_at: $expires}' <<< "$out" > "$RUN_DIR/polyseatd-status.json")
   log info "polyseatd: up at https://$ip:$POLYSEATD_PORT"
-  deadline=$(( $(jq -er .expires_at "$CANARY_APPROVAL") - POLYSEATD_TEARDOWN_SECONDS )) last=$(date -u +%s)
+  deadline=$(( expires - POLYSEATD_TEARDOWN_SECONDS )) last=$(date -u +%s)
   while (( $(date -u +%s) < deadline )) && [[ ! -e $RUN_DIR/polyseatd-stop ]]; do
     polyseatd_alive "$pid" || { log error "polyseatd: exited on its own"; exit $EX_HEALTH; }
     canary_budget_check || exit $EX_HEALTH
@@ -3184,7 +3232,8 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
     if (( ++guard % 5 == 0 )); then play_seat_guard || exit $EX_HEALTH; fi
     if (( $(date -u +%s) - last >= 30 )); then
       last=$(date -u +%s)
-      out=$(polyseatd_status "$ip" "$pid" | jq -c --argjson seats "$(play_instances 2>/dev/null || echo null)" '. + {seats: $seats}')
+      out=$(polyseatd_status "$ip" "$pid" | jq -c --argjson seats "$(play_instances 2>/dev/null || echo null)" \
+        --argjson expires "$expires" '. + {seats: $seats, expires_at: $expires}')
       (umask 077; printf '%s\n' "$out" > "$RUN_DIR/polyseatd-status.json.new") &&
         mv -f -- "$RUN_DIR/polyseatd-status.json.new" "$RUN_DIR/polyseatd-status.json"
     fi

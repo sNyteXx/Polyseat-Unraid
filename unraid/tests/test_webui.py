@@ -85,6 +85,18 @@ class SchemaConsistencyTests(unittest.TestCase):
                 self.assertEqual(sb.ctl("config-set", f"{key}={value}").code, 0, (key, value))
             for value in bad:
                 self.assertNotEqual(sb.ctl("config-set", f"{key}={value}").code, 0, (key, value))
+        # Play settings: the same bounds as the PHP and JS validators (run.php, test_setting_validation_mirrors_schema).
+        cases.update({"PLAY_CPU_PERCENT": (["0", "1", "100", "007"], ["101", "-1", "", "5.5", "1e1", " 5"]),
+                      "PLAY_MEMORY_MB": (["0", "1024", "4194304"], ["4194305", "-1", "", "8G", "99999999999"]),
+                      "LIBRARY_PATH": (["", "/mnt/download/polyseat-games", "/mnt/disk1/a.b-c_d"],
+                                       ["/etc", "/mnt/", "/mnt/a/../b", "/mnt/a/", "/mnt//a", "/mnt/a b"])})
+        for key, (good, bad) in cases.items():
+            if key not in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "LIBRARY_PATH"):
+                continue
+            for value in good:
+                self.assertEqual(sb.ctl("config-set", f"{key}={value}").code, 0, (key, value))
+            for value in bad:
+                self.assertNotEqual(sb.ctl("config-set", f"{key}={value}").code, 0, (key, value))
         self.assertEqual(set(cases), {k for k in schema if k != "DATA_DIR" and k != "SUBID_START"} | set())
 
     def test_schema_is_well_formed(self):
@@ -93,7 +105,7 @@ class SchemaConsistencyTests(unittest.TestCase):
             self.assertRegex(key, r"^[A-Z_]+$")
             self.assertIn(rule["type"], ("enum", "int", "path"))
             self.assertIn("default", rule)
-            self.assertIn(rule["tab"], ("general", "storage", "advanced"))
+            self.assertIn(rule["tab"], ("general", "storage", "advanced", "play"))
             if rule["type"] == "enum":
                 self.assertIn(rule["default"], rule["values"])
             if rule["type"] == "int":
