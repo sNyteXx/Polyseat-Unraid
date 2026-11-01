@@ -4,7 +4,7 @@
 > **EXPERIMENTAL UNRAID PORT — NOT INSTALLABLE, NOT PRODUCTION-READY, NOT SUPPORTED.**
 > This fork is actively being developed and is **not a drop-in replacement** for the upstream Polyseat project.
 > Do **not** install it on Unraid, run `polyseat-prepare`, change GPU passthrough, modify Docker/libvirt/networking, or remove your existing gaming setup.
-> The native Unraid `.plg` is intentionally disabled. GitHub-hosted Ubuntu CI has successfully built Incus 7.5.1 and booted a CPU-only BusyBox container; **no real Unraid/GPU/Moonlight acceptance has passed**.
+> The native Unraid `.plg` is intentionally disabled. Signed one-time canary runs on the owner's Unraid server showed a desktop seat, the GPU with NVENC, Steam and a first Moonlight stream (acceptance J2–J5); **input, two seats, the upstream daemon on Unraid and any installable plugin are not proven**.
 > Follow [Unraid WIP status and safety gates](UNRAID-WIP.md) and [Draft PR #1](https://github.com/sNyteXx/Polyseat-Unraid/pull/1).
 
 ---

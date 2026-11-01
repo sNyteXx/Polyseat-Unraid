@@ -11,6 +11,28 @@ Evaluate a native Unraid plugin lifecycle for Polyseat without replacing or
 modifying Unraid's Docker, libvirt, existing network bridges, host NVIDIA
 driver, or game data. No installable `.plg` is shipped.
 
+## Proven on the owner's Unraid server (signed one-time canaries)
+
+Unraid 7.3.3. Every run had its own signed approval token and a verified rollback. Details are in the
+[acceptance matrix](unraid/docs/acceptance.md).
+- **J2:** a desktop seat (systemd, sway, Sunshine) in an unprivileged Incus 7.5.1 container on the Unraid kernel.
+- **J3:** the RTX by device access, with NVENC. This works only while the passthrough VMs are off; a guard and a
+  per-second watchdog give them priority.
+- **J4:** Steam with 32-bit GL and Vulkan, the LAN via br0 for the session only, and persistent storage on the
+  cache pool.
+- **J5:** the first Moonlight stream (PIN pairing, NVENC at 59 fps over the LAN only) and a Steam sign-in by QR code.
+
+Not proven:
+- input (disabled on purpose);
+- games;
+- two seats;
+- the upstream daemon on Unraid;
+- persistent Incus state;
+- upgrades;
+- an installable `.plg`.
+
+The order for the rest is in [the upstream integration plan](unraid/docs/upstream-integration-plan.md).
+
 ## What this branch can prove
 
 - Read-only, non-certifying host capability reports in `unraid/scripts/`.
@@ -33,8 +55,8 @@ driver, or game data. No installable `.plg` is shipped.
   checked bundle content, atomic activation, fsynced journal, simulated crashes
   and health-check rollback. **It refuses to run on Unraid**, never controls a
   process or touches external data, and does not certify production rollback.
-- The Polyseat **0.44.0 upstream** updates are included on this WIP branch;
-  the normal fork `main` remains untouched.
+- The Polyseat **0.44.0 upstream** updates are included on this WIP branch; 0.46.0 is a separate draft
+  ([#2](https://github.com/sNyteXx/Polyseat-Unraid/pull/2)). The normal fork `main` remains untouched.
 - Build-source inventory (CycloneDX) and dependency metadata are prepared for
   CI; they are **not a complete target-runtime SBOM or a vulnerability clearance**.
 - An explicit security/rollback design in
@@ -56,17 +78,15 @@ driver, or game data. No installable `.plg` is shipped.
 7. Verify an operator-approved staging, upgrade, rollback, and uninstall cycle
    that retains seats, Steam libraries and GOW.
 
-**Active gaming VM safety:** All real host, VM, GPU and Unraid operations are
-deferred. An exclusive `vfio-pci` GPU cannot be shared with host NVENC by
-pretending it is available. We must either prove the presence of a separate
-host-owned GPU or agree another architecture in a separate review. See
-[gaming-VM protection](unraid/docs/gaming-vm-protection.md).
+**Active gaming VM safety:** A GPU that a running VM holds through `vfio-pci` is never shared. A seat uses
+the GPU by device access only while it is bound to the host driver and every VM that passes it through is off.
+A start is refused otherwise, and the watchdog stops the seat as soon as a VM needs the GPU. See
+[gaming-VM protection](unraid/docs/gaming-vm-protection.md) and [the GPU path](unraid/docs/gpu-path.md).
 
 The safe no-GPU progression is documented in
 [the first no-GPU test plan](unraid/docs/no-gpu-test-plan.md): version-only
 binary smoke and the actual CPU-only BusyBox container lifecycle passed on a
-disposable GitHub-hosted Ubuntu runner. Unraid compatibility and real-host
-rollback remain untested.
+disposable GitHub-hosted Ubuntu runner. The real-host canaries above followed.
 
 See [the acceptance matrix](unraid/docs/acceptance.md). There is no automatic
 installation, GOW migration, host service startup, or merge to `main` in this
