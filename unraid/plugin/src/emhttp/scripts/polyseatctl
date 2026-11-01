@@ -3234,18 +3234,137 @@ play_seat_priorities() { # every thread of those processes in a seat's payload c
   done
 }
 
+# Seat CPU pinning (owner GO 2026-11-01; i7-14700K: P-cores 0-15, E-cores 16-27). PLAY_SEAT_CPUS is either one list for
+# every seat ("0-15") or per seat ("seat1=0-7;seat2=8-15"; a seat not named is not pinned), strictly checked against the
+# CPUs the play cgroup may use (CANARY_HOST_CPUSET, which canary_cgroup_precheck compares with the host at every start).
+PLAY_PIN_ALL=""
+declare -A PLAY_PIN_SEAT=()
+
+play_cpu_ids() { # list [allowed list] : the CPU ids a list names, sorted, one per line; fails unless each one is allowed
+  local list=$1 allowed=${2:-$CANARY_HOST_CPUSET} part lo hi i
+  local -A ok=() seen=()
+  local -a parts
+  [[ $list =~ ^[0-9]+([,-][0-9]+)*$ && $allowed =~ ^[0-9]+([,-][0-9]+)*$ ]] || return 1
+  IFS=, read -ra parts <<< "$allowed"
+  for part in "${parts[@]}"; do
+    if [[ $part =~ ^([0-9]{1,4})-([0-9]{1,4})$ ]]; then lo=$((10#${BASH_REMATCH[1]})) hi=$((10#${BASH_REMATCH[2]}))
+    elif [[ $part =~ ^[0-9]{1,4}$ ]]; then lo=$((10#$part)) hi=$lo
+    else return 1; fi
+    (( hi >= lo )) || return 1
+    for ((i = lo; i <= hi; i++)); do ok[$i]=1; done
+  done
+  IFS=, read -ra parts <<< "$list"
+  for part in "${parts[@]}"; do
+    if [[ $part =~ ^([0-9]{1,4})-([0-9]{1,4})$ ]]; then lo=$((10#${BASH_REMATCH[1]})) hi=$((10#${BASH_REMATCH[2]}))
+    elif [[ $part =~ ^[0-9]{1,4}$ ]]; then lo=$((10#$part)) hi=$lo
+    else return 1; fi
+    (( hi >= lo )) || return 1
+    for ((i = lo; i <= hi; i++)); do [[ -n ${ok[$i]+x} ]] || return 1; seen[$i]=1; done
+  done
+  printf '%s\n' "${!seen[@]}" | sort -n
+}
+
+play_cpu_list() { # sorted ids on stdin -> the form the kernel prints in Cpus_allowed_list ("0-3,8"), so a pinned thread compares equal
+  awk 'function flush() { out = out (out == "" ? "" : ",") (s == p ? s : s "-" p) }
+       NR == 1 { s = p = $1; next } $1 == p + 1 { p = $1; next } { flush(); s = p = $1 } END { if (NR) { flush(); print out } }'
+}
+
+play_seat_cpus_parse() { # value : sets PLAY_PIN_ALL or PLAY_PIN_SEAT; fails on anything the host cannot honour. "" = no pinning
+  local value=$1 entry name list ids
+  local -a entries
+  PLAY_PIN_ALL="" PLAY_PIN_SEAT=()
+  [[ -n $value ]] || return 0
+  schema_validate PLAY_SEAT_CPUS "$value" || return 1
+  if [[ $value != *=* ]]; then
+    ids=$(play_cpu_ids "$value") || return 1
+    PLAY_PIN_ALL=$(play_cpu_list <<< "$ids")
+    return 0
+  fi
+  IFS=';' read -ra entries <<< "$value"
+  for entry in "${entries[@]}"; do
+    name=${entry%%=*} list=${entry#*=}
+    [[ -z ${PLAY_PIN_SEAT[$name]+x} ]] || return 1  # a seat named twice
+    ids=$(play_cpu_ids "$list") || return 1
+    PLAY_PIN_SEAT[$name]=$(play_cpu_list <<< "$ids")
+  done
+}
+
+play_seat_pin() { # every thread of every process in a seat's payload cgroup gets the seat's CPUs, never anything else
+  local proc=${PLAY_PROC:-/proc} p t cg seat want have key value
+  [[ -n $PLAY_PIN_ALL || ${#PLAY_PIN_SEAT[@]} -gt 0 ]] || return 0
+  [[ -n ${PLAY_PROC:-} ]] || play_real || return 0
+  for p in "$proc"/[0-9]*; do
+    cg=$(cat -- "$p/cgroup" 2>/dev/null) || continue
+    [[ $cg =~ lxc\.payload\.([a-z0-9][a-z0-9-]*) ]] || continue
+    seat=${BASH_REMATCH[1]}
+    want=${PLAY_PIN_SEAT[$seat]:-$PLAY_PIN_ALL}
+    [[ -n $want ]] || continue
+    for t in "$p"/task/[0-9]*; do
+      [[ -r $t/status ]] || continue
+      have=""
+      while read -r key value; do
+        if [[ $key == Cpus_allowed_list: ]]; then have=$value; break; fi
+      done < "$t/status"
+      # Idempotent: a thread that already has the list is left alone; threads a pinned process creates inherit it.
+      [[ $have == "$want" ]] || taskset -pc "$want" "${t##*/}" >/dev/null 2>&1 || true
+    done
+  done
+}
+
+# Owner GO 2026-11-01: during a play session every CPU's energy profile may be "performance", and is put back exactly.
+# The values are recorded in play-host.json before anything is written; an unreadable file refuses the session, a host
+# without the files (another cpufreq driver) is skipped.
+PLAY_EPP_VALUE_RE='^[a-z][a-z0-9_]{0,31}$'
+
+play_epp_record() { # prints {"<cpu>": "<value>"} for every CPU that has the file
+  local base f cpu value out='{}'
+  base=$(lxc_mount_real /sys/devices/system/cpu)
+  for f in "$base"/cpu[0-9]*/cpufreq/energy_performance_preference; do
+    [[ -e $f || -L $f ]] || continue
+    cpu=${f#"$base"/cpu}; cpu=${cpu%%/*}
+    [[ $cpu =~ ^[0-9]{1,4}$ && -f $f && ! -L $f ]] || return 1
+    value=$(< "$f") || return 1
+    [[ $value =~ $PLAY_EPP_VALUE_RE ]] || return 1
+    out=$(jq -c --arg c "$cpu" --arg v "$value" '. + {($c): $v}' <<< "$out") || return 1
+  done
+  printf '%s\n' "$out"
+}
+
+play_epp_write() { # json {"<cpu>": "<value>"} | performance : every recorded CPU gets its value (or "performance"); all are tried
+  local json=$1 forced=${2:-} base cpu value rc=0
+  base=$(lxc_mount_real /sys/devices/system/cpu)
+  while IFS=$'\t' read -r cpu value; do
+    [[ $cpu =~ ^[0-9]{1,4}$ ]] || { rc=1; continue; }
+    [[ -z $forced ]] || value=$forced
+    [[ $value =~ $PLAY_EPP_VALUE_RE ]] || { rc=1; continue; }
+    printf '%s\n' "$value" > "$base/cpu$cpu/cpufreq/energy_performance_preference" 2>/dev/null || rc=1
+  done < <(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<< "$json")
+  return "$rc"
+}
+
+play_pin_precheck() { # the PLAY_SEAT_CPUS setting is usable here (valid, inside the host's CPUs, taskset present); sets the pin maps
+  play_seat_cpus_parse "$(cfg_get PLAY_SEAT_CPUS "")" || { log error "play: PLAY_SEAT_CPUS names CPUs this host does not have, or is malformed"; return 1; }
+  [[ -z $PLAY_PIN_ALL && ${#PLAY_PIN_SEAT[@]} -eq 0 ]] || command -v taskset >/dev/null || { log error "play: taskset is missing"; return 1; }
+}
+
 play_host_on() { # console guard, uhid, udev rule, device-owner helper; every change recorded for play_host_off
-  local state=$RUN_DIR/play-host.json sysrq uhid=preloaded rule=present helper=present tty sysrq_file rule_file helper_dir
+  local state=$RUN_DIR/play-host.json sysrq uhid=preloaded rule=present helper=present tty sysrq_file rule_file helper_dir epp='{}' perf
   [[ ! -e $state ]] || { log error "play: an earlier session left its host changes unrestored ($state)"; return 1; }
   tty=$(lxc_mount_real "$PLAY_TTY") sysrq_file=$(lxc_mount_real /proc/sys/kernel/sysrq)
   rule_file=$(lxc_mount_real "$PLAY_UDEV_RULE") helper_dir=$(lxc_mount_real "$PLAY_HELPER_DIR")
   sysrq=$(< "$sysrq_file") || return 1
   [[ $sysrq =~ ^[0-9]+$ ]] || return 1
+  perf=$(cfg_get PLAY_CPU_PERFORMANCE no)
+  schema_validate PLAY_CPU_PERFORMANCE "$perf" || { log error "play: PLAY_CPU_PERFORMANCE '$perf' is not usable"; return 1; }
+  if [[ $perf == yes ]]; then
+    epp=$(play_epp_record) || { log error "play: cannot read the CPUs' energy profile; nothing was changed"; return 1; }
+    [[ $epp != '{}' ]] || log info "play: no CPU exposes energy_performance_preference; the profile is left alone"
+  fi
   grep -q '^uhid ' /proc/modules || uhid=loaded
   [[ -e $rule_file || -L $rule_file ]] || rule=added
   [[ -e $helper_dir || -L $helper_dir ]] || helper=added
-  (umask 077; jq -n --arg sysrq "$sysrq" --arg uhid "$uhid" --arg rule "$rule" --arg helper "$helper" \
-    '{schema: 1, sysrq: $sysrq, uhid: $uhid, rule: $rule, helper: $helper}' > "$state") || return 1
+  (umask 077; jq -n --arg sysrq "$sysrq" --arg uhid "$uhid" --arg rule "$rule" --arg helper "$helper" --argjson epp "$epp" \
+    '{schema: 1, sysrq: $sysrq, uhid: $uhid, rule: $rule, helper: $helper, epp: $epp}' > "$state") || return 1
   # The console guard (owner GO 2026-11-01): no SysRq, and the text console's keyboard off, so that keys from a seat
   # can neither reboot Unraid (Ctrl+Alt+Del, SysRq) nor type into its login prompt.
   printf '0\n' > "$sysrq_file" || return 1
@@ -3262,13 +3381,22 @@ play_host_on() { # console guard, uhid, udev rule, device-owner helper; every ch
       chmod 0755 -- "$helper_dir/device_owner.py"; } || return 1
   fi
   log info "play: console guard on (sysrq $sysrq -> 0, $PLAY_TTY keyboard off), uhid $uhid, udev rule $rule, helper $helper"
+  if [[ $epp != '{}' ]]; then
+    play_epp_write "$epp" performance || { log error "play: cannot set the CPUs' energy profile to performance"; return 1; }
+    log info "play: energy profile of $(jq length <<< "$epp") CPUs set to performance (recorded for the restore)"
+  fi
 }
 
 play_host_off() { # exactly what play_host_on recorded, nothing else
-  local state=$RUN_DIR/play-host.json sysrq uhid rule helper rc=0 rule_file helper_dir
+  local state=$RUN_DIR/play-host.json sysrq uhid rule helper rc=0 rule_file helper_dir epp
   [[ -f $state && ! -L $state ]] || return 0
   rule_file=$(lxc_mount_real "$PLAY_UDEV_RULE") helper_dir=$(lxc_mount_real "$PLAY_HELPER_DIR")
   sysrq=$(jq -r .sysrq "$state") uhid=$(jq -r .uhid "$state") rule=$(jq -r .rule "$state") helper=$(jq -r .helper "$state")
+  epp=$(jq -c '.epp // {}' "$state") || epp=''
+  if [[ -z $epp ]]; then rc=1
+  elif [[ $epp != '{}' ]]; then
+    play_epp_write "$epp" || { log error "play: the CPUs' energy profile was not restored exactly"; rc=1; }
+  fi
   if [[ $helper == added ]]; then
     rm -f -- "$helper_dir/device_owner.py"
     rmdir -- "$helper_dir" || rc=1
@@ -3282,7 +3410,7 @@ play_host_off() { # exactly what play_host_on recorded, nothing else
     "$POLYSEATD_DIR/bin/polyseat-console" restore "$RUN_DIR/play-console.json" || { log error "play: console keyboard not restored"; rc=1; }
   fi
   if [[ $sysrq =~ ^[0-9]+$ ]]; then printf '%s\n' "$sysrq" > "$(lxc_mount_real /proc/sys/kernel/sysrq)" || rc=1; else rc=1; fi
-  if [[ $rc -eq 0 ]]; then rm -f -- "$state"; log info "play: host restored (sysrq $sysrq, console keyboard, udev rule, helper)"; fi
+  if [[ $rc -eq 0 ]]; then rm -f -- "$state"; log info "play: host restored (sysrq $sysrq, console keyboard, udev rule, helper, CPU energy profile)"; fi
   return "$rc"
 }
 
@@ -3322,6 +3450,7 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
   ! svc_pid >/dev/null 2>&1 || die $EX_BLOCKED "a daemon is already running; polyseatd-play starts its own"
   polyseatd_precheck || die $EX_BLOCKED "polyseatd prechecks failed; nothing was started"
   play_limits || die $EX_BLOCKED "PLAY_CPU_PERCENT or PLAY_MEMORY_MB is not usable; nothing was started"
+  play_pin_precheck || die $EX_BLOCKED "PLAY_SEAT_CPUS is not usable on this host; nothing was started"
   ip=$(polyseatd_lan_ip) || die $EX_BLOCKED "no LAN address"
   expires=$(jq -er .expires_at "$CANARY_APPROVAL") || die $EX_BLOCKED "no usable approval expiry"
   remaining=$(( expires - $(date -u +%s) ))
@@ -3375,7 +3504,7 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
     polyseatd_alive "$pid" || { log error "polyseatd: exited on its own"; exit $EX_HEALTH; }
     canary_budget_check || exit $EX_HEALTH
     # polyseatd builds and changes seats through the Incus API itself: anything outside upstream's seat shape ends it.
-    if (( ++guard % 5 == 0 )); then play_seat_guard || exit $EX_HEALTH; play_seat_priorities; fi
+    if (( ++guard % 5 == 0 )); then play_seat_guard || exit $EX_HEALTH; play_seat_priorities; play_seat_pin; fi
     if (( $(date -u +%s) - last >= 30 )); then
       last=$(date -u +%s)
       out=$(polyseatd_status "$ip" "$pid" | jq -c --argjson seats "$(play_instances 2>/dev/null || echo null)" \
@@ -3522,6 +3651,7 @@ cmd_play_start() ( # owner mode: verify and stage what is on the flash, approve 
   # The session repeats these; doing them here lets a refusal reach the admin instead of only the log.
   polyseatd_precheck || die $EX_BLOCKED "polyseatd prechecks failed; nothing was started"
   play_limits || die $EX_BLOCKED "PLAY_CPU_PERCENT or PLAY_MEMORY_MB is not usable; nothing was started"
+  play_pin_precheck || die $EX_BLOCKED "PLAY_SEAT_CPUS is not usable on this host; nothing was started"
   if ! gpu_preflight_run "$GPU_CANARY_PCI"; then
     for a in "${GPU_RES[@]}"; do [[ ${a%%$'\t'*} == FAIL ]] && log error "gpu-preflight: ${a#*$'\t'}"; done
     die $EX_BLOCKED "GPU is not available for seats now; nothing was started"
@@ -3870,6 +4000,9 @@ cmd_config_set() { # KEY=VALUE...
       die $EX_BLOCKED "$key cannot change while the service is running; stop it first"
     fi
   done
+  if [[ -n ${change[PLAY_SEAT_CPUS]+x} ]]; then
+    play_seat_cpus_parse "${change[PLAY_SEAT_CPUS]}" || die $EX_USAGE "PLAY_SEAT_CPUS names CPUs this host does not have, or is malformed"
+  fi
   if [[ -n ${change[DATA_DIR]+x} && -n ${change[DATA_DIR]} ]]; then
     validate_data_dir "${change[DATA_DIR]}" || die $EX_BLOCKED "DATA_DIR rejected (see log)"
   fi

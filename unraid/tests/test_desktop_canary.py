@@ -1409,7 +1409,7 @@ class PlayTests(unittest.TestCase):
         (bundle / "lib/polyseat/device_owner.udev").write_text("#!@BUNDLE@/py/bin/interp -I\nprint(1)\n")
         run = d / "run"; run.mkdir()
         script = r"""
-          POLYSEAT_RELEASE_GATE=canary ROOT="$1" RUN_DIR="$1/run" POLYSEATD_DIR="$1/bundle"
+          POLYSEAT_RELEASE_GATE=canary ROOT="$1" RUN_DIR="$1/run" POLYSEATD_DIR="$1/bundle" CFG="$1/none.cfg" SCHEMA="$2"
           sandbox() { return 0; }; ci_real_system() { return 1; }
           play_host_on || exit 7
           printf 'ON sysrq=%s rule=%s helper=%s\n' "$(cat "$1/proc/sys/kernel/sysrq")" "$([ -f "$1/etc/udev/rules.d/72-polyseat-hide.rules" ] && echo y)" \
@@ -1420,7 +1420,8 @@ class PlayTests(unittest.TestCase):
             "$([ -e "$1/etc/udev/rules.d/72-polyseat-hide.rules" ] && echo y || echo n)" \
             "$([ -e "$1/usr/local/lib/polyseat" ] && echo y || echo n)" "$([ -e "$1/run/play-host.json" ] && echo y || echo n)"
         """
-        res = source_ctl(script, str(d), env={"PATH": "/usr/bin:/bin", "CONSOLE_LOG": str(d / "console.log")})
+        res = source_ctl(script, str(d), str(CTL.parent.parent / "schema.json"),
+                         env={"PATH": "/usr/bin:/bin", "CONSOLE_LOG": str(d / "console.log")})
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn(f"ON sysrq=0 rule=y helper=#!{bundle}/py/bin/interp -I", res.stdout)
         self.assertIn("OFF sysrq=1 rule=n helper=n state=n", res.stdout)

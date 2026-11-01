@@ -18,6 +18,7 @@ variable) keeps `"signed"`: nothing in this document applies to it, and the sign
 | During | The card shows address, seats and the time left. Polyseat's own page (opened from the card) manages seats and pairing. |
 | Stop | Card → **Stop** (typed confirmation `STOP`), or `polyseatctl play-stop`. Seats stop in upstream's order, Incus gets its clean-stop record, the host is restored. The session also ends by itself when `PLAY_SESSION_HOURS` are over. |
 | Array stop / shutdown | `event/stopping_svcs` asks a running session to stop and waits up to 5 minutes for it before Unraid unmounts the pools (`play-stop --wait 300`). Only then the old emergency `stop` runs. |
+| Between sessions | A finished session leaves `canary-session.json`, `canary-guardian.pid`, `canary-emergency-stop` and `play-evidence/` in RAM. `play-start` removes the records (and keeps the last evidence as `play-evidence.last`) because it holds the lock and nothing runs; it **refuses** over `play-host.json`/`play-console.json` (unrestored host), a watchdog `.reason`, a live cgroup or daemon. Incus' own gate stays: no clean-stop record, no start. |
 | Reboot | RAM is gone: the approval, the runtime slot, the staged seat image and daemon vanish with it, and the host is as Unraid boots it. `event/disks_mounted` runs `polyseatctl boot`, which in owner mode only verifies and logs. **Nothing starts.** |
 | Uninstall | `plugin remove` runs `uninstall --approve` (stops anything running, removes exactly the manifest-listed runtime files, the staged seat image and daemon, the subuid block). Settings, the Incus state and the game library are never removed. |
 
@@ -75,9 +76,13 @@ In RAM (gone at reboot): the runtime slots, `/var/lib/polyseat-unraid-seat-image
 
 Unchanged from operation 8, now also for the two new host changes: `kernel.sysrq`, the tty1 keyboard, the udev rule, the
 device-owner helper and the uhid module, the Incus clean-stop record and the cgroup. New in `play-host.json`:
-`energy_performance_preference` of every CPU if `PLAY_CPU_PERFORMANCE=yes` (set to `performance` for the session and
-written back exactly; unreadable files refuse the start; a CPU without the file is skipped). `PLAY_SEAT_CPUS` pins
-threads of processes inside a seat's payload cgroup only (affinity dies with the process; nothing to restore).
+`energy_performance_preference` of every CPU if `PLAY_CPU_PERFORMANCE=yes` (recorded, set to `performance` for the
+session and written back value by value; an unreadable file or an odd value refuses the start before anything is
+changed; a host without the files is skipped; a failed restore keeps `play-host.json`, so the next start refuses).
+`PLAY_SEAT_CPUS` (`0-15` for all seats, or `seat1=0-7;seat2=8-15`; a seat not named is not pinned) is checked against
+the CPUs the play cgroup may use (`0-27` on Tower) when saved and when a session starts; every ten seconds the loop gives
+every thread of every process in a seat's `lxc.payload.<seat>` cgroup that list with `taskset` (idempotent; nothing
+outside a seat payload cgroup is touched; affinity ends with the process, so there is nothing to restore).
 
 ## Still needs an owner GO
 

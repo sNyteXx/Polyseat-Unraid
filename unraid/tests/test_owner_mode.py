@@ -641,6 +641,235 @@ class PlayStopTests(unittest.TestCase):
         self.assertIn("the emergency stop follows", self.sb.log_file.read_text())
 
 
+class CpuSettingsTests(unittest.TestCase):
+    """Owner GO 2026-11-01: the energy profile may be `performance` during a session and is restored exactly; seats may be
+    pinned to CPUs (i7-14700K: P-cores 0-15, E-cores 16-27)."""
+    EPP = {0: "balance_performance", 1: "balance_performance", 2: "power", 3: "default"}
+
+    def host(self, perf="yes", epp=None, sysrq="1"):
+        d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-epp"))
+        self.addCleanup(shutil.rmtree, d)
+        (d / "proc/sys/kernel").mkdir(parents=True)
+        (d / "proc/sys/kernel/sysrq").write_text(sysrq + "\n")
+        (d / "etc/udev/rules.d").mkdir(parents=True)
+        (d / "usr/local/lib").mkdir(parents=True)
+        cpu = d / "sys/devices/system/cpu"
+        for name in ("cpufreq", "cpuidle"):  # neighbours of the cpuN directories that must never be touched
+            (cpu / name).mkdir(parents=True)
+            (cpu / name / "energy_performance_preference").write_text("do-not-touch\n")
+        for n, value in (self.EPP if epp is None else epp).items():
+            (cpu / f"cpu{n}/cpufreq").mkdir(parents=True)
+            (cpu / f"cpu{n}/cpufreq/energy_performance_preference").write_text(value + "\n")
+        (cpu / "cpu9").mkdir()  # an offline CPU without cpufreq
+        bundle = d / "bundle"
+        (bundle / "bin").mkdir(parents=True); (bundle / "rules").mkdir(); (bundle / "lib/polyseat").mkdir(parents=True)
+        (bundle / "bin/polyseat-console").write_text('#!/bin/sh\n[ "$1" = off ] && echo "{}" > "$3"; [ "$1" = restore ] && rm -f "$2"; exit 0\n')
+        (bundle / "bin/polyseat-console").chmod(0o755)
+        (bundle / "rules/72-polyseat-hide.rules").write_text("# rule\n")
+        (bundle / "lib/polyseat/device_owner.udev").write_text("#!@BUNDLE@/x\n")
+        (d / "run").mkdir()
+        (d / "cfg").write_text(f'PLAY_CPU_PERFORMANCE="{perf}"\n')
+        return d
+
+    def run_host(self, d, body):
+        script = r"""
+          POLYSEAT_RELEASE_GATE=canary ROOT="$1" RUN_DIR="$1/run" POLYSEATD_DIR="$1/bundle" CFG="$1/cfg" SCHEMA="$2" LOG_DIR="$1/log"
+          sandbox() { return 0; }; ci_real_system() { return 1; }
+          epps() { for n in 0 1 2 3; do printf '%s=%s ' "$n" "$(cat "$1/sys/devices/system/cpu/cpu$n/cpufreq/energy_performance_preference" 2>/dev/null)"; done; echo; }
+        """ + body
+        return source_ctl(script, str(d), str(CTL.parent.parent / "schema.json"), env={"PATH": "/usr/bin:/bin"})
+
+    def test_the_profile_is_recorded_set_to_performance_and_put_back_exactly(self):
+        d = self.host()
+        res = self.run_host(d, r"""
+          play_host_on || exit 7
+          epps "$1"; jq -c .epp "$RUN_DIR/play-host.json"
+          play_host_off || exit 9
+          epps "$1"; if [[ -e $RUN_DIR/play-host.json ]]; then echo STATE-LEFT; fi
+        """)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        on, recorded, off = (line.strip() for line in res.stdout.splitlines()[:3])
+        self.assertEqual(on, "0=performance 1=performance 2=performance 3=performance")
+        self.assertEqual(json.loads(recorded), {str(n): v for n, v in self.EPP.items()})  # CPU 9 and the neighbours: absent
+        self.assertEqual(off, "0=balance_performance 1=balance_performance 2=power 3=default")
+        self.assertNotIn("STATE-LEFT", res.stdout)
+        cpu = d / "sys/devices/system/cpu"
+        self.assertEqual((cpu / "cpufreq/energy_performance_preference").read_text(), "do-not-touch\n")
+        self.assertEqual((cpu / "cpuidle/energy_performance_preference").read_text(), "do-not-touch\n")
+        self.assertFalse((cpu / "cpu9/cpufreq").exists())
+
+    def test_off_by_default_touches_nothing_and_records_nothing(self):
+        for perf in ("no", None):
+            d = self.host(perf=perf or "no")
+            if perf is None:
+                (d / "cfg").unlink()  # no settings file at all: the schema default
+            res = self.run_host(d, r"""
+              play_host_on || exit 7
+              epps "$1"; jq -c .epp "$RUN_DIR/play-host.json"; play_host_off || exit 9
+            """)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(res.stdout.splitlines()[0], "0=balance_performance 1=balance_performance 2=power 3=default ")
+            self.assertEqual(res.stdout.splitlines()[1], "{}")
+
+    def test_an_unreadable_or_odd_value_refuses_before_anything_is_changed(self):
+        for label, change in (("not a profile name", lambda f: f.write_text("Perf ormance\n")),
+                              ("empty", lambda f: f.write_text("\n")),
+                              ("a link", lambda f: (f.unlink(), f.symlink_to("/etc/hostname"))),
+                              ("a directory", lambda f: (f.unlink(), f.mkdir()))):
+            with self.subTest(label):
+                d = self.host()
+                change(d / "sys/devices/system/cpu/cpu2/cpufreq/energy_performance_preference")
+                res = self.run_host(d, 'play_host_on && echo STARTED; cat "$1/proc/sys/kernel/sysrq"; [[ -e $RUN_DIR/play-host.json ]] && echo STATE')
+                self.assertNotIn("STARTED", res.stdout)
+                self.assertNotIn("STATE", res.stdout)
+                self.assertEqual(res.stdout.strip().splitlines()[-1], "1")  # sysrq untouched
+                self.assertIn("cannot read the CPUs' energy profile", res.stderr)
+                self.assertEqual((d / "sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference").read_text(),
+                                 "balance_performance\n")
+
+    def test_a_host_without_the_files_is_skipped_cleanly_and_a_bad_setting_refuses(self):
+        d = self.host(epp={})
+        res = self.run_host(d, "play_host_on || exit 7; jq -c .epp \"$RUN_DIR/play-host.json\"; play_host_off || exit 9")
+        self.assertEqual((res.returncode, res.stdout.strip()), (0, "{}"), res.stderr)
+        self.assertIn("the profile is left alone", res.stderr)
+        d = self.host(perf="maybe")
+        res = self.run_host(d, "play_host_on")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("PLAY_CPU_PERFORMANCE 'maybe' is not usable", res.stderr)
+
+    def test_a_restore_that_fails_keeps_the_record_and_a_tampered_one_writes_nowhere_else(self):
+        d = self.host()
+        res = self.run_host(d, r"""
+          play_host_on || exit 7
+          rm -r "$1/sys/devices/system/cpu/cpu2/cpufreq"       # the CPU went away while the session ran
+          play_host_off && echo RESTORED
+          [[ -e $RUN_DIR/play-host.json ]] && echo STATE-KEPT; epps "$1"
+        """)
+        self.assertNotIn("RESTORED", res.stdout)
+        self.assertIn("STATE-KEPT", res.stdout)
+        self.assertIn("0=balance_performance 1=balance_performance 2= 3=default", res.stdout)  # the others went back anyway
+        self.assertIn("energy profile was not restored exactly", res.stderr)
+        d = self.host()
+        res = self.run_host(d, r"""
+          play_host_on || exit 7
+          jq -c '.epp = {"../../../../outside": "x", "1": "a b", "x": "power", "3": "power"}' "$RUN_DIR/play-host.json" > "$RUN_DIR/t" && mv "$RUN_DIR/t" "$RUN_DIR/play-host.json"
+          play_host_off && echo RESTORED; epps "$1"
+        """)
+        self.assertNotIn("RESTORED", res.stdout)
+        self.assertIn("3=power", res.stdout)  # the one well-formed entry was honoured, the others were not
+        self.assertFalse(list(d.glob("**/outside*")))
+
+    # -- pinning ------------------------------------------------------------------------------------------------
+    def parse(self, value, cpuset="0-27"):
+        res = source_ctl(r"""
+          CANARY_HOST_CPUSET=$3 SCHEMA="$2"
+          play_seat_cpus_parse "$1" || { echo REFUSED; exit 0; }
+          printf 'all=%s\n' "$PLAY_PIN_ALL"; for k in $(printf '%s\n' "${!PLAY_PIN_SEAT[@]}" | sort); do printf '%s=%s\n' "$k" "${PLAY_PIN_SEAT[$k]}"; done
+        """, value, str(CTL.parent.parent / "schema.json"), cpuset)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return res.stdout.strip().splitlines()
+
+    def test_seat_cpus_are_checked_against_the_hosts_cpus_and_normalised_like_the_kernel_prints_them(self):
+        self.assertEqual(self.parse(""), ["all="])
+        self.assertEqual(self.parse("0-15"), ["all=0-15"])
+        self.assertEqual(self.parse("16-27"), ["all=16-27"])
+        self.assertEqual(self.parse("3,1,2,0,8,9,11,5"), ["all=0-3,5,8-9,11"])
+        self.assertEqual(self.parse("007-010"), ["all=7-10"])
+        self.assertEqual(self.parse("4,5"), ["all=4-5"])
+        self.assertEqual(self.parse("5"), ["all=5"])
+        self.assertEqual(self.parse("seat1=0-7;seat2=8-15"), ["all=", "seat1=0-7", "seat2=8-15"])
+        self.assertEqual(self.parse("seat-2=16,17;a=0"), ["all=", "a=0", "seat-2=16-17"])
+        self.assertEqual(self.parse("0-3,8", cpuset="0-3,8-11"), ["all=0-3,8"])
+        for bad, cpuset in (("0-28", "0-27"), ("28", "0-27"), ("27-0", "0-27"), ("0-99", "0-27"), ("4", "0-3,8-11"),
+                            ("0-4", "0-3,8-11"), ("seat1=0-7;seat1=8-9", "0-27"), ("seat1=0-7;seat2=20-30", "0-27"),
+                            ("seat1=", "0-27"), ("0-", "0-27"), ("a b", "0-27"), ("seat1=0-7;", "0-27"), ("0-7;seat1=1", "0-27"),
+                            ("Seat1=1", "0-27"), ("0,,1", "0-27"), ("0-15", "garbage"), ("12345", "0-27")):
+            with self.subTest(bad=bad, cpuset=cpuset):
+                self.assertEqual(self.parse(bad, cpuset), ["REFUSED"])
+
+    def test_config_set_refuses_cpus_the_host_does_not_have(self):
+        sb = Sandbox()
+        self.addCleanup(sb.cleanup)
+        for good in ("", "0-15", "seat1=0-7;seat2=8-15", "16-27"):
+            self.assertEqual(sb.ctl("config-set", f"PLAY_SEAT_CPUS={good}").code, 0, good)
+        for bad in ("0-28", "seat1=0-7;seat1=8-9", "seat1=30", "27-0"):
+            res = sb.ctl("config-set", f"PLAY_SEAT_CPUS={bad}")
+            self.assertEqual(res.code, 1, bad)
+            self.assertIn("names CPUs this host does not have", res.err)
+        self.assertEqual(next(e for e in json.loads(sb.ctl("config-get").out) if e["key"] == "PLAY_SEAT_CPUS")["value"],
+                         "16-27")  # a refused change leaves the stored value as it was
+
+    def proc(self, layout, mode):
+        d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-pin"))
+        self.addCleanup(shutil.rmtree, d)
+        for pid, (comm, cgroup, threads) in layout.items():
+            base = d / "proc" / str(pid)
+            base.mkdir(parents=True)
+            (base / "comm").write_text(comm + "\n")
+            (base / "cgroup").write_text(cgroup + "\n")
+            for tid, allowed in threads.items():
+                (base / "task" / str(tid)).mkdir(parents=True)
+                (base / "task" / str(tid) / "status").write_text(f"Name:\t{comm}\nCpus_allowed:\tffffff\nCpus_allowed_list:\t{allowed}\nMems_allowed:\t1\n")
+        return d
+
+    def pin(self, d, value, passes=1):
+        res = source_ctl(r"""
+          SCHEMA="$3"; PLAY_PROC="$1/proc"
+          # the kernel would answer by changing the thread's list; do the same so a second pass can be idempotent
+          taskset() { printf '%s\n' "$*" >> "$1/calls"; local list=${2} tid=${3}; sed -i "s/^Cpus_allowed_list:.*/Cpus_allowed_list:\t$list/" "$PLAY_PROC"/*/task/"$tid"/status; }
+          play_seat_cpus_parse "$2" || { echo REFUSED; exit 0; }
+          for ((n = 0; n < $4; n++)); do play_seat_pin; echo "pass $n done" >> "$1/calls"; done
+        """.replace('"$1/calls"', f'"{d}/calls"'), str(d), value, str(CTL.parent.parent / "schema.json"), str(passes))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        calls = (d / "calls").read_text().split("\n")[:-1] if (d / "calls").exists() else []
+        return calls
+
+    LAYOUT = {
+        100: ("sway", "0::/polyseat-unraid-canary/lxc.payload.seat1/init.scope", {100: "0-27", 101: "0-27", 102: "0-7"}),
+        200: ("steam", "0::/polyseat-unraid-canary/lxc.payload.seat2", {200: "0-27"}),
+        300: ("sshd", "0::/system.slice/sshd.service", {300: "0-27"}),
+        400: ("lxc-monitor", "0::/polyseat-unraid-canary/lxc.monitor.seat1", {400: "0-27"}),
+        500: ("incusd", "0::/polyseat-unraid-canary/daemon", {500: "0-27"}),
+        600: ("game", "0::/polyseat-unraid-canary/lxc.payload.seat3", {600: "0-27", 601: "0-27"}),
+    }
+
+    def test_one_list_pins_every_thread_of_every_seat_and_nothing_else(self):
+        d = self.proc(self.LAYOUT, "all")
+        calls = sorted(c for c in self.pin(d, "0-15") if not c.startswith("pass"))
+        self.assertEqual(calls, ["-pc 0-15 100", "-pc 0-15 101", "-pc 0-15 102", "-pc 0-15 200", "-pc 0-15 600", "-pc 0-15 601"])
+        for pid in (300, 400, 500):  # a host service, the container's monitor and the daemon: not a seat payload
+            self.assertIn("0-27", (d / f"proc/{pid}/task/{pid}/status").read_text())
+
+    def test_per_seat_lists_pin_only_the_named_seats(self):
+        d = self.proc(self.LAYOUT, "map")
+        calls = sorted(c for c in self.pin(d, "seat1=0-7;seat2=8-15") if not c.startswith("pass"))
+        # thread 102 already has seat1's list: left alone
+        self.assertEqual(calls, ["-pc 0-7 100", "-pc 0-7 101", "-pc 8-15 200"])
+        self.assertIn("0-27", (d / "proc/600/task/600/status").read_text())  # seat3 is not in the map
+
+    def test_pinning_is_idempotent_and_off_without_a_setting(self):
+        d = self.proc(self.LAYOUT, "idem")
+        calls = self.pin(d, "16-27", passes=2)
+        first = calls[:calls.index("pass 0 done")]
+        second = calls[calls.index("pass 0 done") + 1:calls.index("pass 1 done")]
+        self.assertEqual(len(first), 6)
+        self.assertEqual(second, [])
+        d = self.proc(self.LAYOUT, "off")
+        self.assertEqual([c for c in self.pin(d, "") if not c.startswith("pass")], [])
+
+    def test_the_session_checks_and_applies_the_setting(self):
+        text = CTL.read_text()
+        body = re.search(r"^cmd_polyseatd_play\(\) \([^\n]*\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
+        self.assertLess(body.index("play_pin_precheck ||"), body.index('mkdir -- "$dir"'))  # a bad value starts nothing
+        self.assertIn("play_seat_priorities; play_seat_pin; fi", body)
+        start = re.search(r"^cmd_play_start\(\) \(.*?^\)", text, re.MULTILINE | re.DOTALL).group(0)
+        self.assertLess(start.index("play_pin_precheck ||"), start.index("owner_approval_for polyseatd-play"))
+        pin = re.search(r"^play_seat_pin\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL).group(0)
+        self.assertEqual(pin.count("taskset"), 1)
+        self.assertIn(r"lxc\.payload\.", pin)
+        self.assertNotIn("lxc.monitor", pin)
+
+
 class DispatchAndEventTests(unittest.TestCase):
     def test_the_operator_verbs_are_dispatched_before_the_lock_and_play_start_after_a_probe(self):
         main = CTL.read_text().split("\nmain() {", 1)[1]
