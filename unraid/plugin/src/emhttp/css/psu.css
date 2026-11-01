@@ -88,6 +88,7 @@
   padding: 7px 16px; border-radius: 6px; border: 1px solid var(--psu-border);
   background: var(--psu-card); color: var(--psu-fg); line-height: 1.3;
 }
+.psu button.psu-btn[hidden] { display: none; }
 .psu button.psu-btn:hover:not(:disabled) { border-color: var(--psu-accent); }
 .psu button.psu-btn:focus-visible, .psu .psu-tab:focus-visible, .psu .psu-input:focus-visible { outline: 2px solid var(--psu-accent); outline-offset: 2px; }
 .psu button.psu-btn.primary { background: var(--psu-accent); border-color: var(--psu-accent); color: #1d1b1b; font-weight: 600; }

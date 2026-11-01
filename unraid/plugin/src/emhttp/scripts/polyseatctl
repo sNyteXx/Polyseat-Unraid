@@ -3907,10 +3907,16 @@ play_host_record_check() { # file
       (.value | type == "string" and test($epp))))' "$1" >/dev/null 2>&1
 }
 
+PLAY_RECOVER_FAILS=()
+play_recover_fail() { # message : a failed check, to the log now and, first one first, to the refusal the admin reads
+  log error "play-recover: $1"
+  PLAY_RECOVER_FAILS+=("$1")
+}
+
 play_recover_check_processes() { # nothing that proves a session could still run: logs each finding, fails if there is one
   local proc p pid comm cg shown bad=0
   proc=$(host_path /proc)
-  [[ -d $proc ]] || { log error "play-recover: cannot look at the processes ($proc)"; return 1; }
+  [[ -d $proc ]] || { play_recover_fail "cannot look at the processes ($proc)"; return 1; }
   for p in "$proc"/[0-9]*; do
     [[ -d $p ]] || continue
     pid=${p##*/}
@@ -3920,13 +3926,13 @@ play_recover_check_processes() { # nothing that proves a session could still run
     shown=$(head -n 1 <<< "$cg" | tr -c '[:alnum:]/:._-' '?' | head -c 100)
     # Any incusd, ours or not: the forks of a running container carry the name too. polyseatd is the daemon on the LAN.
     case "$comm" in
-      incusd | polyseatd) log error "play-recover: $comm is still running (pid $pid)"; bad=1 ;;
+      incusd | polyseatd) play_recover_fail "$comm is still running (pid $pid)"; bad=1 ;;
     esac
     # A seat's payload or monitor (lxc.payload.<name>, lxc.monitor.<name>), or anything left in the plugin's own groups.
     if [[ $cg == *lxc.payload.* || $cg == *lxc.monitor.* ]]; then
-      log error "play-recover: process $pid is in a seat's cgroup ($shown)"; bad=1
+      play_recover_fail "process $pid is in a seat's cgroup ($shown)"; bad=1
     elif [[ $cg == *"/${CANARY_CGROUP##*/}"* ]]; then
-      log error "play-recover: process $pid is in the plugin's cgroup ($shown)"; bad=1
+      play_recover_fail "process $pid is in the plugin's cgroup ($shown)"; bad=1
     fi
   done
   # What no cgroup shows: a process that left it but still runs a binary of the runtime, or the supervisor's own shells.
@@ -3937,7 +3943,7 @@ play_recover_check_processes() { # nothing that proves a session could still run
 play_recover_check_cgroups() { # no polyseat cgroup of any kind is left
   local group bad=0
   for group in "$CANARY_CGROUP" "$CANARY_WATCHDOG_CGROUP"; do
-    if [[ -e $group || -L $group ]]; then log error "play-recover: the cgroup $group still exists"; bad=1; fi
+    if [[ -e $group || -L $group ]]; then play_recover_fail "the cgroup $group still exists"; bad=1; fi
   done
   [[ $bad -eq 0 ]]
 }
@@ -3945,9 +3951,9 @@ play_recover_check_cgroups() { # no polyseat cgroup of any kind is left
 play_recover_check_mounts() { # no mount at or below the persistent data directory (the host's own mount table)
   local dir=$ROOT$PERSIST_DATA_DIR info found
   info=$(host_path /proc/self/mountinfo)
-  [[ -r $info ]] || { log error "play-recover: cannot read the mount table ($info)"; return 1; }
+  [[ -r $info ]] || { play_recover_fail "cannot read the mount table ($info)"; return 1; }
   found=$(awk -v d="$dir" '$5 == d || index($5, d "/") == 1 { print $5 }' "$info" | head -n 3 | tr '\n' ' ')
-  [[ -z $found ]] || { log error "play-recover: still mounted below the persistent data directory: $found"; return 1; }
+  [[ -z $found ]] || { play_recover_fail "still mounted below the persistent data directory: $found"; return 1; }
 }
 
 # All of the above; run before anything is changed and once more right before the record is written.
@@ -3960,26 +3966,26 @@ play_recover_quiet() {
 }
 
 play_recover_check_data() { # the persistent workspace is the real, validated one and has its own record
-  persist_validate_data_dir || return 1
+  persist_validate_data_dir || { play_recover_fail "the persistent data directory is not usable (see the lines above)"; return 1; }
   { [[ -d $DATA_REAL && ! -L $DATA_REAL && -d $INCUS_DIR && ! -L $INCUS_DIR ]] &&
     jq -e '.schema == 1 and .kind == "persistent"' "$DATA_REAL/persist.json" >/dev/null 2>&1; } ||
-    { log error "play-recover: $PERSIST_DATA_DIR is not an initialised persistent workspace (no persist.json); nothing to record a clean stop for"; return 1; }
+    { play_recover_fail "$PERSIST_DATA_DIR is not an initialised persistent workspace (no persist.json); nothing to record a clean stop for"; return 1; }
 }
 
 play_recover_check_host() { # read-only: the records are play_host_on's, and what restoring from them needs is there
   local host=$RUN_DIR/play-host.json console=$RUN_DIR/play-console.json
   if [[ -e $host || -L $host ]]; then
     { [[ -f $host && ! -L $host ]] && play_host_record_check "$host"; } ||
-      { log error "play-recover: $host is not a record that play_host_on wrote; restore the host by hand, then remove it"; return 1; }
+      { play_recover_fail "$host is not a record that play_host_on wrote; restore the host by hand, then remove it"; return 1; }
   elif [[ -e $console || -L $console ]]; then
-    log error "play-recover: play-console.json without play-host.json cannot be put back safely; restore the console by hand, then remove it"
+    play_recover_fail "play-console.json without play-host.json cannot be put back safely; restore the console by hand, then remove it"
     return 1
   fi
   if [[ -e $console || -L $console ]]; then
-    [[ -f $console && ! -L $console ]] || { log error "play-recover: $console is not a plain file"; return 1; }
+    [[ -f $console && ! -L $console ]] || { play_recover_fail "$console is not a plain file"; return 1; }
     # The console keyboard is put back by the staged tool, and a console left off is the one thing a recovery must not do.
     if ! { [[ -x $POLYSEATD_DIR/bin/polyseat-console && ! -L $POLYSEATD_DIR/bin/polyseat-console ]] && polyseatd_verify; }; then
-      log error "play-recover: the staged polyseat-console is gone or not the verified one ($POLYSEATD_DIR/bin/polyseat-console), so the console keyboard cannot be restored from $console; nothing was changed. Restore it by hand with the same tool from the signed daemon bundle ('polyseat-console restore $console'), then run play-recover again"
+      play_recover_fail "the staged polyseat-console is gone or not the verified one, so the console keyboard cannot be restored from $console; restore it by hand with the same tool from the signed daemon bundle ('polyseat-console restore $console'), then run play-recover again"
       return 1
     fi
   fi
@@ -4023,9 +4029,9 @@ END {
 play_recover_backup_check() { # directory : its backup.yaml proves boot.autostart "false"; logs why not
   local dir=$1 name=${1##*/} f=$1/backup.yaml verdict
   { [[ -f $f && ! -L $f ]] && (( $(stat -c %s -- "$f") <= 1048576 )); } ||
-    { log error "play-recover: instance $name: no plain backup.yaml (at most 1 MiB) in $dir"; return 1; }
+    { play_recover_fail "instance $name: no plain backup.yaml (at most 1 MiB) in $dir"; return 1; }
   verdict=$(awk -v name="$name" "$PLAY_BACKUP_AWK" "$f" 2>/dev/null) || verdict=unreadable
-  [[ $verdict == ok ]] || { log error "play-recover: instance $name: backup.yaml does not prove boot.autostart \"false\" ($verdict)"; return 1; }
+  [[ $verdict == ok ]] || { play_recover_fail "instance $name: backup.yaml does not prove boot.autostart \"false\" ($verdict)"; return 1; }
 }
 
 PLAY_RECOVER_NAMES=()
@@ -4037,7 +4043,7 @@ play_recover_check_instances() { # the names in clean-stop.used.json plus every 
     if [[ -f $used && ! -L $used ]] && jq -e '.instances | type == "array" and all(.[]; (.name | type == "string"))' "$used" >/dev/null 2>&1; then
       while IFS= read -r name; do seen[$name]=1; done < <(jq -r '.instances[].name' "$used")
     else
-      log error "play-recover: clean-stop.used.json is not a record this controller wrote; the instance list cannot be proven"; bad=1
+      play_recover_fail "clean-stop.used.json is not a record this controller wrote; the instance list cannot be proven"; bad=1
     fi
   fi
   if [[ -e $base || -L $base ]]; then
@@ -4045,15 +4051,15 @@ play_recover_check_instances() { # the names in clean-stop.used.json plus every 
       for entry in "$base"/* "$base"/.[!.]*; do
         [[ -e $entry || -L $entry ]] || continue
         if [[ -d $entry && ! -L $entry ]]; then seen[${entry##*/}]=1
-        else log error "play-recover: unexpected entry ${entry##*/} in the pool's containers directory (not a directory)"; bad=1; fi
+        else play_recover_fail "unexpected entry ${entry##*/} in the pool's containers directory (not a directory)"; bad=1; fi
       done
     else
-      log error "play-recover: $base is not a directory"; bad=1
+      play_recover_fail "$base is not a directory"; bad=1
     fi
   fi
   while IFS= read -r name; do
     [[ -n $name ]] || continue
-    if ! [[ $name =~ $PLAY_NAME_RE ]]; then log error "play-recover: instance name '$(printf '%s' "$name" | tr -c '[:alnum:]._-' '?' | head -c 64)' is outside the seat names"; bad=1; continue; fi
+    if ! [[ $name =~ $PLAY_NAME_RE ]]; then play_recover_fail "instance name '$(printf '%s' "$name" | tr -c '[:alnum:]._-' '?' | head -c 64)' is outside the seat names"; bad=1; continue; fi
     play_recover_backup_check "$base/$name" || bad=1
     PLAY_RECOVER_NAMES+=("$name")
   done < <(printf '%s\n' "${!seen[@]}" | LC_ALL=C sort)
@@ -4084,7 +4090,9 @@ cmd_play_recover() ( # owner mode, root, under the lock: prove that nothing runs
   play_recover_quiet && log info "play-recover: no incusd, no polyseatd, no process in a seat or plugin cgroup, no polyseat cgroup, no mount below the data directory" || bad=1
   if play_recover_check_data; then play_recover_check_instances || bad=1; else bad=1; fi  # the pool is read from the validated directory only
   play_recover_check_host || bad=1
-  [[ $bad -eq 0 ]] || die $EX_BLOCKED "play-recover: refused, a check failed (see above); nothing was changed"
+  # The card shows only the last line of this refusal, so it names the first failure; the log has all of them.
+  [[ $bad -eq 0 ]] || die $EX_BLOCKED "play-recover: refused, nothing was changed: ${PLAY_RECOVER_FAILS[0]:-a check failed}$(
+    (( ${#PLAY_RECOVER_FAILS[@]} > 1 )) && printf ' (and %d more, see the log)' $(( ${#PLAY_RECOVER_FAILS[@]} - 1 )))"
   log info "play-recover: instances ${PLAY_RECOVER_NAMES[*]:-(none)}: boot.autostart is \"false\" in every backup.yaml"
   log info "play-recover: all checks passed; changing the host now"
   play_recover_host_restore || die $EX_HEALTH "play-recover: the host could not be restored; no clean-stop record was written"

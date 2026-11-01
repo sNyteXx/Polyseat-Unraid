@@ -114,7 +114,7 @@ t('argument allowlist', function () use ($SHA) {
     $good = [['status'], ['status', '--json'], ['metrics'], ['list'], ['config-get'], ['logs', 'controller', '100'],
              ['logs', 'incusd', '500'], ['diagnose'], ['verify', $SHA], ['start'], ['stop'], ['restart'],
              ['activate', $SHA, '--approve'], ['rollback', '--approve'], ['recover', '--approve'], ['config-reset'],
-             ['config-set', 'SERVICE=enabled'], ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=30'], ['polyseatd-status'], ['play-status'], ['play-start'], ['play-stop'],
+             ['config-set', 'SERVICE=enabled'], ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=30'], ['polyseatd-status'], ['play-status'], ['play-start'], ['play-stop'], ['play-recover'],
              ['config-set', 'PLAY_CPU_PERCENT=50', 'PLAY_MEMORY_MB=8192', 'LIBRARY_PATH=/mnt/tank/games'],
              ['config-set', 'PLAY_SESSION_HOURS=12', 'PLAY_CPU_PERFORMANCE=yes', 'PLAY_SEAT_CPUS=seat1=0-7;seat2=8-15']];
     $bad = [[], ['uninstall', '--approve'], ['update', 'a', 'b', 'c', '--approve'], ['stage', 'a', 'b', 'c', '--approve'],
@@ -127,6 +127,7 @@ t('argument allowlist', function () use ($SHA) {
             ['polyseatd-status', 'x'], ['polyseatd-status', '--json'], ['polyseatd-stop'], ['polyseatd-play'], ['polyseatd-session'],
             ['config-set', 'PLAY_CPU_PERCENT=101'], ['config-set', 'LIBRARY_PATH=/etc'], ['config-set', 'PLAY_MEMORY_MB=8G'],
             ['play-start', '--approve'], ['play-start', 'x'], ['play-stop', '--wait', '300'], ['play-stop', 'x'], ['play-status', 'x'],
+            ['play-recover', '--approve'], ['play-recover', 'x'], ['play-recover', '--force'], ['Play-Recover'],
             ['config-set', 'PLAY_SESSION_HOURS=25'], ['config-set', 'PLAY_SEAT_CPUS=0-15;rm'], ['config-set', 'PLAY_CPU_PERFORMANCE=true']];
     foreach ($good as $args) { ok(psu_ctl_args_ok($args), json_encode($args) . ' should pass'); }
     foreach ($bad as $args) { ok(!psu_ctl_args_ok($args), json_encode($args) . ' should fail'); }
@@ -181,9 +182,11 @@ t('the play view is read-only, reduced to validated fields and tells "no session
     stub_reset(['gate' => 'closed', 'play' => 'evil']);
     [, , $body] = $get();
     eq(json_decode($body, true)['data'], ['url' => '', 'alive' => true, 'seats' => null, 'expires_at' => null]);
+    eq($b['state'], 'running');
     stub_reset(['gate' => 'closed', 'play' => 'none']);
     [$code, , $body] = $get();
     eq([$code, json_decode($body, true)['data']], [200, null], 'no session is an answer');
+    eq(json_decode($body, true)['state'], 'idle', 'a controller without a state is idle');
     stub_reset(['gate' => 'closed', 'play' => 'broken']);
     [$code, , $body] = $get();
     eq([$code, json_decode($body, true)['error']], [502, 'unavailable']);
@@ -200,6 +203,60 @@ t('the play view is read-only, reduced to validated fields and tells "no session
         eq($code, 400, "GET $action");
     }
     eq(stub_calls(), []);
+});
+
+t('the play view carries the state, a validated reason and how the last session ended', function () {
+    $get = fn() => json_decode(psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => 'play'], [])[2], true);
+    stub_reset(['gate' => 'closed', 'play' => 'recover']);
+    $b = $get();
+    eq([$b['ok'], $b['data'], $b['state'], $b['reason'], $b['last_end']], [true, null, 'needs-recovery', 'memory-floor-hard', null]);
+    stub_reset(['gate' => 'closed', 'play' => 'idle']);
+    $b = $get();
+    eq([$b['data'], $b['state'], $b['reason']], [null, 'idle', null]);
+    eq($b['last_end'], ['reason' => 'memory-floor', 'clean' => true, 'recovered' => false, 'ended_at' => 1700000000], 'only the validated fields');
+    stub_reset(['gate' => 'closed', 'play' => 'busy']);
+    $b = $get();
+    eq([$b['data'], $b['state']], [null, 'busy']);
+    stub_reset(['gate' => 'closed', 'play' => 'recover-evil']);
+    $b = $get();
+    eq([$b['state'], $b['reason'], $b['last_end']], ['needs-recovery', 'unknown', null], 'a hostile reason becomes "unknown", a hostile last_end is dropped');
+    stub_reset(['gate' => 'closed', 'play' => 'bogus-state']);
+    [$code] = psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => 'play'], []);
+    eq($code, 502, 'a state nobody defined is not an answer');
+    foreach (stub_calls() as $call) { eq($call, ['polyseatd-status']); }
+});
+
+t('play recovery: only in an owner build, only with the typed phrase, nothing else becomes an argument', function () {
+    stub_reset(['gate' => 'canary', 'mode' => 'owner']);
+    [$code, $b] = post(['action' => 'play_recover']);
+    eq([$code, $b['error'], $b['expected_hint']], [400, 'confirm', 'WIEDERHERSTELLEN']);
+    foreach (['wiederherstellen', 'RECOVER', 'STOP', 'WIEDERHERSTELLEN '] as $typed) {
+        [$code, $b] = post(['action' => 'play_recover', 'confirm' => $typed]);
+        eq([$code, $b['error']], [400, 'confirm'], $typed);
+    }
+    eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), [], 'nothing ran before the phrase matched');
+    [$code] = post(['action' => 'play_recover', 'confirm' => 'WIEDERHERSTELLEN', 'wait' => '1', 'approve' => '1', 'args' => ['--force']]); eq($code, 200);
+    eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), [['play-recover']]);
+    // a signed build, a missing mode and a closed gate: refused before the controller is asked
+    foreach ([['gate' => 'canary', 'mode' => 'signed'], ['gate' => 'canary'], ['gate' => 'closed', 'mode' => 'owner']] as $conf) {
+        stub_reset($conf);
+        [$code, $b] = post(['action' => 'play_recover', 'confirm' => 'WIEDERHERSTELLEN']);
+        eq([$code, $b['error']], [423, 'locked'], json_encode($conf));
+        eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), []);
+    }
+    // a refusal of the controller reaches the card with its last line
+    stub_reset(['gate' => 'canary', 'mode' => 'owner', 'fail' => 2,
+                'stderr' => "[error] play-recover: incusd is still running (pid 4242)\n[error] play-recover: refused, nothing was changed: incusd is still running (pid 4242)"]);
+    [$code, $b] = post(['action' => 'play_recover', 'confirm' => 'WIEDERHERSTELLEN']);
+    eq([$code, $b['error'], $b['exit']], [409, 'failed', 2]);
+    ok(strpos($b['detail'], 'refused, nothing was changed: incusd is still running') !== false, $b['detail']);
+    // never by GET, never as a controller verb of its own
+    foreach (['play_recover', 'play-recover'] as $action) {
+        [$code] = psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => $action], []);
+        eq($code, 400, "GET $action");
+    }
+    [$code] = post(['action' => 'play-recover', 'confirm' => 'WIEDERHERSTELLEN']);
+    eq($code, 400, 'only the underscore action exists');
 });
 
 t('POST rejects bad method, origin and csrf before anything else', function () use ($SHA) {
@@ -227,6 +284,7 @@ t('destructive actions need the exact typed phrase', function () use ($SHA) {
     stub_reset(['gate' => 'open']);
     foreach ([['service', ['do' => 'stop'], 'STOP'], ['service', ['do' => 'restart'], 'RESTART'],
               ['rollback', [], 'ROLLBACK'], ['recover', [], 'RECOVER'], ['config_reset', [], 'RESET'], ['play_stop', [], 'STOP'],
+              ['play_recover', [], 'WIEDERHERSTELLEN'],
               ['activate', ['sha' => $SHA], 'ACTIVATE abababab']] as [$action, $extra, $phrase]) {
         [$code, $b] = post(['action' => $action] + $extra);
         eq([$code, $b['error']], [400, 'confirm'], "$action without phrase");

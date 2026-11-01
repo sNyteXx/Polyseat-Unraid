@@ -69,16 +69,21 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
      <dt>Address</dt><dd data-bind="play-url">-</dd>
      <dt>Seats</dt><dd data-bind="play-seats">-</dd>
      <dt>Session time left</dt><dd data-bind="play-remaining">-</dd>
+     <dt>Last session</dt><dd data-bind="play-note">-</dd>
     </dl>
     <div class="psu-actions" style="margin-top:12px">
      <button type="button" class="psu-btn primary" data-do="play-start" disabled>Start</button>
      <button type="button" class="psu-btn danger" data-do="play-stop" disabled>Stop</button>
+     <button type="button" class="psu-btn danger" data-do="play-recover" hidden disabled>Wiederherstellen</button>
      <a class="psu-btn primary" data-bind="play-open" target="_blank" rel="noopener noreferrer" hidden>Open Polyseat</a>
     </div>
     <p class="psu-muted">Seats, pairing and streaming are managed in Polyseat's own interface, which opens in a new tab.
      In an owner build, Start verifies and stages the runtime, seat image and daemon from the flash drive and starts a
      session that ends by itself after the configured length (Settings, Play); nothing starts by itself when Unraid comes back up.
-     Otherwise a session is started and stopped on the console with a signed approval and this card only shows its state.</p>
+     Otherwise a session is started and stopped on the console with a signed approval and this card only shows its state.
+     If a session ended abnormally (its process was killed, or the host ran out of memory) and left no clean stop,
+     Start stays refused and <strong>Wiederherstellen</strong> appears: it proves that nothing is running any more, restores the
+     host and records the clean stop, or refuses and says why without changing anything.</p>
    </div>
   </div>
 

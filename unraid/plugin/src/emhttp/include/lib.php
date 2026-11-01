@@ -132,7 +132,7 @@ function psu_origin_ok(array $server): bool
 const PSU_READ_COMMANDS = ['status', 'metrics', 'list', 'config-get', 'logs', 'diagnose', 'preflight', 'health', 'verify',
                            'polyseatd-status', 'play-status'];
 const PSU_WRITE_COMMANDS = ['start', 'stop', 'restart', 'activate', 'rollback', 'recover', 'config-set', 'config-reset',
-                            'play-start', 'play-stop'];
+                            'play-start', 'play-stop', 'play-recover'];
 
 /** Allowlist for every argument vector the WebUI may ever pass to polyseatctl. */
 function psu_ctl_args_ok(array $args): bool
@@ -153,7 +153,7 @@ function psu_ctl_args_ok(array $args): bool
         case 'metrics': case 'list': case 'config-get': case 'diagnose': case 'preflight': case 'health':
         case 'polyseatd-status': case 'play-status':
         case 'start': case 'stop': case 'restart': case 'config-reset':
-        case 'play-start': case 'play-stop': // no --approve and no --wait from the web: the controller writes its own approval
+        case 'play-start': case 'play-stop': case 'play-recover': // no --approve and no --wait from the web: the controller writes its own approval
             return $rest === [];
         case 'verify':
             return $rest === [] || (count($rest) === 1 && preg_match('/^[0-9a-f]{64}$/D', $rest[0]) === 1);
@@ -202,6 +202,41 @@ function psu_play_view(array $status): array
         'seats' => $seats,
         'expires_at' => is_int($status['expires_at'] ?? null) ? $status['expires_at'] : null,
     ];
+}
+
+/**
+ * What the Polyseat card may know of the controller's play state (polyseatd-status prints one JSON line with a "state" and
+ * exits 0 only while a session runs). A controller that predates the state prints nothing on exit 2: that is "idle".
+ *
+ * @return array{state:string,reason:?string,last_end:?array,status:?array}|null null = the controller could not be asked
+ */
+function psu_play_state(array $result): ?array
+{
+    $json = json_decode($result['out'], true);
+    $json = is_array($json) ? $json : null;
+    if ($result['code'] === 0) {
+        return $json === null ? null : ['state' => 'running', 'reason' => null, 'last_end' => null, 'status' => $json];
+    }
+    if ($result['code'] !== 2) {
+        return null;
+    }
+    $state = is_string($json['state'] ?? null) ? $json['state'] : 'idle';
+    if (!in_array($state, ['idle', 'busy', 'needs-recovery'], true)) {
+        return null;
+    }
+    $reason = null;
+    if ($state === 'needs-recovery') {
+        $r = $json['reason'] ?? null;
+        $reason = is_string($r) && preg_match('/^[a-z][a-z0-9-]{0,63}$/D', $r) === 1 ? $r : 'unknown';
+    }
+    $end = $json['last_end'] ?? null;
+    $lastEnd = null;
+    if (is_array($end) && is_string($end['reason'] ?? null) && preg_match('/^[a-z][a-z0-9-]{0,63}$/D', $end['reason']) === 1
+        && is_bool($end['clean'] ?? null) && is_int($end['ended_at'] ?? null)) {
+        $lastEnd = ['reason' => $end['reason'], 'clean' => $end['clean'], 'recovered' => ($end['recovered'] ?? false) === true,
+                    'ended_at' => $end['ended_at']];
+    }
+    return ['state' => $state, 'reason' => $reason, 'last_end' => $lastEnd, 'status' => null];
 }
 
 /** @return array{code:int,out:string,err:string,timeout:bool} */
@@ -284,6 +319,7 @@ function psu_confirm_phrase(string $action, string $subject = ''): string
         case 'recover': return 'RECOVER';
         case 'stop': return 'STOP';
         case 'play_stop': return 'STOP';
+        case 'play_recover': return 'WIEDERHERSTELLEN';
         case 'restart': return 'RESTART';
         case 'config_reset': return 'RESET';
     }
@@ -320,14 +356,15 @@ function psu_handle(array $server, array $get, array $post): array
             return $result['code'] === 0 ? $reply(200, ['ok' => true, 'data' => $result['out']]) : $reply(400, ['ok' => false, 'error' => 'params']);
         }
         if ($action === 'play') {
-            // Read-only. The controller refuses (exit 2) when no play session runs, which is an answer, not a failure.
-            $result = psu_run_ctl(['polyseatd-status'], 15);
-            $data = psu_json_from($result);
-            if ($data !== null) {
-                return $reply(200, ['ok' => true, 'data' => psu_play_view($data), 'now' => time()]);
+            // Read-only. The controller exits 2 when no play session runs and says why on stdout (idle, busy, or an
+            // abnormal end that needs recovery): an answer, not a failure. "data" is the running session, as before.
+            $state = psu_play_state(psu_run_ctl(['polyseatd-status'], 15));
+            if ($state === null) {
+                return $reply(502, ['ok' => false, 'error' => 'unavailable']);
             }
-            return $result['code'] === 2 ? $reply(200, ['ok' => true, 'data' => null, 'now' => time()])
-                                         : $reply(502, ['ok' => false, 'error' => 'unavailable']);
+            return $reply(200, ['ok' => true, 'data' => $state['status'] === null ? null : psu_play_view($state['status']),
+                                'state' => $state['state'], 'reason' => $state['reason'], 'last_end' => $state['last_end'],
+                                'now' => time()]);
         }
         if ($action === 'diag') {
             $result = psu_run_ctl(['diagnose'], 30);
@@ -372,6 +409,10 @@ function psu_handle(array $server, array $get, array $post): array
         case 'play_stop':
             $args = ['play-stop'];
             $phrase = psu_confirm_phrase('play_stop');
+            break;
+        case 'play_recover':
+            $args = ['play-recover'];
+            $phrase = psu_confirm_phrase('play_recover');
             break;
         case 'rollback':
             $args = ['rollback', '--approve'];
@@ -422,9 +463,15 @@ function psu_handle(array $server, array $get, array $post): array
         return $reply(423, ['ok' => false, 'error' => 'locked',
                             'detail' => 'This build needs a signed approval: start the session on the console.']);
     }
+    // Recovery writes Incus' clean-stop record and puts the host back: an admin's click is its approval in an owner build only.
+    if ($action === 'play_recover' && ($status['approval_mode'] ?? 'signed') !== 'owner') {
+        return $reply(423, ['ok' => false, 'error' => 'locked',
+                            'detail' => 'This build needs the operator on the console to recover a session.']);
+    }
 
-    // play-start verifies and stages hundreds of MB from the flash drive before it returns.
-    $slow = in_array($action, ['service', 'activate', 'rollback', 'recover', 'play_start'], true);
+    // play-start verifies and stages hundreds of MB from the flash drive before it returns; play-recover reads the process
+    // table, the mount table and every instance's backup.yaml first.
+    $slow = in_array($action, ['service', 'activate', 'rollback', 'recover', 'play_start', 'play_recover'], true);
     $result = psu_run_ctl($args, $slow ? 240 : 30);
     if ($result['timeout']) {
         return $reply(504, ['ok' => false, 'error' => 'timeout']);

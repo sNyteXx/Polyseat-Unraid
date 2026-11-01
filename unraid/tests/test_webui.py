@@ -156,10 +156,10 @@ class JsTests(unittest.TestCase):
     def test_confirmation_phrases_match_php(self):
         sha = "0123456789abcdef" * 4
         php = {"activate": f"ACTIVATE {sha[:8]}", "rollback": "ROLLBACK", "recover": "RECOVER", "stop": "STOP",
-               "restart": "RESTART", "config_reset": "RESET", "play_stop": "STOP"}
+               "restart": "RESTART", "config_reset": "RESET", "play_stop": "STOP", "play_recover": "WIEDERHERSTELLEN"}
         out = self.run_node(f"""
           const PSU = require({json.dumps(str(JS))});
-          const a = ['activate','rollback','recover','stop','restart','config_reset','play_stop'];
+          const a = ['activate','rollback','recover','stop','restart','config_reset','play_stop','play_recover'];
           console.log(JSON.stringify(Object.fromEntries(a.map(x => [x, PSU.confirmPhrase(x, {json.dumps(sha)})]))));""")
         self.assertEqual(out, php)
 
@@ -201,7 +201,7 @@ class JsTests(unittest.TestCase):
         self.assertEqual(out["url"], ["https://192.168.178.24:47800", "", "", "", "", "", ""])
         self.assertEqual(out["dur"], ["ended", "ended", "under 1 min", "10 min", "3 h 2 min", "-"])
         self.assertEqual(out["up"], {"text": "Play session running", "cls": "ok", "url": "https://192.168.178.24:47800",
-                                     "seats": "2: seat1 (Running), seat2 (Stopped)", "remaining": "3 h 2 min"})
+                                     "seats": "2: seat1 (Running), seat2 (Stopped)", "remaining": "3 h 2 min", "note": ""})
         self.assertEqual((out["down"]["cls"], out["down"]["url"]), ("crit", ""))     # nothing to open while it is down
         self.assertEqual((out["none"]["text"], out["none"]["cls"]), ("No play session", "muted"))
         self.assertEqual((out["bad"]["cls"], out["nothing"]["cls"]), ("warn", "warn"))
@@ -221,10 +221,80 @@ class JsTests(unittest.TestCase):
             PSU.playButtons(st('owner', 'JOURNAL_PENDING'), idle), PSU.playButtons(st('owner', 'CORRUPT'), idle),
             PSU.playButtons(st('owner', 'ACTIVE'), {{ok: false}}), PSU.playButtons(null, idle), PSU.playButtons(st('owner', 'ACTIVE'), undefined)
           ]));""")
-        on, off = {"start": True, "stop": False}, {"start": False, "stop": False}
-        self.assertEqual(out, [on, on, {"start": False, "stop": True}, off,        # owner: idle / no bundle / running / Incus up
-                               off, {"start": False, "stop": True},                 # signed: never starts, can stop
+        on = {"start": True, "stop": False, "recover": False}
+        off = {"start": False, "stop": False, "recover": False}
+        self.assertEqual(out, [on, on, {**off, "stop": True}, off,        # owner: idle / no bundle / running / Incus up
+                               off, {**off, "stop": True},                 # signed: never starts, can stop
                                off, off, off, off, off, off, off])
+
+    def test_the_recover_button_exists_only_for_an_abnormal_end_in_an_owner_build(self):
+        out = self.run_node(f"""
+          const PSU = require({json.dumps(str(JS))});
+          const st = (mode, state, gate) => ({{release_gate: gate || 'canary', approval_mode: mode, state: state}});
+          const r = (state, reason) => ({{ok: true, data: null, state: state, reason: reason || null}});
+          const b = (status, resp) => PSU.playButtons(status, resp);
+          console.log(JSON.stringify({{
+            needs: b(st('owner', 'ACTIVE'), r('needs-recovery', 'memory-floor-hard')),
+            needsAbsent: b(st('owner', 'ABSENT'), r('needs-recovery', 'no-clean-stop')),
+            needsWhateverTheService: b(st('owner', 'RUNNING'), r('needs-recovery', 'x')),
+            signed: b(st('signed', 'ACTIVE'), r('needs-recovery', 'x')),
+            noMode: b(st(undefined, 'ACTIVE'), r('needs-recovery', 'x')),
+            closed: b(st('owner', 'ACTIVE', 'closed'), r('needs-recovery', 'x')),
+            idle: b(st('owner', 'ACTIVE'), r('idle')), busy: b(st('owner', 'ACTIVE'), r('busy')),
+            running: b(st('owner', 'ACTIVE'), {{ok: true, state: 'running', data: {{alive: true}}}}),
+            unknownState: b(st('owner', 'ACTIVE'), r('bogus')),
+            failed: b(st('owner', 'ACTIVE'), {{ok: false}}), none: b(st('owner', 'ACTIVE'), undefined)
+          }}));""")
+        self.assertEqual(out["needs"], {"start": False, "stop": False, "recover": True})   # Start stays off while recovery is needed
+        self.assertTrue(out["needsAbsent"]["recover"] and out["needsWhateverTheService"]["recover"])
+        for key in ("signed", "noMode", "closed", "idle", "busy", "failed", "none"):
+            self.assertFalse(out[key]["recover"], key)
+        self.assertEqual(out["idle"]["start"], True)
+        self.assertEqual(out["busy"], {"start": False, "stop": False, "recover": False})
+        self.assertEqual(out["running"], {"start": False, "stop": True, "recover": False})
+        self.assertEqual(out["unknownState"]["recover"], False)
+
+    def test_the_card_says_why_in_the_owners_words(self):
+        out = self.run_node(f"""
+          const PSU = require({json.dumps(str(JS))});
+          const v = (resp) => PSU.playView(resp);
+          console.log(JSON.stringify({{
+            floor: v({{ok: true, data: null, state: 'needs-recovery', reason: 'memory-floor'}}),
+            hard: v({{ok: true, data: null, state: 'needs-recovery', reason: 'memory-floor-hard'}}),
+            odd: v({{ok: true, data: null, state: 'needs-recovery', reason: 'weird-thing'}}),
+            hostile: v({{ok: true, data: null, state: 'needs-recovery', reason: '<img src=x onerror=alert(1)>'}}),
+            none: v({{ok: true, data: null, state: 'needs-recovery', reason: null}}),
+            idleAfterFloor: v({{ok: true, data: null, state: 'idle', last_end: {{reason: 'memory-floor', clean: true, recovered: false}}}}),
+            idleAfterRecovery: v({{ok: true, data: null, state: 'idle', last_end: {{reason: 'memory-floor-hard', clean: false, recovered: true}}}}),
+            idle: v({{ok: true, data: null, state: 'idle', last_end: null}}),
+            busy: v({{ok: true, data: null, state: 'busy'}}),
+            old: v({{ok: true, data: null}}),
+            end: [PSU.endText('stop-requested'), PSU.endText('Bad Reason'), PSU.endText(null), PSU.endText('')]
+          }}));""")
+        self.assertEqual((out["floor"]["text"], out["floor"]["cls"]), ("Wiederherstellung nötig", "crit"))
+        self.assertEqual(out["floor"]["note"], "Session wegen Speichermangel beendet")
+        self.assertIn("Speichermangel", out["hard"]["note"])
+        self.assertEqual(out["odd"]["note"], "Session abnormal beendet (weird-thing)")
+        self.assertEqual(out["hostile"]["note"], "Session abnormal beendet")   # not a word: never echoed, and only ever set as text
+        self.assertEqual(out["none"]["note"], "Session abnormal beendet")
+        self.assertEqual(out["idleAfterFloor"]["note"], "Session wegen Speichermangel beendet")
+        self.assertTrue(out["idleAfterFloor"]["text"] == "No play session")
+        self.assertEqual(out["idleAfterRecovery"]["note"], "Session wegen Speichermangel beendet (sofort gestoppt, weniger als 2 GiB frei) (wiederhergestellt)")
+        self.assertEqual((out["idle"]["note"], out["old"]["note"]), ("", ""))
+        self.assertEqual((out["busy"]["text"], out["busy"]["cls"]), ("Controller busy", "warn"))
+        self.assertEqual(out["end"], ["Session gestoppt", "", "", ""])
+
+    def test_the_tool_page_and_script_wire_the_button(self):
+        page = (EMHTTP / "PolyseatTool.page").read_text()
+        button = re.search(r'<button[^>]*data-do="play-recover"[^>]*>(.*?)</button>', page).group(0)
+        self.assertIn(">Wiederherstellen<", button)
+        self.assertIn(" hidden", button)      # not there until the status says so
+        self.assertIn(" disabled", button)
+        text = JS.read_text()
+        self.assertIn("rec.hidden = !play.recover", text)
+        self.assertIn("runAction(scope, 'Wiederherstellen', 'play_recover'", text)
+        css = (EMHTTP / "css" / "psu.css").read_text()
+        self.assertIn(".psu button.psu-btn[hidden] { display: none; }", css)   # a class that sets display must not beat [hidden]
 
     def test_no_dynamic_html_sinks_or_external_requests(self):
         import re

@@ -17,6 +17,11 @@ case "$1" in
       up) echo '{"ok":true,"url":"https://192.168.178.24:47800","alive":true,"pid":"4242","listeners":["x"],"session":{"setup":false,"note":"<script>"},"seats":[{"name":"seat1","status":"Running","autostart":"false"},{"name":"Bad Name","status":"Running"},{"name":"seat2","status":"Stopped"}],"expires_at":2000000000}'; exit 0 ;;
       evil) echo '{"url":"javascript:alert(1)","alive":true,"seats":"x","expires_at":"soon"}'; exit 0 ;;
       broken) exit 1 ;;
+      idle) echo '{"state":"idle","last_end":{"reason":"memory-floor","clean":true,"recovered":false,"ended_at":1700000000,"evil":"<x>"}}'; echo "no polyseatd session is running" >&2; exit 2 ;;
+      busy) echo '{"state":"busy"}'; echo "no polyseatd session is running" >&2; exit 2 ;;
+      recover) echo '{"state":"needs-recovery","reason":"memory-floor-hard","last_end":null}'; echo "no polyseatd session is running" >&2; exit 2 ;;
+      recover-evil) echo '{"state":"needs-recovery","reason":"<script>alert(1)</script>","last_end":{"reason":"A B","clean":"yes","ended_at":1}}'; exit 2 ;;
+      bogus-state) echo '{"state":"exploding"}'; exit 2 ;;
       *) echo "no polyseatd session is running" >&2; exit 2 ;;
     esac ;;
 esac

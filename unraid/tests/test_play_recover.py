@@ -373,6 +373,20 @@ class RecoveryRefusalTests(Fixture):
                 self.refused_untouched(needle=f"the cgroup {self.root}/cg/{name} still exists")
                 (self.root / "cg" / name).rmdir()
 
+    def test_the_refusal_the_card_shows_names_the_first_failure_and_counts_the_rest(self):
+        self.proc(4242, "incusd")
+        (self.root / "cg").mkdir()
+        (self.root / "cg/polyseat-unraid-canary").mkdir()
+        res = self.recover()
+        last = [line for line in res.stderr.splitlines() if "refused" in line][-1]
+        self.assertIn("refused, nothing was changed: incusd is still running (pid 4242) (and 1 more, see the log)", last)
+        self.assertLess(len(last.split("] ", 1)[1]), 300, "the card shows at most 300 characters")
+        (self.root / "cg/polyseat-unraid-canary").rmdir()
+        shutil.rmtree(self.root / "proc/4242")
+        self.instance("seat2", BACKUP.format(name="seat2").replace('boot.autostart: "false"', 'boot.autostart: "true"', 1))
+        last = [line for line in self.recover().stderr.splitlines() if "refused" in line][-1]
+        self.assertTrue(last.endswith("(boot.autostart-is-true)"), last)  # one failure: no count
+
     def test_every_failed_check_is_reported_not_only_the_first(self):
         self.proc(4242, "incusd")
         (self.root / "cg").mkdir()
@@ -480,7 +494,7 @@ class HostRecordTests(Fixture):
     def test_a_console_that_cannot_be_put_back_is_refused_before_anything_changes(self):
         self.abnormal_end()
         (self.root / "var/lib/polyseat-unraid-daemon/bin/polyseat-console").unlink()
-        self.refused_untouched("the staged polyseat-console is gone or not the verified one", "Restore it by hand", "nothing was changed")
+        self.refused_untouched("the staged polyseat-console is gone or not the verified one", "restore it by hand", "nothing was changed")
         self.assertEqual(self.sysrq(), "0", "the host is left as it was, not half restored")
 
     def test_the_staged_daemon_must_verify_before_its_tool_runs_as_root(self):

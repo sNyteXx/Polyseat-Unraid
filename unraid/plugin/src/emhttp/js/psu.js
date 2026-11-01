@@ -51,6 +51,7 @@
       case 'recover': return 'RECOVER';
       case 'stop': return 'STOP';
       case 'play_stop': return 'STOP';
+      case 'play_recover': return 'WIEDERHERSTELLEN';
       case 'restart': return 'RESTART';
       case 'config_reset': return 'RESET';
       default: return '';
@@ -86,12 +87,47 @@
     return min >= 60 ? Math.floor(min / 60) + ' h ' + (min % 60) + ' min' : min + ' min';
   };
 
-  /* resp is the API reply of action=play: data is null while no play session runs. Mirrors psu_play_view() in lib.php. */
+  /* Why a play session ended the way it did, in the owner's words. The reasons are the controller's (watchdog and recovery). */
+  var END_TEXT = {
+    'memory-floor': 'Session wegen Speichermangel beendet',
+    'memory-floor-hard': 'Session wegen Speichermangel beendet (sofort gestoppt, weniger als 2 GiB frei)',
+    'memory-floor-timeout': 'Session wegen Speichermangel beendet (das saubere Beenden dauerte zu lange)',
+    'expired': 'Sitzungszeit abgelaufen',
+    'stop-requested': 'Session gestoppt',
+    'gpu-ownership-changed': 'GPU wurde einer VM zugeteilt, Session hart beendet',
+    'resource-policy-or-budget': 'Ressourcengrenze verletzt, Session hart beendet',
+    'host-not-restored': 'Die Host-Änderungen der Session wurden nicht zurückgesetzt',
+    'session-process-gone': 'Der Prozess der Session ist verschwunden',
+    'no-clean-stop': 'Kein sauberer Stopp aufgezeichnet'
+  };
+
+  PSU.endText = function (reason) {
+    if (typeof reason !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(reason)) { return ''; }
+    return END_TEXT[reason] || 'Session abnormal beendet (' + reason + ')';
+  };
+
+  /* resp is the API reply of action=play: data is null while no play session runs, state is idle | busy | running |
+     needs-recovery (an older controller sends no state). Mirrors psu_play_state() and psu_play_view() in lib.php. */
+  PSU.playState = function (resp) {
+    if (!resp || !resp.ok) { return 'unknown'; }
+    if (resp.state === 'idle' || resp.state === 'busy' || resp.state === 'running' || resp.state === 'needs-recovery') { return resp.state; }
+    return resp.data ? 'running' : 'idle';
+  };
+
   PSU.playView = function (resp) {
-    var none = { text: 'No play session', cls: 'muted', url: '', seats: '-', remaining: '-' };
-    if (!resp || !resp.ok) { return { text: 'Play status unavailable', cls: 'warn', url: '', seats: '-', remaining: '-' }; }
+    var none = { text: 'No play session', cls: 'muted', url: '', seats: '-', remaining: '-', note: '' };
+    if (!resp || !resp.ok) { return { text: 'Play status unavailable', cls: 'warn', url: '', seats: '-', remaining: '-', note: '' }; }
+    var state = PSU.playState(resp);
+    if (state === 'needs-recovery') {
+      return { text: 'Wiederherstellung nötig', cls: 'crit', url: '', seats: '-', remaining: '-', note: PSU.endText(resp.reason) || 'Session abnormal beendet' };
+    }
+    if (state === 'busy') { return { text: 'Controller busy', cls: 'warn', url: '', seats: '-', remaining: '-', note: '' }; }
     var d = resp.data;
-    if (!d) { return none; }
+    if (!d) {
+      var le = resp.last_end;
+      none.note = le && le.reason ? PSU.endText(le.reason) + (le.recovered ? ' (wiederhergestellt)' : '') : '';
+      return none;
+    }
     var seats = '-';
     if (Array.isArray(d.seats)) {
       seats = d.seats.length
@@ -100,20 +136,21 @@
     }
     var now = typeof resp.now === 'number' ? resp.now : Math.floor(Date.now() / 1000);
     var left = typeof d.expires_at === 'number' ? PSU.fmtDuration(d.expires_at - now) : '-';
-    if (!d.alive) { return { text: 'Polyseat is down', cls: 'crit', url: '', seats: seats, remaining: left }; }
-    return { text: 'Play session running', cls: 'ok', url: PSU.playUrl(d.url), seats: seats, remaining: left };
+    if (!d.alive) { return { text: 'Polyseat is down', cls: 'crit', url: '', seats: seats, remaining: left, note: '' }; }
+    return { text: 'Play session running', cls: 'ok', url: PSU.playUrl(d.url), seats: seats, remaining: left, note: '' };
   };
 
   /* Which Polyseat-card buttons may be pressed. Mirrors what the controller and lib.php enforce (they are the guards):
      a session starts only where the build lets an admin's click approve it, never while one runs or Incus is up. */
   PSU.playButtons = function (status, playResp) {
-    var off = { start: false, stop: false };
+    var off = { start: false, stop: false, recover: false };
     if (!status || status.release_gate === 'closed' || !playResp || !playResp.ok) { return off; }
-    var running = !!playResp.data;
+    var state = PSU.playState(playResp), owner = status.approval_mode === 'owner';
     return {
-      start: status.approval_mode === 'owner' && !running &&
-        (status.state === 'ACTIVE' || status.state === 'ABSENT'),
-      stop: running
+      start: owner && state === 'idle' && (status.state === 'ACTIVE' || status.state === 'ABSENT'),
+      stop: state === 'running',
+      /* only an abnormal end that the controller says needs recovery, and only where an admin's click may approve it */
+      recover: owner && state === 'needs-recovery'
     };
   };
 
@@ -232,6 +269,7 @@
     setText(scope, 'play-url', v.url || '-');
     setText(scope, 'play-seats', v.seats);
     setText(scope, 'play-remaining', v.remaining);
+    setText(scope, 'play-note', v.note || '-');
     var open = scope.querySelector('[data-bind="play-open"]');
     if (open) {
       if (v.url) { open.setAttribute('href', v.url); } else { open.removeAttribute('href'); }
@@ -401,6 +439,9 @@
         var b = scope.querySelector('[data-do="play-' + k + '"]');
         if (b) { b.disabled = !play[k]; }
       });
+      /* Wiederherstellen exists on the card only while an abnormal end needs it */
+      var rec = scope.querySelector('[data-do="play-recover"]');
+      if (rec) { rec.hidden = !play.recover; }
     }
 
     function loadLogs() {
@@ -449,6 +490,14 @@
     if (pp) { pp.addEventListener('click', function () {
       runAction(scope, 'Stop play session', 'play_stop', {}, '', { danger: true,
         body: 'End the play session: players are disconnected, seats stop in order, Incus records a clean stop and the host is restored.' });
+    }); }
+    var pr = scope.querySelector('[data-do="play-recover"]');
+    if (pr) { pr.addEventListener('click', function () {
+      runAction(scope, 'Wiederherstellen', 'play_recover', {}, '', { danger: true,
+        body: 'Die letzte Session wurde nicht sauber beendet. Zuerst wird geprüft, dass nichts mehr läuft (kein incusd, kein polyseatd, ' +
+          'kein Prozess in einem Seat oder in den Polyseat-cgroups, keine Mounts unter dem Datenverzeichnis) und dass keine Instanz ' +
+          'automatisch startet. Erst danach wird der Host aus den Aufzeichnungen zurückgesetzt (Konsole, SysRq, CPU-Energieprofil, udev) ' +
+          'und der saubere Stopp für Incus eingetragen. Schlägt eine Prüfung fehl, bleibt alles unverändert.' });
     }); }
     var rb = scope.querySelector('[data-do="rollback"]');
     if (rb) { rb.addEventListener('click', function () { runAction(scope, 'Roll back', 'rollback', {}, '', { danger: true, body: 'Return to the previous runtime bundle.' }); }); }
