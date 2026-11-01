@@ -65,10 +65,12 @@ CANARY_NAMESPACE_LINES = (
     "mount -n -t cgroup2 -o nosuid,nodev,noexec none /sys/fs/cgroup || private_mount_failure cgroup",
 )
 # Play only (operation 8): inside the daemon's own namespace, its root becomes a bind of itself so that LXC can
-# pivot_root on Unraid's initramfs (Tower run 26). Reviewed like the lines above: exact text, order, guards.
+# pivot_root on Unraid's initramfs (Tower runs 26, 27): "/" becomes a tmpfs of binds. Reviewed like the lines above: exact text, order, guards.
 CANARY_SWITCH_ROOT_LINES = (
     'if [[ -n $POLYSEAT_SWITCH_ROOT && -z ${POLYSEAT_SWITCHED:-} ]]; then',
-    'mount -n --rbind / "$POLYSEAT_SWITCH_ROOT" || exit 1',
+    'mount -n -t tmpfs -o mode=0755,size=1m polyseat-root "$POLYSEAT_SWITCH_ROOT" || exit 1',
+    'elif [[ -d $entry ]]; then mkdir "$POLYSEAT_SWITCH_ROOT/$name" && mount -n --rbind "$entry" "$POLYSEAT_SWITCH_ROOT/$name" || exit 1',
+    'elif [[ -e $entry ]]; then : > "$POLYSEAT_SWITCH_ROOT/$name" && mount -n --bind "$entry" "$POLYSEAT_SWITCH_ROOT/$name" || exit 1',
     'mount -n --make-rprivate "$POLYSEAT_SWITCH_ROOT" || exit 1',
     'cd "$POLYSEAT_SWITCH_ROOT" && mount -n --move . / || exit 1',
     'exec chroot . /usr/bin/env POLYSEAT_SWITCHED=1 /bin/bash -u -o pipefail -c "$BASH_EXECUTION_STRING" "$0" "$@"',

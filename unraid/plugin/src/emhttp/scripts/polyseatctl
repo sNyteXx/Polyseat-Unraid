@@ -1747,8 +1747,9 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   local slot_real=$1 parent_mnt_ns switch_root=""
   # Play (operation 8): Unraid's root is the initramfs, where pivot_root is refused. LXC then starts containers with a
   # chroot fallback that makes every mount private, so nothing Incus adds to a running seat (a disk, an input device)
-  # can reach it (Tower run 26). In this daemon's own mount namespace only, the root becomes a bind of itself first
-  # (switch_root's trick), and LXC can pivot again.
+  # can reach it (Tower run 26). LXC takes that fallback whenever "/" has the type rootfs, which a bind of the root
+  # keeps (run 27). In this daemon's own mount namespace only, the root becomes a small tmpfs holding binds of every
+  # top-level entry (switch_root's trick), so "/" is no longer rootfs, and LXC can pivot again.
   [[ $CANARY_OPERATION -eq 8 ]] && switch_root=$(lxc_mount_real "$LXC_STATE_PARENT/root")
   parent_mnt_ns=$(readlink /proc/self/ns/mnt) || return 1
   [[ $parent_mnt_ns =~ ^mnt:\[[0-9]+\]$ ]] || return 1
@@ -1771,7 +1772,14 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
     unshare --mount --cgroup --pid --fork --kill-child=KILL --propagation private \
     bash -u -o pipefail -c '
       if [[ -n $POLYSEAT_SWITCH_ROOT && -z ${POLYSEAT_SWITCHED:-} ]]; then
-        mount -n --rbind / "$POLYSEAT_SWITCH_ROOT" || exit 1
+        mount -n -t tmpfs -o mode=0755,size=1m polyseat-root "$POLYSEAT_SWITCH_ROOT" || exit 1
+        for entry in /* /.[!.]*; do
+          name=${entry#/}
+          if [[ -L $entry ]]; then ln -s "$(readlink "$entry")" "$POLYSEAT_SWITCH_ROOT/$name" || exit 1
+          elif [[ -d $entry ]]; then mkdir "$POLYSEAT_SWITCH_ROOT/$name" && mount -n --rbind "$entry" "$POLYSEAT_SWITCH_ROOT/$name" || exit 1
+          elif [[ -e $entry ]]; then : > "$POLYSEAT_SWITCH_ROOT/$name" && mount -n --bind "$entry" "$POLYSEAT_SWITCH_ROOT/$name" || exit 1
+          fi
+        done
         mount -n --make-rprivate "$POLYSEAT_SWITCH_ROOT" || exit 1
         cd "$POLYSEAT_SWITCH_ROOT" && mount -n --move . / || exit 1
         exec chroot . /usr/bin/env POLYSEAT_SWITCHED=1 /bin/bash -u -o pipefail -c "$BASH_EXECUTION_STRING" "$0" "$@"

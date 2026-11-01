@@ -377,8 +377,9 @@ class LxcRootfsMountTests(Base):
         parent = self.sb.root / "var/lib/polyseat-lxc"
         self.assertFalse(parent.exists())
         self.assertOk(self.sb.ctl("start"))
-        self.assertEqual(sorted(p.name for p in parent.iterdir()), ["rootfs"])
+        self.assertEqual(sorted(p.name for p in parent.iterdir()), ["root", "rootfs"])
         self.assertEqual(oct((parent / "rootfs").stat().st_mode & 0o777), "0o755")
+        self.assertEqual(oct((parent / "root").stat().st_mode & 0o777), "0o755")
         self.assertOk(self.sb.ctl("uninstall", "--approve"))
         self.assertFalse(parent.exists())
 
