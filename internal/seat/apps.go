@@ -337,6 +337,11 @@ func canonicalApps(data []byte) (string, bool) {
 const (
 	showLauncher = "/usr/local/bin/polyseat-launcher show"
 	hideLauncher = "/usr/local/bin/polyseat-launcher hide"
+
+	// showSteam brings Steam's window up in gamescope, as the launcher's Steam
+	// entry does, so that a game started from a silent Steam has a window to
+	// replace.
+	showSteam = "setsid /usr/local/bin/polyseat-steam show"
 )
 
 // Steam lives in gamescope on a workspace of its own, so picking one or the
@@ -482,14 +487,24 @@ func polyseatApps(launchers []installed, games []Game) ([]app, []string) {
 		// terminal while it ran unseen (Unraid seat, Once Human, 2026-11-01).
 		// A Lutris or flatpak title has no such parent and stays on the
 		// desktop, so its entry only hides the launcher.
+		//
+		// And Steam's own window is asked for alongside the game. A seat waits
+		// with Steam silent in gamescope, which presents nothing, so sway has
+		// no window on that workspace (see polyseat-steam). Started straight
+		// from that state, the game ran while gamescope never mapped a window
+		// for it, and the workspace stayed empty. polyseat-steam show is what
+		// the launcher's Steam entry runs; the game replaces Steam's window as
+		// soon as it opens one.
 		prepCmd := []prep{{Do: hideLauncher}}
+		detached := []string{"setsid " + launch}
 		if inGamescope {
 			prepCmd = []prep{{Do: toGamescope}, {Do: hideLauncher}}
+			detached = []string{showSteam, "setsid " + launch}
 		}
 
 		ours = append(ours, app{
 			Name:      name,
-			Detached:  []string{"setsid " + launch},
+			Detached:  detached,
 			PrepCmd:   prepCmd,
 			ImagePath: image,
 			Polyseat:  true,

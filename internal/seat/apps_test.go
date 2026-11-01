@@ -842,7 +842,15 @@ func TestASteamGameEntryGoesToGamescopeFirst(t *testing.T) {
 		t.Errorf("the Steam game's entry does not switch to gamescope first: %+v", steam.PrepCmd)
 	}
 
+	if len(steam.Detached) != 2 || steam.Detached[0] != showSteam || steam.Detached[1] != "setsid steam steam://rungameid/2139460" {
+		t.Errorf("the Steam game's entry does not bring Steam's window up with the game: %q", steam.Detached)
+	}
+
 	lutris := byName["Some Lutris Game"]
+	if len(lutris.Detached) != 1 {
+		t.Errorf("a Lutris title starts more than itself: %q", lutris.Detached)
+	}
+
 	for _, c := range lutris.PrepCmd {
 		if strings.Contains(c.Do, "polyseat-workspace") {
 			t.Errorf("a Lutris title was sent off the desktop: %+v", lutris.PrepCmd)
