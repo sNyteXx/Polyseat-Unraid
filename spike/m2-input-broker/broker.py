@@ -891,6 +891,55 @@ def detach(backend, seat, node, dev):
     backend.run(seat, ["rm", "-f", f"/run/udev/data/c{dev['major']}:{dev['minor']}"])
 
 
+def remove_orphans(backend, seat, tag):
+    """Clean up orphaned attachments from earlier runs. Sunshine instances that
+    crash or restart leave their devices behind on the host; the matching
+    attachments in the seat then point at nothing and keep showing up in sway
+    as dead input devices.
+
+    Returns how many were removed."""
+    stale = 0
+    remembered = load_state(seat)
+    for node in backend.attached_nodes(seat):
+        sysdev = f"{SYS_INPUT}/{node}"
+        name = read(f"{sysdev}/device/name")
+        if not name or (tag and f"({tag})" not in name):
+            print(f"  ~ {node:<10} orphaned, removing")
+            if node in remembered:
+                detach(backend, seat, node, remembered[node])
+            else:
+                # Without a memory only the attachment can go; sway then keeps
+                # the dead device in its list until its next restart.
+                backend.detach_node(seat, node)
+            stale += 1
+    return stale
+
+
+def cycle(backend, seat, tag, others, match, known):
+    """One pass: attach what appeared, detach what went, return what is attached."""
+    current = attribute(scan(match), seat, tag, others)
+    for node, dev in current.items():
+        # Before attaching, and on every pass afterwards. The mark
+        # seal() leaves makes a udev retrigger hide the device again,
+        # but only with a rule file that reads it; with an older one a
+        # retrigger puts the permissions back to what the name rules
+        # decided, and for a device no pattern matches that is open.
+        if seal(node):
+            print(f"  * {node:<10} taken off the host desktop ({dev['name']})")
+        if node not in known:
+            attach(backend, seat, dev)
+    gone = False
+    for node, dev in list(known.items()):
+        if node not in current:
+            detach(backend, seat, node, dev)
+            gone = True
+    if gone:
+        unmark_gone()
+    if current != known:
+        save_state(seat, current)
+    return current
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seat", required=True, help="name of the container")
@@ -948,24 +997,7 @@ def main():
               f"only the structural answer decides.")
     print("Ctrl-C stops it.\n")
 
-    # Clean up orphaned attachments from earlier runs. Sunshine instances that
-    # crash or restart leave their devices behind on the host; the matching
-    # attachments in the seat then point at nothing and keep showing up in sway
-    # as dead input devices.
-    stale = 0
-    remembered = load_state(args.seat)
-    for node in backend.attached_nodes(args.seat):
-        sysdev = f"{SYS_INPUT}/{node}"
-        name = read(f"{sysdev}/device/name")
-        if not name or (tag and f"({tag})" not in name):
-            print(f"  ~ {node:<10} orphaned, removing")
-            if node in remembered:
-                detach(backend, args.seat, node, remembered[node])
-            else:
-                # Without a memory only the attachment can go; sway then keeps
-                # the dead device in its list until its next restart.
-                backend.detach_node(args.seat, node)
-            stale += 1
+    stale = remove_orphans(backend, args.seat, tag)
     if stale:
         print(f"{stale} orphaned attachment(s) removed.\n")
 
@@ -974,27 +1006,8 @@ def main():
     known = {}
     try:
         while True:
-            current = attribute(scan(args.match), args.seat, tag, args.other_seat)
-            for node, dev in current.items():
-                # Before attaching, and on every pass afterwards. The mark
-                # seal() leaves makes a udev retrigger hide the device again,
-                # but only with a rule file that reads it; with an older one a
-                # retrigger puts the permissions back to what the name rules
-                # decided, and for a device no pattern matches that is open.
-                if seal(node):
-                    print(f"  * {node:<10} taken off the host desktop ({dev['name']})")
-                if node not in known:
-                    attach(backend, args.seat, dev)
-            gone = False
-            for node, dev in list(known.items()):
-                if node not in current:
-                    detach(backend, args.seat, node, dev)
-                    gone = True
-            if gone:
-                unmark_gone()
-            if current != known:
-                save_state(args.seat, current)
-            known = current
+            known = cycle(backend, args.seat, tag, args.other_seat, args.match,
+                          known)
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nStopped. Attached devices stay in place.")
