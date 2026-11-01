@@ -17,7 +17,9 @@ variable) keeps `"signed"`: nothing in this document applies to it, and the sign
 | Start | WebUI → Polyseat card → **Start** (or `polyseatctl play-start` as root). See the sequence below. It returns as soon as polyseatd-play is launched. |
 | During | The card shows address, seats and the time left. Polyseat's own page (opened from the card) manages seats and pairing. |
 | Stop | Card → **Stop** (typed confirmation `STOP`), or `polyseatctl play-stop`. Seats stop in upstream's order, Incus gets its clean-stop record, the host is restored. The session also ends by itself when `PLAY_SESSION_HOURS` are over. |
-| Array stop / shutdown | `event/stopping_svcs` asks a running session to stop and waits up to 5 minutes for it before Unraid unmounts the pools (`play-stop --wait 300`). Only then the old emergency `stop` runs. |
+| Array stop / shutdown | `event/stopping_svcs` asks a running session to stop and waits up to 5 minutes for it before Unraid unmounts the pools (`play-stop --wait 300`). Only then the emergency stop runs (`stop --emergency`). |
+| Legacy `stop` | The plain service `stop` (an old button, an older caller) is **not** the hard stop in an owner build while a session runs: it first does `play-stop --wait 300` (see *The legacy stop*), and falls back to the emergency path only when the session does not end in that time. A signed build, and `stop --emergency`, keep the emergency path alone. |
+| Plugin update | The `.plg`'s pre-flight refuses an install or upgrade while a play session runs or is starting/stopping (`play-status`: `running` or `busy`): *"Polyseat: stop the play session first (Tools → Polyseat)"*. A running workloads daemon does not block it (see [workloads.md](workloads.md), *Plugin upgrades*). |
 | Abnormal end | The card shows **Wiederherstellung nötig** with the reason and the **Wiederherstellen** button (typed confirmation `WIEDERHERSTELLEN`, or `polyseatctl play-recover` as root). Start stays refused until it has run. See *Recovery after an abnormal end* below. |
 | Between sessions | A finished session leaves `canary-session.json`, `canary-guardian.pid`, `canary-emergency-stop` and `play-evidence/` in RAM. `play-start` removes the records (and keeps the last evidence as `play-evidence.last`) because it holds the lock and nothing runs; it **refuses** over `play-host.json`/`play-console.json` (unrestored host), a watchdog `.reason`, a live cgroup or daemon, and a persistent workspace without a valid clean-stop record; each of these refusals points at **Wiederherstellen**. Incus' own gate stays: no clean-stop record, no start. |
 | Reboot | RAM is gone: the approval, the runtime slot, the staged seat image and daemon vanish with it, and the host is as Unraid boots it. `event/disks_mounted` runs `polyseatctl boot`, which in owner mode only verifies and logs. **Nothing starts.** A session that ended abnormally before the reboot still has no clean-stop record (it lives on the cache dataset); the card shows `no-clean-stop` and **Wiederherstellen** records it (the RAM records and cgroups are gone, so there is no host to restore). |
@@ -58,7 +60,7 @@ supervisor (an independent process in its own cgroup, once a second) reads `MemA
 | < 2 GiB (`CANARY_HOST_HARD_AVAILABLE_KB`) at any time | Hard stop at once: `cgroup.kill`, reason `memory-floor-hard`. 2 GiB is what the host needs to run the stop itself; below it there is no time to be gentle. |
 | 90 s (`CANARY_FLOOR_GRACE_SECONDS`) after the first sample below 4 GiB, session still not gone | Hard stop, reason `memory-floor-timeout`. The bound holds even if the memory has recovered meanwhile. A stop that needs longer than 90 s (two seats at 40 s + 90 s each, worst case) is cut here, which is what the single floor did before. |
 
-The thresholds are constants in the controller, not settings. Only play sessions behave like this; every other operation
+The thresholds are constants in the controller, not settings. The floor ends the **play session only**: the supervisor knows the play cgroup and its own session files and nothing else, so the permanent workloads daemon and its containers are never killed, asked to stop or touched by it (they do count in `MemAvailable`: a large dev box can make a session end early). Only play sessions behave like this; every other operation
 keeps the single hard floor and its `resource-policy-or-budget` reason. A hard stop leaves what a killed session leaves; the
 next section recovers from it.
 
@@ -104,6 +106,57 @@ card; the evidence directory stays for the next start to rotate. The command is 
 before the host step, and a later one finds the same checks. `play-start` points at this button in every refusal that comes
 from an abnormal end.
 
+## Next to the workloads daemon
+
+The workloads daemon ([workloads.md](workloads.md)) runs for as long as the array does, so every check that used to read "nothing of
+Polyseat is left" is about the **play instance** only: its `INCUS_DIR` (`/mnt/cache/polyseat/incus`), its LXC state
+(`/var/lib/polyseat-lxc`), its cgroups `polyseat-unraid-canary` and `-watchdog`, the payload groups below the first, its pid and
+status files in `$RUN_DIR`. The workloads daemon has the same shapes under other names (`polyseat-unraid-workloads`,
+`/mnt/cache/polyseat/workloads/...`, `/var/lib/polyseat-lxc-workloads`, `workloads-*` files) and is skipped by exact group, never by a
+substring.
+
+| Check | Scope |
+|---|---|
+| `play-recover`: no `incusd`/`polyseatd`, no process in a seat or plugin cgroup | A process whose cgroup is `polyseat-unraid-workloads` or below it is ignored (its `incusd`, `lxc.monitor.*`, `lxc.payload.*` of the owner's containers); a lookalike name is not. An `incusd` anywhere else, a seat payload anywhere else, and anything in the play groups still refuse |
+| `play-recover`: runtime-binary leak check | Shared `canary_leak_check`: skips the other daemon's group; an operator's `incus` client on the workloads workspace is skipped; any other process of the runtime outside both groups is a leak |
+| `play-recover`: cgroups, mounts | Only `polyseat-unraid-canary(-watchdog)` and mounts at or below `/mnt/cache/polyseat/incus` |
+| `play_recovery_reason`, `play_state` | Play's records only (`.reason`, `play-host.json`, `polyseatd-status.json`, `persist.json`/`clean-stop.json` of the play workspace); the workloads daemon holds its own lock, not the controller lock, so it never turns the state to `busy` (only a start after a reboot waits briefly for the controller lock to rebuild the runtime slot) |
+| `play-start`: refusals | Play's `incusd.pid`, `polyseatd.pid`, cgroups, `.reason`, records. One more, new: if the runtime bundle on the flash is not the active one and the workloads daemon runs (it executes from the active slot), the start is refused with *"stop the workloads daemon first"* before anything is written |
+| Memory floor | Play cgroup and play stop files only (see above) |
+| Seat priority (`renice -12`) and CPU pinning (`taskset`) | `play_payload_seat`: the cgroup must be `<play group>/.../lxc.payload.<seat>`; payload groups of the workloads daemon (same shape, other parent) are never touched, even for a container named like a seat |
+| `activate`, `rollback`, `recover`, `uninstall` | Refuse while the workloads daemon runs or is in transition (it executes from the runtime slot); unchanged |
+| The legacy `stop` / the emergency stop | Removes the play groups only; `workloads-*` is stopped by `workloads-stop` |
+
+The other way round, `workloads-recover` and the workloads leak check skip the play groups and the play `INCUS_DIR`.
+
+## The legacy stop
+
+`polyseatctl stop` is what the old service Stop button and any older caller invoke. It used to be the emergency stop: hard
+cgroup kill of the play groups, no Incus clean-stop record, and with it a *Wiederherstellung nötig* afterwards. In an owner build
+it now does, in this order: (1) if a session or controller operation holds the lock, `play-stop --wait 300` (the same graceful end
+as the Stop button: polyseatd, the seats in upstream's order, the Incus clean stop, the host restore); (2) only then the
+emergency path (`canary-emergency-stop`, `svc_stop full`), which after a graceful end finds nothing to kill. If the session does
+not end in 300 s the emergency path follows and the log says so. `stop --emergency` skips (1) and is what `event/stopping_svcs`
+uses after its own bounded `play-stop`. Signed builds are unchanged. The workloads daemon is not part of any of this.
+
+## The WebUI (Tools → Polyseat)
+
+The Overview tab starts with the **Polyseat card** (state `running`, `idle`, `busy` or `needs-recovery` from `play-status`, address,
+seats, time left, how the last session ended; **Start**, **Stop**, **Wiederherstellen** (only when recovery is needed) and
+**Open Polyseat** (only while it is up)), then the **Workloads** card, then the legacy Service, Resources and Isolation cards.
+
+- In an owner build the service Start/Restart/Stop buttons are hidden (a note says where the controls are) and the gate pill says
+  **Owner mode**. Other builds are unchanged.
+- **Start** and **Stop** go off as soon as the action is confirmed and read *Starting…* / *Stopping…* until the play state changes
+  (Start: leaves `idle`; Stop: leaves `running`), or the request is refused, or 3 / 6 minutes have passed.
+- Isolation says what an owner build does: polyseatd on the LAN at `:47800` only while a session runs, seats and workload
+  containers bridged onto `br0`, the NVIDIA RTX by device access under the GPU admission guard (a VM that owns it wins), data in
+  `/mnt/cache/polyseat` (seats, Incus), the game library (`LIBRARY_PATH`) and `/mnt/cache/polyseat/workloads`. The "Data directory: not
+  configured" meter belongs to the old bounded canary; where it has no value the page lists the real directories instead
+  (`metrics.persistent`: name, path, filesystem, size, free).
+- Settings → top: *Open Polyseat control (Tools → Polyseat)*. The Dashboard tile shows the play state (rendered by the server, then
+  polled) and the same link.
+
 ## Approval in each mode
 
 | | signed (default) | owner |
@@ -116,6 +169,7 @@ from an abnormal end.
 | `play-start` | refused | root only |
 | `play-stop`, `play-status` (aliases of `polyseatd-stop`, `polyseatd-status`) | token-free | token-free |
 | `play-recover` | refused | root only |
+| `stop` (legacy) | emergency stop | graceful `play-stop --wait 300` first, then the emergency path (`stop --emergency`: the emergency path alone) |
 
 ## Files on the flash (`/boot/config/plugins/polyseat-unraid/`)
 
@@ -149,7 +203,8 @@ outside a seat payload cgroup is touched; affinity ends with the process, so the
 Separate from play, started with `workloads-start` (WebUI Workloads card) or at array start if `WORKLOADS_ENABLED=yes`, stopped
 cleanly before the array stops, never a play session: see [workloads.md](workloads.md). A play session and the workloads daemon
 run side by side (own `INCUS_DIR`, cgroup, lock, LXC state); `activate`, `rollback`, `recover` and `uninstall` refuse while the
-workloads daemon runs, because the runtime slot is its binary.
+workloads daemon runs, because the runtime slot is its binary. Which play-side checks that scoped, and how, is the section *Next to
+the workloads daemon* above.
 
 ## Still needs an owner GO
 

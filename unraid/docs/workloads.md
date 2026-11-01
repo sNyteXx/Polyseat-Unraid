@@ -41,7 +41,7 @@ tmpfs `switch_root` that lets LXC pivot on Unraid's rootfs). Two daemons run sid
 Permissions" job already skips, and which `persist_mount_check` requires to be mounted with a quota and 8 GiB free. The
 quota is 150 GB today; the owner proposed 350 GB for this (not changed by this work).
 
-Coexistence is enforced where it could bite: the shared leak check skips the other daemon's cgroup (and an operator's `incus`
+Coexistence is enforced where it could bite (the play side's own list of scoped checks is in [plugin-owner-mode.md](plugin-owner-mode.md), *Next to the workloads daemon*): the shared leak check skips the other daemon's cgroup (and an operator's `incus`
 client); the shared teardown is pointed at the workloads group only (it used to remove a watchdog group by name); `activate`,
 `rollback`, `recover` and `uninstall` refuse while the workloads daemon runs or is in transition, because they replace or remove
 the runtime slot it executes from (they take the workloads lock for the rest of the operation).
@@ -76,7 +76,7 @@ because a permanent container starts again next time). Everything is logged to t
 
 **Clean-stop record and recovery**: a workspace is reopened only with the record of a clean stop of the same Incus version. The
 record is consumed *before* the daemon starts, so a crash or failed start from there on means the next start refuses ("recorded
-no clean stop"). `workloads-recover --approve` writes a record `{recovered: true}` after checking, as play's rules do, that nothing
+no clean stop"). `workloads-recover --approve` (which ignores a running play session: its group, its processes and its `INCUS_DIR` are not this daemon's) writes a record `{recovered: true}` after checking, as play's rules do, that nothing
 of the last run is left: no daemon, no cgroup, no process in the group or with `INCUS_DIR` set to the workspace, nothing mounted
 below it. It cannot run while the lock is held. After a power loss or crash there is no clean-stop record either, so the dev box stays down until
 the owner has looked and run `workloads-recover --approve`: that is the price of never opening a workspace the controller cannot vouch for. A supervisor that died with the daemon still up leaves the card at
@@ -85,6 +85,18 @@ dead daemon's containers, on purpose).
 
 **Boot**: `event/disks_mounted` runs `polyseatctl boot`; in owner mode it verifies the bundle and, only if `WORKLOADS_ENABLED=yes`,
 launches `workloads-start --boot` detached. A play session is never started there.
+
+## Plugin upgrades
+
+The `.plg`'s pre-flight refuses an upgrade while a **play session** runs (`play-status` `running` or `busy`), not while this daemon
+runs. That is safe because the supervisor does not execute the installed files: `workloads-start` (and the adopt run of
+`workloads-stop`) copy `polyseatctl` and `schema.json` to `$RUN_DIR/workloads-ctl/` (RAM, root 0700/0600, compared byte for byte, a
+symlinked directory refused) and start `/bin/bash` on the copy (`/run` is noexec); the copy is removed when the supervisor ends and by
+`uninstall`. `upgradepkg` replaces the files on the RAM root; the running bash keeps parsing its own copy, and the settings it
+validates come from its own `schema.json`. The new release is what the next start copies. A new `workloads-stop` talks to an older
+supervisor through the files named in the files table above (stop request, status, lock), so those names and meanings must stay
+stable across releases; a release that changes them must say "stop the workloads daemon first" in its notes. Containers are
+Incus's and are not restarted by an upgrade.
 
 ## Kernel modules
 
