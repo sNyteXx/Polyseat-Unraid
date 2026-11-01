@@ -104,6 +104,8 @@
 .psu a.psu-btn:focus-visible { outline: 2px solid var(--psu-accent); outline-offset: 2px; }
 .psu a.psu-btn.primary { background: var(--psu-accent); border-color: var(--psu-accent); color: #1d1b1b; font-weight: 600; }
 .psu a.psu-btn[hidden] { display: none; }
+.psu .psu-actions[hidden], .psu dl.psu-kv[hidden] { display: none; } /* a class that sets display must not beat [hidden] */
+.psu .psu-control-link { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 12px; }
 .psu .psu-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .psu input.psu-input, .psu select.psu-input {
   font: inherit; width: 100%; max-width: 100%; height: auto; margin: 0; padding: 7px 10px; border-radius: 6px;
@@ -160,6 +162,7 @@
 .psu-tile .psu-stat b { display: block; font-size: 1.15rem; color: var(--psu-muted); font-weight: 600; }
 .psu-tile .psu-stat span { font-size: 1.5rem; font-weight: 600; overflow-wrap: anywhere; }
 .psu-tile .psu-tile-meters { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+.psu-tile .psu-tile-play { margin: 2px 0 8px; font-size: 1.2rem; }
 .psu-tile .psu-tile-note { font-size: 1.15rem; color: var(--psu-muted); margin-top: 6px; }
 @container psutile (max-width: 460px) {
   .psu-tile .psu-tile-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -141,7 +141,7 @@ t('argument allowlist', function () use ($SHA) {
             ['config-set', 'PLAY_SESSION_HOURS=25'], ['config-set', 'PLAY_SEAT_CPUS=0-15;rm'], ['config-set', 'PLAY_CPU_PERFORMANCE=true'],
             ['workloads-start', '--boot'], ['workloads-start', '--approve'], ['workloads-stop', '--wait', '600'], ['workloads-stop', 'x'],
             ['workloads-status', 'x'], ['workloads-status', '--json'], ['workloads-run'], ['workloads-run', 'run'], ['workloads-run', 'adopt'],
-            ['workloads-recover'], ['workloads-recover', '--approve'], ['logs', 'workloads', '0'], ['logs', 'workload', '10'],
+            ['workloads-recover'], ['workloads-recover', '--approve'], ['stop', '--emergency'], ['stop', '--wait', '300'], ['logs', 'workloads', '0'], ['logs', 'workload', '10'],
             ['config-set', 'WORKLOADS_INSTANCES=Bad Name'], ['config-set', 'WORKLOADS_CPUS=0-'], ['config-set', 'WORKLOADS_MEMORY_MB=8G']];
     foreach ($good as $args) { ok(psu_ctl_args_ok($args), json_encode($args) . ' should pass'); }
     foreach ($bad as $args) { ok(!psu_ctl_args_ok($args), json_encode($args) . ' should fail'); }

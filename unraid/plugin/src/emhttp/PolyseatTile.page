@@ -13,6 +13,11 @@ $psu_texts = ['RUNNING' => 'Running', 'ACTIVE' => 'Installed, stopped', 'ABSENT'
 $psu_pill = ['RUNNING' => 'ok', 'ACTIVE' => 'muted', 'ABSENT' => 'muted'][$psu_state] ?? 'crit';
 $psu_gate = (string)($psu_status['release_gate'] ?? 'closed');
 $psu_text = $psu_texts[$psu_state] ?? 'Unavailable';
+// The play state, from the same read-only command the card uses (exit 2 with a JSON line while no session runs).
+$psu_play = psu_play_state(psu_run_ctl(['polyseatd-status'], 8));
+$psu_play_texts = ['running' => ['Play session running', 'ok'], 'idle' => ['No play session', 'muted'], 'busy' => ['Controller busy', 'warn'],
+                   'needs-recovery' => ['Wiederherstellung nötig', 'crit']];
+[$psu_play_text, $psu_play_pill] = $psu_play_texts[$psu_play['state'] ?? ''] ?? ['Play status unavailable', 'warn'];
 $psu_classes = psu_e(psu_root_classes($display ?? [], 'psu-tile'));
 $psu_css = psu_e(psu_asset('css/psu.css'));
 $psu_boot = psu_boot_script('psu-tile', 'initTile', ['gate' => $psu_gate]);
@@ -43,8 +48,9 @@ $mytiles['polyseat-unraid']['column2'] = <<<EOT
    <div class="psu-tile-status">
     <span class="psu-pill {$psu_pill}" data-bind="state-pill">{$psu_text}</span>
     <span class="psu-pill warn" data-bind="gate-pill">...</span>
-    <span class="psu-pill muted" data-bind="play-pill">...</span>
+    <span class="psu-pill {$psu_play_pill}" data-bind="play-pill">{$psu_play_text}</span>
    </div>
+   <div class="psu-tile-play"><a href="/Tools/PolyseatTool">Open Polyseat control (Tools &rarr; Polyseat)</a></div>
    <div class="psu-tile-stats">
     <div class="psu-stat"><b>Daemon</b><span data-bind="daemon">-</span></div>
     <div class="psu-stat"><b>Instances</b><span data-bind="instances">-</span></div>
@@ -55,7 +61,7 @@ $mytiles['polyseat-unraid']['column2'] = <<<EOT
     <div class="psu-meter"><div class="psu-meter-head"><span>CPU</span><span data-bind="cpu">-</span></div><div class="psu-bar"><i data-meter="cpu"></i></div></div>
     <div class="psu-meter"><div class="psu-meter-head"><span>RAM</span><span data-bind="mem">-</span></div><div class="psu-bar"><i data-meter="mem"></i></div></div>
    </div>
-   <div class="psu-tile-note">WIP - experimental, read-only dashboard</div>
+   <div class="psu-tile-note" data-bind="tile-note">WIP - experimental, read-only dashboard</div>
   </div>
   {$psu_boot}
  </td></tr>

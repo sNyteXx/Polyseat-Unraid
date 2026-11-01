@@ -335,6 +335,141 @@ class JsTests(unittest.TestCase):
         self.assertEqual(out["buttons"], [on_start, on_start, on_stop, on_stop, on_stop, off, on_stop])
         self.assertEqual(out["other"], [off] * 7)
 
+    def test_the_gate_pill_says_owner_mode_in_an_owner_build_only(self):
+        out = self.run_node(f"""
+          const PSU = require({json.dumps(str(JS))});
+          console.log(JSON.stringify({{
+            owner: PSU.gateView('canary', 'owner'), signed: PSU.gateView('canary', 'signed'), none: PSU.gateView('canary'),
+            closedOwner: PSU.gateView('closed', 'owner'), open: PSU.gateView('open', 'owner')
+          }}));""")
+        self.assertEqual(out["owner"], {"text": "Owner mode", "cls": "ok"})
+        self.assertEqual(out["signed"]["text"], "Locked (WIP)")     # nothing changes for any other build
+        self.assertEqual(out["none"]["text"], "Locked (WIP)")
+        self.assertEqual(out["closedOwner"]["text"], "Locked (WIP)")  # owner mode exists only with the canary gate
+        self.assertEqual(out["open"]["text"], "Changes enabled")
+
+    def test_the_isolation_texts_are_accurate_for_an_owner_build_and_absent_otherwise(self):
+        out = self.run_node(f"""
+          const PSU = require({json.dumps(str(JS))});
+          console.log(JSON.stringify({{
+            owner: PSU.isolationText({{release_gate: 'canary', approval_mode: 'owner'}}),
+            signed: PSU.isolationText({{release_gate: 'canary', approval_mode: 'signed'}}),
+            closed: PSU.isolationText({{release_gate: 'closed', approval_mode: 'owner'}}), none: PSU.isolationText(null)
+          }}));""")
+        self.assertIsNone(out["signed"] or out["closed"] or out["none"])
+        owner = out["owner"]
+        self.assertIn(":47800", owner["network"])
+        self.assertIn("while a session runs", owner["network"])
+        self.assertNotIn("No management listener", owner["network"])
+        self.assertIn("RTX", owner["gpu"])
+        self.assertIn("GPU admission guard", owner["gpu"])
+        self.assertNotIn("CPU-only", owner["gpu"])
+        for path in ("/mnt/cache/polyseat", "LIBRARY_PATH", "/mnt/cache/polyseat/workloads"):
+            self.assertIn(path, owner["data"])
+
+    def test_start_and_stop_are_off_and_say_so_until_the_state_changes(self):
+        out = self.run_node(f"""
+          const PSU = require({json.dumps(str(JS))});
+          const ok = (state, data) => ({{ok: true, state: state, data: data || null}});
+          const t0 = 1000000;
+          const p = {{start: t0}}, q = {{stop: t0}};
+          console.log(JSON.stringify({{
+            view: [PSU.playButtonView('start', true, {{}}), PSU.playButtonView('start', true, p), PSU.playButtonView('stop', true, q),
+                   PSU.playButtonView('stop', false, {{}}), PSU.playButtonView('start', true, q)],
+            // a start waits while the state is still idle, and is over once it is anything else (busy, running, needs-recovery)
+            start: [PSU.settlePending(p, ok('idle'), t0 + 5000), PSU.settlePending(p, ok('busy'), t0 + 5000),
+                    PSU.settlePending(p, ok('running', {{alive: true}}), t0 + 5000), PSU.settlePending(p, ok('needs-recovery'), t0 + 5000)],
+            // a stop waits while the session still runs
+            stop: [PSU.settlePending(q, ok('running', {{alive: true}}), t0 + 5000), PSU.settlePending(q, ok('busy'), t0 + 5000),
+                   PSU.settlePending(q, ok('idle'), t0 + 5000)],
+            // an unreadable answer is no change; nothing is kept for ever; a hostile or odd map is dropped
+            unknown: [PSU.settlePending(p, {{ok: false}}, t0 + 5000), PSU.settlePending(p, undefined, t0 + 5000)],
+            late: [PSU.settlePending(p, ok('idle'), t0 + 181000), PSU.settlePending(q, ok('running', {{alive: true}}), t0 + 361000),
+                   PSU.settlePending(q, ok('running', {{alive: true}}), t0 + 359000)],
+            odd: PSU.settlePending({{start: 'now', evil: t0, stop: null}}, ok('idle'), t0), none: PSU.settlePending(undefined, ok('idle'), t0)
+          }}));""")
+        self.assertEqual(out["view"], [{"disabled": False, "text": "Start"}, {"disabled": True, "text": "Starting\u2026"},
+                                       {"disabled": True, "text": "Stopping\u2026"}, {"disabled": True, "text": "Stop"},
+                                       {"disabled": False, "text": "Start"}])
+        self.assertEqual(out["start"], [{"start": 1000000}, {}, {}, {}])
+        self.assertEqual(out["stop"], [{"stop": 1000000}, {}, {}])
+        self.assertEqual(out["unknown"], [{"start": 1000000}, {"start": 1000000}])
+        self.assertEqual(out["late"], [{}, {}, {"stop": 1000000}])
+        self.assertEqual((out["odd"], out["none"]), ({}, {}))
+
+    def test_the_buttons_are_wired_to_the_pending_state(self):
+        text = JS.read_text()
+        self.assertIn("pending: 'start'", text)
+        self.assertIn("pending: 'stop'", text)
+        self.assertIn("if (pending.start) { return; }", text)
+        self.assertIn("if (pending.stop) { return; }", text)
+        # off before the request is sent, and free again on a refusal
+        run = text[text.index("function runAction"):text.index("function renderBundles")]
+        self.assertLess(run.index("detail: { key: opts.pending, on: true }"), run.index("PSU.post(action, f)"))
+        self.assertIn("detail: { key: opts.pending, on: false }", run)
+        self.assertIn("pending = PSU.settlePending(pending, lastPlay, Date.now())", text)
+
+    def test_persistent_directories_are_shown_from_well_formed_rows_only(self):
+        out = self.run_node(f"""
+          const PSU = require({json.dumps(str(JS))});
+          console.log(JSON.stringify({{
+            rows: PSU.persistentRows([{{name: 'Seats and Incus', path: '/mnt/cache/polyseat/incus', fstype: 'zfs', total_kb: 1048576, free_kb: 524288}},
+              {{name: 'x', path: 1}}, null, 'junk', {{name: 'Games', path: '/mnt/download/polyseat-games', fstype: 'zfs', total_kb: 'a', free_kb: 1}}]),
+            none: [PSU.persistentRows(undefined), PSU.persistentRows({{}}), PSU.persistentRows([])]
+          }}));""")
+        self.assertEqual(out["rows"], [{"name": "Seats and Incus", "path": "/mnt/cache/polyseat/incus", "fstype": "zfs",
+                                        "total": "1.0 GB", "free": "512 MB"}])
+        self.assertEqual(out["none"], [[], [], []])
+
+    def test_the_overview_leads_with_the_polyseat_card_and_has_no_legacy_buttons_in_an_owner_build(self):
+        page = (EMHTTP / "PolyseatTool.page").read_text()
+        overview = page[page.index('id="psu-p-overview"'):page.index('id="psu-p-sessions"')]
+        order = [overview.index(m) for m in ('data-bind="play-card"', 'data-bind="workloads-card"', "<h3>Service</h3>", "<h3>Resources</h3>",
+                                              "<h3>Isolation</h3>")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(overview.index('<div class="psu-card"'), overview.index('<div class="psu-card" data-bind="play-card"'))  # the first card
+        card = overview[order[0]:order[1]]
+        for needle in ('data-bind="play-pill"', 'data-bind="play-url"', 'data-bind="play-seats"', 'data-bind="play-remaining"',
+                       'data-do="play-start"', 'data-do="play-stop"', 'data-do="play-recover"', 'data-bind="play-open"', "Open Polyseat"):
+            self.assertIn(needle, card)
+        # one set of buttons: the second tab only shows
+        sessions = page[page.index('id="psu-p-sessions"'):page.index('id="psu-p-runtime"')]
+        self.assertNotIn("data-do=", sessions)
+        # the legacy service buttons sit in a container that an owner build hides
+        service = overview[order[2]:order[3]]
+        self.assertRegex(service, r'data-bind="service-actions"[^>]*>\s*<button[^>]*data-do="start"')
+        text = JS.read_text()
+        self.assertIn("svc.hidden = owner", text)
+        self.assertIn(".psu .psu-actions[hidden]", (EMHTTP / "css" / "psu.css").read_text())
+
+    def test_settings_and_tile_point_to_the_control_page_and_the_tile_shows_the_play_state(self):
+        settings = (EMHTTP / "PolyseatSettings.page").read_text()
+        link = re.search(r'<a[^>]*href="/Tools/PolyseatTool"[^>]*>(.*?)</a>', settings, re.S)
+        self.assertIsNotNone(link)
+        self.assertIn("Open Polyseat control (Tools", link.group(1))
+        tile = (EMHTTP / "PolyseatTile.page").read_text()
+        self.assertIn('href="/Tools/PolyseatTool">Open Polyseat control', tile)
+        self.assertIn("psu_play_state(psu_run_ctl(['polyseatd-status'], 8))", tile)
+        self.assertRegex(tile, r'data-bind="play-pill">\{\$psu_play_text\}')     # rendered server-side, then polled
+        self.assertIn("Wiederherstellung nötig", tile)
+
+    def test_metrics_list_the_persistent_directories_that_exist(self):
+        sb = Sandbox()
+        self.addCleanup(sb.cleanup)
+        for path in ("mnt/cache/polyseat/incus", "mnt/cache/polyseat/workloads", "mnt/download/polyseat-games"):
+            (sb.root / path).mkdir(parents=True)
+        (sb.root / "mnt/cache/polyseat/workloads").chmod(0o755)
+        metrics = json.loads(sb.ctl("metrics").out)
+        rows = {r["name"]: r for r in metrics["persistent"]}
+        self.assertEqual(sorted(rows), ["Games", "Seats and Incus", "Workloads"])
+        self.assertEqual(rows["Seats and Incus"]["path"], "/mnt/cache/polyseat/incus")
+        self.assertEqual(rows["Workloads"]["path"], "/mnt/cache/polyseat/workloads")
+        self.assertEqual(rows["Games"]["path"], "/mnt/download/polyseat-games")
+        for row in rows.values():
+            self.assertTrue(isinstance(row["total_kb"], int) and isinstance(row["free_kb"], int) and row["fstype"])
+        shutil.rmtree(sb.root / "mnt/cache/polyseat/workloads")
+        self.assertEqual(sorted(r["name"] for r in json.loads(sb.ctl("metrics").out)["persistent"]), ["Games", "Seats and Incus"])
+
     def test_no_dynamic_html_sinks_or_external_requests(self):
         import re
         text = re.sub(r"/\*.*?\*/", "", JS.read_text(), flags=re.S)

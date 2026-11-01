@@ -5376,6 +5376,23 @@ cmd_list() { # read-only: staged bundles on flash
   printf '%s\n' "$out"
 }
 
+# Where an owner build keeps what outlives a session, with the room left there: the Incus state of the seats, the game library
+# and the workloads workspace. A directory that is not there (yet) is left out; the card shows what exists.
+persistent_dirs_json() { # read-only: [{name, path, fstype, total_kb, free_kb}]
+  local out='[]' entry name path library total free
+  library=$(cfg_get LIBRARY_PATH "$POLYSEATD_LIBRARY_MOUNT")
+  schema_validate LIBRARY_PATH "$library" || library=$POLYSEATD_LIBRARY_MOUNT
+  for entry in "Seats and Incus|$PERSIST_DATA_DIR" "Games|$library" "Workloads|$WL_DATA_DIR"; do
+    name=${entry%%|*} path=${entry#*|}
+    [[ -d $ROOT$path && ! -L $ROOT$path ]] || continue
+    read -r total free < <(df -Pk -- "$ROOT$path" 2>/dev/null | awk 'NR == 2 && $2 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {print $2, $4}') || continue
+    [[ ${total:-} =~ ^[0-9]+$ && ${free:-} =~ ^[0-9]+$ ]] || continue
+    out=$(jq -c --arg name "$name" --arg path "$path" --arg fs "$(fs_type "$ROOT$path")" --argjson total "$total" --argjson free "$free" \
+      '. + [{name: $name, path: $path, fstype: $fs, total_kb: $total, free_kb: $free}]' <<< "$out") || continue
+  done
+  printf '%s\n' "$out"
+}
+
 cmd_metrics() { # read-only
   local l1 l5 l15 cpus mt ma pid rss=null cpu=null data=null inc=null clk ticks fs
   read -r l1 l5 l15 _ < /proc/loadavg
@@ -5401,11 +5418,12 @@ cmd_metrics() { # read-only
   fi
   jq -n --arg l1 "$l1" --arg l5 "$l5" --arg l15 "$l15" --argjson cpus "$cpus" \
     --argjson mt "${mt:-0}" --argjson ma "${ma:-0}" --arg pid "$pid" --argjson rss "${rss:-null}" \
-    --argjson cpu "${cpu:-null}" --argjson data "${data:-null}" --argjson inc "${inc:-null}" '
+    --argjson cpu "${cpu:-null}" --argjson data "${data:-null}" --argjson inc "${inc:-null}" \
+    --argjson persistent "$(persistent_dirs_json)" '
     {load:[($l1|tonumber),($l5|tonumber),($l15|tonumber)], cpus:$cpus,
      memory:{total_kb:$mt, available_kb:$ma},
      daemon:{running:($pid!=""), pid:(if $pid=="" then null else ($pid|tonumber) end), rss_kb:$rss, cpu_seconds:$cpu},
-     data_dir:$data, incus:$inc}'
+     data_dir:$data, incus:$inc, persistent:$persistent}'
 }
 
 cmd_logs() { # [controller|incusd|workloads] [lines]

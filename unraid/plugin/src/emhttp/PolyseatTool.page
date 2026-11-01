@@ -27,28 +27,25 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
 
   <div role="tabpanel" id="psu-p-overview" class="psu-panel">
    <div class="psu-grid">
-    <div class="psu-card"><h3>Service</h3>
+    <div class="psu-card" data-bind="play-card"><h3>Polyseat</h3>
      <div class="psu-actions" style="margin-bottom:10px">
-      <span class="psu-pill muted" data-bind="state-pill">...</span>
-      <span class="psu-pill warn" data-bind="gate-pill">...</span>
       <span class="psu-pill muted" data-bind="play-pill">...</span>
      </div>
      <dl class="psu-kv">
-      <dt>Bundle</dt><dd data-bind="version">-</dd>
-      <dt>Daemon</dt><dd data-bind="daemon">-</dd>
-      <dt>Daemon memory</dt><dd data-bind="daemon-mem">-</dd>
-      <dt>Instances</dt><dd><span data-bind="instances">-</span> <span class="psu-muted">running / total</span></dd>
+      <dt>Address</dt><dd data-bind="play-url">-</dd>
+      <dt>Seats</dt><dd data-bind="play-seats">-</dd>
+      <dt>Session time left</dt><dd data-bind="play-remaining">-</dd>
+      <dt>Last session</dt><dd data-bind="play-note">-</dd>
      </dl>
      <div class="psu-actions" style="margin-top:12px">
-      <button type="button" class="psu-btn primary" data-do="start" disabled>Start</button>
-      <button type="button" class="psu-btn" data-do="restart" disabled>Restart</button>
-      <button type="button" class="psu-btn danger" data-do="stop" disabled>Stop</button>
+      <button type="button" class="psu-btn primary" data-do="play-start" disabled>Start</button>
+      <button type="button" class="psu-btn danger" data-do="play-stop" disabled>Stop</button>
+      <button type="button" class="psu-btn danger" data-do="play-recover" hidden disabled>Wiederherstellen</button>
+      <a class="psu-btn primary" data-bind="play-open" target="_blank" rel="noopener noreferrer" hidden>Open Polyseat</a>
      </div>
-    </div>
-    <div class="psu-card"><h3>Resources</h3>
-     <div class="psu-meter"><div class="psu-meter-head"><span>CPU load</span><span data-bind="cpu">-</span></div><div class="psu-bar"><i data-meter="cpu"></i></div></div>
-     <div class="psu-meter"><div class="psu-meter-head"><span>Memory</span><span data-bind="mem">-</span></div><div class="psu-bar"><i data-meter="mem"></i></div></div>
-     <div class="psu-meter"><div class="psu-meter-head"><span>Data directory</span><span data-bind="disk">-</span></div><div class="psu-bar"><i data-meter="disk"></i></div></div>
+     <p class="psu-muted">Start verifies and stages the runtime, seat image and daemon from the flash drive and starts a session
+      that ends by itself after the configured length (Settings, Play). Seats, pairing and streaming are managed in Polyseat's own
+      interface, which opens in a new tab.</p>
     </div>
     <div class="psu-card" data-bind="workloads-card"><h3>Workloads</h3>
      <div class="psu-actions" style="margin-bottom:10px">
@@ -67,11 +64,36 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
       enabled in Settings, Workloads, and stops cleanly (every container, up to 2 minutes each) before the array stops.
       Containers are created with the incus client, see docs/workloads.md.</p>
     </div>
+    <div class="psu-card"><h3>Service</h3>
+     <div class="psu-actions" style="margin-bottom:10px">
+      <span class="psu-pill muted" data-bind="state-pill">...</span>
+      <span class="psu-pill warn" data-bind="gate-pill">...</span>
+     </div>
+     <dl class="psu-kv">
+      <dt>Bundle</dt><dd data-bind="version">-</dd>
+      <dt>Daemon</dt><dd data-bind="daemon">-</dd>
+      <dt>Daemon memory</dt><dd data-bind="daemon-mem">-</dd>
+      <dt>Instances</dt><dd><span data-bind="instances">-</span> <span class="psu-muted">running / total</span></dd>
+     </dl>
+     <div class="psu-actions" data-bind="service-actions" style="margin-top:12px">
+      <button type="button" class="psu-btn primary" data-do="start" disabled>Start</button>
+      <button type="button" class="psu-btn" data-do="restart" disabled>Restart</button>
+      <button type="button" class="psu-btn danger" data-do="stop" disabled>Stop</button>
+     </div>
+     <p class="psu-muted" data-bind="service-note" hidden>Owner mode: sessions are started and stopped on the Polyseat card; the
+      service is not started on its own. Dev containers are started and stopped on the Workloads card.</p>
+    </div>
+    <div class="psu-card"><h3>Resources</h3>
+     <div class="psu-meter"><div class="psu-meter-head"><span>CPU load</span><span data-bind="cpu">-</span></div><div class="psu-bar"><i data-meter="cpu"></i></div></div>
+     <div class="psu-meter"><div class="psu-meter-head"><span>Memory</span><span data-bind="mem">-</span></div><div class="psu-bar"><i data-meter="mem"></i></div></div>
+     <div class="psu-meter" data-bind="disk-meter"><div class="psu-meter-head"><span>Data directory</span><span data-bind="disk">-</span></div><div class="psu-bar"><i data-meter="disk"></i></div></div>
+     <dl class="psu-kv" data-bind="persistent" hidden></dl>
+    </div>
     <div class="psu-card"><h3>Isolation</h3>
      <dl class="psu-kv">
-      <dt>Network</dt><dd>No management listener, no bridge or firewall changes</dd>
-      <dt>GPU</dt><dd>Not used in this build (CPU-only)</dd>
-      <dt>Your data</dt><dd>Seats, games and Incus state stay in the data directory and are never removed by the plugin</dd>
+      <dt>Network</dt><dd data-bind="iso-network">No management listener, no bridge or firewall changes</dd>
+      <dt>GPU</dt><dd data-bind="iso-gpu">Not used in this build (CPU-only)</dd>
+      <dt>Your data</dt><dd data-bind="iso-data">Seats, games and Incus state stay in the data directory and are never removed by the plugin</dd>
      </dl>
     </div>
    </div>
@@ -89,18 +111,16 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
      <dt>Last session</dt><dd data-bind="play-note">-</dd>
     </dl>
     <div class="psu-actions" style="margin-top:12px">
-     <button type="button" class="psu-btn primary" data-do="play-start" disabled>Start</button>
-     <button type="button" class="psu-btn danger" data-do="play-stop" disabled>Stop</button>
-     <button type="button" class="psu-btn danger" data-do="play-recover" hidden disabled>Wiederherstellen</button>
      <a class="psu-btn primary" data-bind="play-open" target="_blank" rel="noopener noreferrer" hidden>Open Polyseat</a>
     </div>
-    <p class="psu-muted">Seats, pairing and streaming are managed in Polyseat's own interface, which opens in a new tab.
-     In an owner build, Start verifies and stages the runtime, seat image and daemon from the flash drive and starts a
-     session that ends by itself after the configured length (Settings, Play); nothing starts by itself when Unraid comes back up.
-     Otherwise a session is started and stopped on the console with a signed approval and this card only shows its state.
+    <p class="psu-muted">Start, Stop and Wiederherstellen are on the Polyseat card of the Overview tab. Seats, pairing and
+     streaming are managed in Polyseat's own interface, which opens in a new tab.
+     Otherwise (a build without owner mode) a session is started and stopped on the console with a signed approval and this
+     page only shows its state.
      If a session ended abnormally (its process was killed, or the host ran out of memory) and left no clean stop,
      Start stays refused and <strong>Wiederherstellen</strong> appears: it proves that nothing is running any more, restores the
-     host and records the clean stop, or refuses and says why without changing anything.</p>
+     host and records the clean stop, or refuses and says why without changing anything. The workloads daemon keeps running
+     meanwhile; neither action touches it.</p>
    </div>
   </div>
 

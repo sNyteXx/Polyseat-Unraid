@@ -37,10 +37,25 @@
     }
   };
 
-  PSU.gateView = function (gate) {
+  PSU.gateView = function (gate, mode) {
     if (gate === 'open') { return { text: 'Changes enabled', cls: 'ok' }; }
     if (gate === 'test-host') { return { text: 'Test build', cls: 'warn' }; }
+    /* an owner build is a canary build whose approval is the admin's click: not "locked", and said so */
+    if (gate === 'canary' && mode === 'owner') { return { text: 'Owner mode', cls: 'ok' }; }
     return { text: 'Locked (WIP)', cls: 'warn' };
+  };
+
+  /* What this build isolates, in an owner build (the page ships the older texts for every other build). */
+  PSU.isolationText = function (status) {
+    if (!status || status.release_gate !== 'canary' || status.approval_mode !== 'owner') { return null; }
+    return {
+      network: 'polyseatd is reachable on the LAN at :47800 while a session runs (nothing listens otherwise); seats and workload ' +
+        'containers are bridged onto br0; no firewall or routing changes',
+      gpu: 'Seats use the host\'s NVIDIA RTX by device access, admitted by the GPU admission guard: a VM that owns the GPU always ' +
+        'wins and a session that cannot get it does not start',
+      data: 'Seats and Incus: /mnt/cache/polyseat; games: the library dataset (LIBRARY_PATH); workloads: /mnt/cache/polyseat/workloads. ' +
+        'The plugin never removes any of it'
+    };
   };
 
   /* Mirrors psu_confirm_phrase() in include/lib.php. */
@@ -155,6 +170,30 @@
     };
   };
 
+  /* A Start or Stop that was just confirmed stays disabled, and says what it is doing, until the play state changes: a second
+     click on a slow Start would be a second start. pending maps 'start' | 'stop' to the time of the click. */
+  var PENDING_TEXT = { start: 'Starting\u2026', stop: 'Stopping\u2026' };
+  var PENDING_LABEL = { start: 'Start', stop: 'Stop' };
+  var PENDING_MAX_MS = { start: 180000, stop: 360000 }; /* a start that fails between two polls must not lock the button for good */
+
+  PSU.settlePending = function (pending, playResp, now) {
+    var out = {};
+    var known = !!playResp && !!playResp.ok;
+    var state = PSU.playState(playResp);
+    Object.keys(pending || {}).forEach(function (k) {
+      var since = pending[k];
+      if (!PENDING_TEXT[k] || typeof since !== 'number' || now - since > PENDING_MAX_MS[k]) { return; }
+      if (known && ((k === 'start' && state !== 'idle') || (k === 'stop' && state !== 'running'))) { return; }
+      out[k] = since;
+    });
+    return out;
+  };
+
+  PSU.playButtonView = function (key, allowed, pending) {
+    if (pending && typeof pending[key] === 'number') { return { disabled: true, text: PENDING_TEXT[key] }; }
+    return { disabled: !allowed, text: PENDING_LABEL[key] };
+  };
+
   /* resp is the API reply of action=workloads: data is null in a build without the workloads daemon. Mirrors
      psu_workloads_view() in lib.php. */
   PSU.workloadsView = function (resp) {
@@ -180,6 +219,17 @@
     var state = resp.data.state;
     return { start: state === 'stopped' || state === 'failed',
              stop: state === 'starting' || state === 'running' || state === 'degraded' || state === 'orphaned' };
+  };
+
+  /* metrics.persistent: where the plugin keeps data that outlives a session, with the room left there. Only well-formed rows. */
+  PSU.persistentRows = function (rows) {
+    if (!Array.isArray(rows)) { return []; }
+    return rows.filter(function (r) {
+      return r && typeof r.name === 'string' && typeof r.path === 'string' && typeof r.fstype === 'string' &&
+        typeof r.total_kb === 'number' && typeof r.free_kb === 'number';
+    }).slice(0, 8).map(function (r) {
+      return { name: r.name, path: r.path, fstype: r.fstype, total: PSU.fmtKb(r.total_kb), free: PSU.fmtKb(r.free_kb) };
+    });
   };
 
   PSU.errorText = function (resp) {
@@ -283,11 +333,15 @@
   /* ------------------------------------------------------------------- tile ---- */
 
   function paintStatus(scope, status) {
-    var sv = PSU.stateView(status), gv = PSU.gateView(status && status.release_gate);
+    var sv = PSU.stateView(status), gv = PSU.gateView(status && status.release_gate, status && status.approval_mode);
     setPill(scope.querySelector('[data-bind="state-pill"]'), sv);
     setPill(scope.querySelector('[data-bind="gate-pill"]'), gv);
     setText(scope, 'version', (status && status.version) || '-');
     setText(scope, 'state-text', sv.text);
+    var iso = PSU.isolationText(status);
+    if (iso) { setText(scope, 'iso-network', iso.network); setText(scope, 'iso-gpu', iso.gpu); setText(scope, 'iso-data', iso.data); }
+    var tileNote = scope.querySelector('[data-bind="tile-note"]');
+    if (tileNote && iso) { tileNote.textContent = 'Owner mode: sessions are started and stopped on the control page'; }
   }
 
   function paintPlay(scope, resp) {
@@ -298,10 +352,11 @@
     setText(scope, 'play-seats', v.seats);
     setText(scope, 'play-remaining', v.remaining);
     setText(scope, 'play-note', v.note || '-');
-    var open = scope.querySelector('[data-bind="play-open"]');
-    if (open) {
-      if (v.url) { open.setAttribute('href', v.url); } else { open.removeAttribute('href'); }
-      open.hidden = !v.url;
+    setText(scope, 'play-text', v.text);
+    var opens = scope.querySelectorAll('[data-bind="play-open"]');
+    for (var j = 0; j < opens.length; j++) {
+      if (v.url) { opens[j].setAttribute('href', v.url); } else { opens[j].removeAttribute('href'); }
+      opens[j].hidden = !v.url;
     }
   }
 
@@ -342,6 +397,19 @@
       setMeter(scope, 'disk', PSU.pct(used, m.data_dir.total_kb), PSU.fmtKb(m.data_dir.free_kb) + ' free (' + m.data_dir.fstype + ')');
     } else {
       setMeter(scope, 'disk', 0, 'not configured');
+    }
+    /* The directories that really hold the data of an owner build (the DATA_DIR setting above is the old, bounded canary's). */
+    var persistent = PSU.persistentRows(m.persistent);
+    var meter = scope.querySelector('[data-bind="disk-meter"]');
+    if (meter) { meter.hidden = !m.data_dir && persistent.length > 0; }
+    var list = scope.querySelector('[data-bind="persistent"]');
+    if (list) {
+      list.textContent = '';
+      persistent.forEach(function (row) {
+        list.appendChild(h('dt', { text: row.name }));
+        list.appendChild(h('dd', { text: row.path + ': ' + row.free + ' free of ' + row.total + ' (' + row.fstype + ')' }));
+      });
+      list.hidden = !persistent.length;
     }
   }
 
@@ -419,8 +487,12 @@
       notify(scope, 'ok', label + '...');
       var f = Object.assign({}, fields);
       if (phrase) { f.confirm = typed; }
+      /* the button is off from here on, before the request is even sent */
+      if (opts.pending) { scope.dispatchEvent(new CustomEvent('psu:pending', { detail: { key: opts.pending, on: true } })); }
       return PSU.post(action, f).then(function (resp) {
         notify(scope, resp.ok ? 'ok' : 'crit', resp.ok ? label + ' completed.' : PSU.errorText(resp));
+        /* a refused or failed request changes no state: nothing to wait for, the button is free again */
+        if (opts.pending && !resp.ok) { scope.dispatchEvent(new CustomEvent('psu:pending', { detail: { key: opts.pending, on: false } })); }
         scope.dispatchEvent(new CustomEvent('psu:refresh'));
       });
     });
@@ -460,6 +532,7 @@
     var lastStatus = null;
     var lastPlay = null;
     var lastWorkloads = null;
+    var pending = {};
 
     function refreshAll() {
       Promise.all([PSU.api('status'), PSU.api('metrics'), PSU.api('list'), PSU.api('play'), PSU.api('workloads')]).then(function (r) {
@@ -468,6 +541,7 @@
         if (r[1].ok) { paintMetrics(scope, r[1].data); }
         lastPlay = r[3];
         lastWorkloads = r[4];
+        pending = PSU.settlePending(pending, lastPlay, Date.now());
         renderBundles(scope, r[2], lastStatus);
         paintPlay(scope, r[3]);
         paintWorkloads(scope, r[4]);
@@ -491,8 +565,20 @@
       var play = PSU.playButtons(lastStatus, lastPlay);
       Object.keys(play).forEach(function (k) {
         var b = scope.querySelector('[data-do="play-' + k + '"]');
-        if (b) { b.disabled = !play[k]; }
+        if (!b) { return; }
+        if (k === 'start' || k === 'stop') {
+          var view = PSU.playButtonView(k, play[k], pending);
+          b.disabled = view.disabled;
+          b.textContent = view.text;
+        } else {
+          b.disabled = !play[k];
+        }
       });
+      /* an owner build has no service of its own to start, restart or stop: the Polyseat and Workloads cards are the controls */
+      var svc = scope.querySelector('[data-bind="service-actions"]');
+      if (svc) { svc.hidden = owner; }
+      var note = scope.querySelector('[data-bind="service-note"]');
+      if (note) { note.hidden = !owner; }
       /* Wiederherstellen exists on the card only while an abnormal end needs it */
       var rec = scope.querySelector('[data-do="play-recover"]');
       if (rec) { rec.hidden = !play.recover; }
@@ -525,6 +611,13 @@
     }
 
     scope.addEventListener('psu:refresh', function () { setTimeout(refreshAll, 400); });
+    scope.addEventListener('psu:pending', function (e) {
+      var d = e.detail || {};
+      var next = Object.assign({}, pending);
+      if (d.on) { next[d.key] = Date.now(); } else { delete next[d.key]; }
+      pending = next;
+      applyLocks();
+    });
     initTabs(scope, function (id) { if (id === 'logs') { loadLogs(); } });
 
     var service = {
@@ -541,13 +634,15 @@
     });
     var ps = scope.querySelector('[data-do="play-start"]');
     if (ps) { ps.addEventListener('click', function () {
-      runAction(scope, 'Start play session', 'play_start', {}, '', { alwaysConfirm: true,
+      if (pending.start) { return; }
+      runAction(scope, 'Start play session', 'play_start', {}, '', { alwaysConfirm: true, pending: 'start',
         body: 'Verify the runtime, seat image and daemon on the flash drive, stage them and start a play session. ' +
           'This takes up to a minute; the session ends by itself after the configured length.' });
     }); }
     var pp = scope.querySelector('[data-do="play-stop"]');
     if (pp) { pp.addEventListener('click', function () {
-      runAction(scope, 'Stop play session', 'play_stop', {}, '', { danger: true,
+      if (pending.stop) { return; }
+      runAction(scope, 'Stop play session', 'play_stop', {}, '', { danger: true, pending: 'stop',
         body: 'End the play session: players are disconnected, seats stop in order, Incus records a clean stop and the host is restored.' });
     }); }
     var pr = scope.querySelector('[data-do="play-recover"]');
