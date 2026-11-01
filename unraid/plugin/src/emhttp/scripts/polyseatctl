@@ -43,6 +43,16 @@ CANARY_DATA_DIR="/var/lib/polyseat-unraid-canary"
 CANARY_DATA_MAX_KB=262144  # monitored abort threshold, NOT a filesystem quota
 CANARY_LOG_MAX_BYTES=16777216  # likewise, one-second monitoring may overshoot
 CANARY_HOST_MIN_AVAILABLE_KB=4194304
+# Play sessions only (operation 8; owner, 2026-11-01, after the floor above killed the whole cgroup with two games running
+# and left no clean-stop record). Below CANARY_HOST_MIN_AVAILABLE_KB the supervisor first asks the session to end the way
+# play-stop does (polyseatd, then the seats in upstream's halt order, Incus clean stop, host restore). The hard cgroup kill
+# follows only when MemAvailable falls below the lower floor, or when the graceful end has not finished within the grace
+# time. 2 GiB leaves the host enough memory to run that stop itself (incus, the seats' session stop, ZFS and Unraid's own
+# daemons); a host that is already there has no time left to be gentle. 90 s is the upper end of what the owner asked for
+# (60-90 s); a stop that needs longer is cut by the hard kill, which is today's behaviour, not a new risk.
+# Fixed, never read from the user's settings. Every other operation keeps the single hard floor.
+CANARY_HOST_HARD_AVAILABLE_KB=2097152
+CANARY_FLOOR_GRACE_SECONDS=90
 CANARY_HOST_MAX_LOAD=14
 CANARY_HEALTH_TIMEOUT=60  # fixed: identical in the CI rehearsal and on Tower, never read from user settings
 # Incus 7.5.1 cmd/incusd/main_daemon.go `neededPrograms`: the daemon exits unless each one resolves on PATH.
@@ -1604,6 +1614,20 @@ canary_host_pressure_check() {
   awk -v maximum="$CANARY_HOST_MAX_LOAD" '{ exit !($1 <= maximum) }' /proc/loadavg
 }
 
+canary_mem_available_kb() { # prints MemAvailable in kB from the host's meminfo; fails on anything that is not that line
+  local kb
+  kb=$(awk '$1 == "MemAvailable:" && $2 ~ /^[0-9]+$/ && $3 == "kB" { print $2; found = 1; exit } END { exit !found }' \
+    "$(host_path /proc/meminfo)" 2>/dev/null) || return 1
+  printf '%s\n' "$kb"
+}
+
+canary_memory_floor_verdict() { # kB or anything : ok | soft (below the graceful floor) | hard (below the last-resort floor)
+  # What cannot be read as a number is hard, exactly as the single floor treated a meminfo it could not read.
+  if ! [[ $1 =~ ^[0-9]+$ ]] || (( 10#$1 < CANARY_HOST_HARD_AVAILABLE_KB )); then printf 'hard\n'
+  elif (( 10#$1 < CANARY_HOST_MIN_AVAILABLE_KB )); then printf 'soft\n'
+  else printf 'ok\n'; fi
+}
+
 # Step 4: every start of a GPU container passes the LXC nvidia hook, polyseatd's own starts included. The supervisor
 # rewrites this file every second from its VM-priority check; the hook admits a start only on a fresh "allow".
 canary_gpu_admission_write() { # allow|deny
@@ -1614,7 +1638,7 @@ canary_gpu_admission_write() { # allow|deny
 }
 
 canary_watchdog_loop() { # epoch deadline, monotonic deadline
-  local expiry=$1 deadline=$2 pid=$BASHPID started aborted=0
+  local expiry=$1 deadline=$2 pid=$BASHPID started aborted=0 floor_deadline=0 verdict
   printf '%s\n' "$pid" > "$CANARY_WATCHDOG_CGROUP/cgroup.procs" || return 1
   renice -n 19 -p "$pid" >/dev/null || return 1
   trap 'canary_gpu_admission_write deny; printf "1\n" > "$CANARY_CGROUP/cgroup.kill" 2>/dev/null || true' EXIT
@@ -1638,10 +1662,43 @@ canary_watchdog_loop() { # epoch deadline, monotonic deadline
       printf 'gpu-ownership-changed\n' > "$CANARY_SESSION.reason"
       aborted=1
     fi
-    if [[ $aborted -eq 0 ]] && { ! canary_cgroup_check || ! canary_budget_check || ! canary_host_pressure_check; }; then
+    if [[ $aborted -eq 0 ]] && { ! canary_cgroup_check || ! canary_budget_check; }; then
       log error "canary: resource policy/budget changed; hard-stopping workload"
       printf 'resource-policy-or-budget\n' > "$CANARY_SESSION.reason"
       aborted=1
+    fi
+    if [[ $aborted -eq 0 && ${CANARY_OPERATION:-0} -ne 8 ]] && ! canary_host_pressure_check; then
+      log error "canary: resource policy/budget changed; hard-stopping workload"
+      printf 'resource-policy-or-budget\n' > "$CANARY_SESSION.reason"
+      aborted=1
+    fi
+    if [[ $aborted -eq 0 && ${CANARY_OPERATION:-0} -eq 8 ]]; then
+      # A play session meets its memory floor in two steps (see CANARY_HOST_HARD_AVAILABLE_KB). The graceful request is
+      # the session's own stop request, so the session ends through the very path play-stop takes. It writes no .reason:
+      # that file makes every run_incus fail, and the stop needs Incus. Only a hard kill (here or at the end of this
+      # block) writes one.
+      verdict=$(canary_memory_floor_verdict "$(canary_mem_available_kb || printf 'unreadable')")
+      if [[ $verdict == hard ]]; then
+        log error "canary: MemAvailable below the hard floor; hard-stopping workload"
+        printf 'memory-floor-hard\n' > "$CANARY_SESSION.reason"
+        aborted=1
+      elif [[ $verdict == soft ]]; then
+        if (( floor_deadline == 0 )); then
+          floor_deadline=$(( $(canary_monotonic_seconds) + CANARY_FLOOR_GRACE_SECONDS ))
+          log error "canary: MemAvailable below the floor; asking the session to end (hard stop in ${CANARY_FLOOR_GRACE_SECONDS}s)"
+        fi
+        # The reason first, then the request: the session reads the reason when it sees the request. An operator's stop
+        # that is already under way keeps its name; the grace time still applies to it.
+        if [[ ! -e $RUN_DIR/polyseatd-stop && ! -e $RUN_DIR/play-end-reason ]]; then printf 'memory-floor\n' > "$RUN_DIR/play-end-reason"; fi
+        # Rewritten while the pressure lasts: a session that is still starting removes an older request when it gets that far.
+        [[ -e $RUN_DIR/polyseatd-stop ]] || : > "$RUN_DIR/polyseatd-stop"
+      fi
+      # The bound holds even if the memory has recovered meanwhile: once asked, the session ends or is cut off at the deadline.
+      if [[ $aborted -eq 0 ]] && (( floor_deadline > 0 && $(canary_monotonic_seconds) >= floor_deadline )); then
+        log error "canary: the graceful end did not finish in time; hard-stopping workload"
+        printf 'memory-floor-timeout\n' > "$CANARY_SESSION.reason"
+        aborted=1
+      fi
     fi
     if [[ $aborted -eq 0 && -n ${CANARY_GPU_PCI:-} ]]; then canary_gpu_admission_write allow
     else canary_gpu_admission_write deny; fi
@@ -1674,12 +1731,15 @@ canary_watchdog_start() {
     CANARY_WATCHDOG_MEMORY_MAX="$CANARY_WATCHDOG_MEMORY_MAX" \
     CANARY_DATA_MAX_KB="$CANARY_DATA_MAX_KB" CANARY_LOG_MAX_BYTES="$CANARY_LOG_MAX_BYTES" \
     CANARY_HOST_MIN_AVAILABLE_KB="$CANARY_HOST_MIN_AVAILABLE_KB" CANARY_HOST_MAX_LOAD="$CANARY_HOST_MAX_LOAD" \
+    CANARY_HOST_HARD_AVAILABLE_KB="$CANARY_HOST_HARD_AVAILABLE_KB" CANARY_FLOOR_GRACE_SECONDS="$CANARY_FLOOR_GRACE_SECONDS" \
+    RUN_DIR="$RUN_DIR" \
     CANARY_OPERATION="$CANARY_OPERATION" DESKTOP_MEMORY_MAX="$DESKTOP_MEMORY_MAX" CANARY_GPU_PCI="$CANARY_GPU_PCI" \
     STEAM_MEMORY_MAX="$STEAM_MEMORY_MAX" PERSIST_MIN_FREE_KB="$PERSIST_MIN_FREE_KB" \
     GPU_ADMISSION="$(lxc_mount_real "$LXC_STATE_PARENT")/gpu-admission" \
     GPU_TRANSITION_LOCKS="$GPU_TRANSITION_LOCKS" GPU_TRANSITION_MARKERS="$GPU_TRANSITION_MARKERS" \
     setsid bash -u -o pipefail -c "$(declare -f canary_watchdog_loop canary_process_starttime write_json_atomic sync_path \
       canary_monotonic_seconds canary_cgroup_check canary_budget_check canary_host_pressure_check log sandbox \
+      canary_mem_available_kb canary_memory_floor_verdict \
       canary_gpu_admission_write \
       gpu_guard_quick gpu_domain_active gpu_libvirt_owners gpu_lock_held host_path sys_root ci_real_system)"$'\n''canary_watchdog_loop "$@"' \
     canary-watchdog "$expiry" "$((mono + remaining))" \
@@ -3437,8 +3497,24 @@ play_stop_seats() { # every running seat, through Incus (polyseatd leaves them r
   done
 }
 
+# How the session was asked to end, for the log and for the card: the watchdog's graceful memory-floor request names itself
+# in play-end-reason (written before the stop request); everything else that stops a session is the operator's request or the
+# end of the approval. Only the one word the watchdog writes is believed; the file is root's, but the answer feeds the card.
+play_end_reason() { # prints memory-floor | stop-requested | expired
+  local f=$RUN_DIR/play-end-reason word=""
+  if [[ -f $f && ! -L $f ]]; then word=$(head -n 1 -- "$f" | head -c 32); fi
+  if [[ $word == memory-floor ]]; then printf 'memory-floor\n'
+  elif [[ -e $RUN_DIR/polyseatd-stop ]]; then printf 'stop-requested\n'
+  else printf 'expired\n'; fi
+}
+
+play_last_end_write() { # reason clean(true|false) [recovered(true|false)] : what the card may say about the last session
+  write_json_atomic "$RUN_DIR/play-last-end.json" "$(jq -n --arg reason "$1" --argjson clean "$2" --argjson recovered "${3:-false}" \
+    --argjson now "$(date -u +%s)" '{schema: 1, reason: $reason, clean: $clean, recovered: $recovered, ended_at: $now}')"
+}
+
 cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, on the LAN, until the operator stops it
-  local dir="$RUN_DIR/play-evidence" ip pid="" cfg remaining expires deadline last guard=0 out i a
+  local dir="$RUN_DIR/play-evidence" ip pid="" cfg remaining expires deadline last guard=0 out i a ended
   [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 0 ]] || die $EX_BLOCKED "polyseatd-play needs a canary build and takes no arguments"
   require_approval polyseatd-play
   require_no_journal
@@ -3501,7 +3577,10 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
   log info "polyseatd: up at https://$ip:$POLYSEATD_PORT"
   deadline=$(( expires - POLYSEATD_TEARDOWN_SECONDS )) last=$(date -u +%s)
   while (( $(date -u +%s) < deadline )) && [[ ! -e $RUN_DIR/polyseatd-stop ]]; do
-    polyseatd_alive "$pid" || { log error "polyseatd: exited on its own"; exit $EX_HEALTH; }
+    polyseatd_alive "$pid" || {
+      log error "polyseatd: exited on its own$([[ -e $CANARY_SESSION.reason ]] && echo " (the watchdog ended the session: $(head -c 40 -- "$CANARY_SESSION.reason" | tr -c '[:alnum:]-\n' '?'))")"
+      exit $EX_HEALTH
+    }
     canary_budget_check || exit $EX_HEALTH
     # polyseatd builds and changes seats through the Incus API itself: anything outside upstream's seat shape ends it.
     if (( ++guard % 5 == 0 )); then play_seat_guard || exit $EX_HEALTH; play_seat_priorities; play_seat_pin; fi
@@ -3514,7 +3593,12 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
     fi
     sleep 2
   done
-  log info "play phase: stop ($([[ -e $RUN_DIR/polyseatd-stop ]] && echo 'stop requested' || echo 'token time is up'))"
+  ended=$(play_end_reason)
+  case "$ended" in
+    memory-floor) log info "play phase: stop (MemAvailable fell below the floor; ending like play-stop, the hard stop follows in ${CANARY_FLOOR_GRACE_SECONDS}s)" ;;
+    stop-requested) log info "play phase: stop (stop requested)" ;;
+    *) log info "play phase: stop (token time is up)" ;;
+  esac
   polyseatd_stop "$pid" || exit $EX_HEALTH
   pid=""
   head -c 4194304 -- "$LOG_DIR/polyseatd.log" > "$dir/polyseatd.log" 2>/dev/null || true
@@ -3525,7 +3609,8 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
   svc_stop full || exit $EX_HEALTH
   play_host_off || exit $EX_HEALTH
   polyseatd_run_state_remove || exit $EX_HEALTH
-  rm -f -- "$RUN_DIR/polyseatd-stop" "$RUN_DIR/polyseatd-status.json"
+  rm -f -- "$RUN_DIR/polyseatd-stop" "$RUN_DIR/polyseatd-status.json" "$RUN_DIR/play-end-reason"
+  play_last_end_write "$ended" true || log warn "play: cannot record how the session ended"
   trap - EXIT
   printf 'PASS: play session ended (polyseatd on https://%s:%s, seats stopped, Incus clean stop recorded, host restored).\n' \
     "$ip" "$POLYSEATD_PORT"
