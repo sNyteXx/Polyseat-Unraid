@@ -284,7 +284,9 @@ rc=0; ctl polyseatd-session --approve > "$evidence/D-no-password.txt" 2>&1 || rc
 grep -q 'no password set' "$evidence/D-no-password.txt" || fail 'run D: refused for another reason than the missing password'
 install -d -m 0700 -o 0 -g 0 "$psd"
 password=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-20)
-printf '%s\n' "$password" | "$daemon/polyseat-passwd" "$psd" owner || fail 'run D: password tool'
+# Artifacts lose the executable bit; the controller restores it for polyseatd, this copy does for the tool.
+install -m 0755 "$daemon/polyseat-passwd" "$work/polyseat-passwd"
+printf '%s\n' "$password" | "$work/polyseat-passwd" "$psd" owner || fail 'run D: password tool'
 [[ $(stat -c '%u %a' "$psd/credentials.json") == '0 600' ]] || fail 'run D: credentials mode'
 ctl polyseatd-session --approve > "$evidence/D-polyseatd-session.txt" 2>&1 &
 session_pid=$!
