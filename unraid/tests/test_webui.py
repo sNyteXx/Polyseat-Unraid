@@ -156,10 +156,10 @@ class JsTests(unittest.TestCase):
     def test_confirmation_phrases_match_php(self):
         sha = "0123456789abcdef" * 4
         php = {"activate": f"ACTIVATE {sha[:8]}", "rollback": "ROLLBACK", "recover": "RECOVER", "stop": "STOP",
-               "restart": "RESTART", "config_reset": "RESET"}
+               "restart": "RESTART", "config_reset": "RESET", "play_stop": "STOP"}
         out = self.run_node(f"""
           const PSU = require({json.dumps(str(JS))});
-          const a = ['activate','rollback','recover','stop','restart','config_reset'];
+          const a = ['activate','rollback','recover','stop','restart','config_reset','play_stop'];
           console.log(JSON.stringify(Object.fromEntries(a.map(x => [x, PSU.confirmPhrase(x, {json.dumps(sha)})]))));""")
         self.assertEqual(out, php)
 
@@ -207,6 +207,24 @@ class JsTests(unittest.TestCase):
         self.assertEqual((out["bad"]["cls"], out["nothing"]["cls"]), ("warn", "warn"))
         self.assertEqual((out["evil"]["url"], out["evil"]["seats"]), ("", "-"))
         self.assertEqual(out["empty"], "none yet")
+
+    def test_play_buttons_follow_mode_gate_and_session(self):
+        out = self.run_node(f"""
+          const PSU = require({json.dumps(str(JS))});
+          const st = (mode, state, gate) => ({{release_gate: gate || 'canary', approval_mode: mode, state: state}});
+          const idle = {{ok: true, data: null}}, up = {{ok: true, data: {{alive: true}}}};
+          console.log(JSON.stringify([
+            PSU.playButtons(st('owner', 'ACTIVE'), idle), PSU.playButtons(st('owner', 'ABSENT'), idle),
+            PSU.playButtons(st('owner', 'ACTIVE'), up), PSU.playButtons(st('owner', 'RUNNING'), idle),
+            PSU.playButtons(st('signed', 'ACTIVE'), idle), PSU.playButtons(st('signed', 'ACTIVE'), up),
+            PSU.playButtons(st(undefined, 'ACTIVE'), idle), PSU.playButtons(st('owner', 'ACTIVE', 'closed'), idle),
+            PSU.playButtons(st('owner', 'JOURNAL_PENDING'), idle), PSU.playButtons(st('owner', 'CORRUPT'), idle),
+            PSU.playButtons(st('owner', 'ACTIVE'), {{ok: false}}), PSU.playButtons(null, idle), PSU.playButtons(st('owner', 'ACTIVE'), undefined)
+          ]));""")
+        on, off = {"start": True, "stop": False}, {"start": False, "stop": False}
+        self.assertEqual(out, [on, on, {"start": False, "stop": True}, off,        # owner: idle / no bundle / running / Incus up
+                               off, {"start": False, "stop": True},                 # signed: never starts, can stop
+                               off, off, off, off, off, off, off])
 
     def test_no_dynamic_html_sinks_or_external_requests(self):
         import re

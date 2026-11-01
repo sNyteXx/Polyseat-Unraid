@@ -130,8 +130,9 @@ function psu_origin_ok(array $server): bool
 /* ------------------------------------------------------- controller calls ---- */
 
 const PSU_READ_COMMANDS = ['status', 'metrics', 'list', 'config-get', 'logs', 'diagnose', 'preflight', 'health', 'verify',
-                           'polyseatd-status'];
-const PSU_WRITE_COMMANDS = ['start', 'stop', 'restart', 'activate', 'rollback', 'recover', 'config-set', 'config-reset'];
+                           'polyseatd-status', 'play-status'];
+const PSU_WRITE_COMMANDS = ['start', 'stop', 'restart', 'activate', 'rollback', 'recover', 'config-set', 'config-reset',
+                            'play-start', 'play-stop'];
 
 /** Allowlist for every argument vector the WebUI may ever pass to polyseatctl. */
 function psu_ctl_args_ok(array $args): bool
@@ -150,8 +151,9 @@ function psu_ctl_args_ok(array $args): bool
         case 'status':
             return $rest === [] || $rest === ['--json'];
         case 'metrics': case 'list': case 'config-get': case 'diagnose': case 'preflight': case 'health':
-        case 'polyseatd-status':
+        case 'polyseatd-status': case 'play-status':
         case 'start': case 'stop': case 'restart': case 'config-reset':
+        case 'play-start': case 'play-stop': // no --approve and no --wait from the web: the controller writes its own approval
             return $rest === [];
         case 'verify':
             return $rest === [] || (count($rest) === 1 && preg_match('/^[0-9a-f]{64}$/D', $rest[0]) === 1);
@@ -281,6 +283,7 @@ function psu_confirm_phrase(string $action, string $subject = ''): string
         case 'rollback': return 'ROLLBACK';
         case 'recover': return 'RECOVER';
         case 'stop': return 'STOP';
+        case 'play_stop': return 'STOP';
         case 'restart': return 'RESTART';
         case 'config_reset': return 'RESET';
     }
@@ -363,6 +366,13 @@ function psu_handle(array $server, array $get, array $post): array
             $args = ['activate', $sha, '--approve'];
             $phrase = psu_confirm_phrase('activate', $sha);
             break;
+        case 'play_start':
+            $args = ['play-start'];
+            break;
+        case 'play_stop':
+            $args = ['play-stop'];
+            $phrase = psu_confirm_phrase('play_stop');
+            break;
         case 'rollback':
             $args = ['rollback', '--approve'];
             $phrase = psu_confirm_phrase('rollback');
@@ -407,7 +417,15 @@ function psu_handle(array $server, array $get, array $post): array
                             'detail' => 'The release gate is closed: changes are disabled in this WIP build.']);
     }
 
-    $result = psu_run_ctl($args, $action === 'service' || $action === 'activate' || $action === 'rollback' || $action === 'recover' ? 240 : 30);
+    // The WebUI starts a session only where the build says an admin's click is the approval; elsewhere it is the console's.
+    if ($action === 'play_start' && ($status['approval_mode'] ?? 'signed') !== 'owner') {
+        return $reply(423, ['ok' => false, 'error' => 'locked',
+                            'detail' => 'This build needs a signed approval: start the session on the console.']);
+    }
+
+    // play-start verifies and stages hundreds of MB from the flash drive before it returns.
+    $slow = in_array($action, ['service', 'activate', 'rollback', 'recover', 'play_start'], true);
+    $result = psu_run_ctl($args, $slow ? 240 : 30);
     if ($result['timeout']) {
         return $reply(504, ['ok' => false, 'error' => 'timeout']);
     }

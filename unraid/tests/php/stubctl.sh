@@ -4,10 +4,10 @@ dir=$(dirname "$0")
 conf="$dir/stub.conf"
 (IFS=$'\x1f'; printf '%s\n' "$*") >> "$dir/calls.log"
 get() { sed -n "s/^$1=//p" "$conf" | head -n1; }
-gate=$(get gate); sleep_s=$(get sleep); fail=$(get fail)
+gate=$(get gate); sleep_s=$(get sleep); fail=$(get fail); mode=$(get mode)
 [[ -n $sleep_s ]] && sleep "$sleep_s"
 case "$1" in
-  status) printf '{"state":"RUNNING","release_gate":"%s","version":"1.0","current":"","previous":"","controller":"t","data_dir":""}\n' "${gate:-closed}"; exit 0 ;;
+  status) printf '{"state":"RUNNING","release_gate":"%s","approval_mode":"%s","version":"1.0","current":"","previous":"","controller":"t","data_dir":""}\n' "${gate:-closed}" "${mode:-signed}"; exit 0 ;;
   metrics) echo '{"load":[0.1,0.2,0.3],"cpus":4,"memory":{"total_kb":100,"available_kb":50},"daemon":{"running":false},"data_dir":null,"incus":null}'; exit 0 ;;
   list) echo '[]'; exit 0 ;;
   config-get) echo '[]'; exit 0 ;;

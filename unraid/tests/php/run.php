@@ -114,8 +114,9 @@ t('argument allowlist', function () use ($SHA) {
     $good = [['status'], ['status', '--json'], ['metrics'], ['list'], ['config-get'], ['logs', 'controller', '100'],
              ['logs', 'incusd', '500'], ['diagnose'], ['verify', $SHA], ['start'], ['stop'], ['restart'],
              ['activate', $SHA, '--approve'], ['rollback', '--approve'], ['recover', '--approve'], ['config-reset'],
-             ['config-set', 'SERVICE=enabled'], ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=30'], ['polyseatd-status'],
-             ['config-set', 'PLAY_CPU_PERCENT=50', 'PLAY_MEMORY_MB=8192', 'LIBRARY_PATH=/mnt/tank/games']];
+             ['config-set', 'SERVICE=enabled'], ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=30'], ['polyseatd-status'], ['play-status'], ['play-start'], ['play-stop'],
+             ['config-set', 'PLAY_CPU_PERCENT=50', 'PLAY_MEMORY_MB=8192', 'LIBRARY_PATH=/mnt/tank/games'],
+             ['config-set', 'PLAY_SESSION_HOURS=12', 'PLAY_CPU_PERFORMANCE=yes', 'PLAY_SEAT_CPUS=seat1=0-7;seat2=8-15']];
     $bad = [[], ['uninstall', '--approve'], ['update', 'a', 'b', 'c', '--approve'], ['stage', 'a', 'b', 'c', '--approve'],
             ['boot'], ['status', '--json', 'x'], ['status', '-x'], ['activate', $SHA], ['activate', $SHA, '--approve', 'x'],
             ['activate', 'abc', '--approve'], ['rollback'], ['recover'], ['logs', 'controller', '0'], ['logs', 'controller', '501'],
@@ -124,7 +125,9 @@ t('argument allowlist', function () use ($SHA) {
             ['config-set', 'DATA_DIR=/mnt/a;rm -rf /'], ['status', "a\0b"], ['status', str_repeat('a', 301)],
             ['start', '--now'], ['stop', ''], ['x' => 'status'], ['status', 5], ['STATUS'], ['status '],
             ['polyseatd-status', 'x'], ['polyseatd-status', '--json'], ['polyseatd-stop'], ['polyseatd-play'], ['polyseatd-session'],
-            ['config-set', 'PLAY_CPU_PERCENT=101'], ['config-set', 'LIBRARY_PATH=/etc'], ['config-set', 'PLAY_MEMORY_MB=8G']];
+            ['config-set', 'PLAY_CPU_PERCENT=101'], ['config-set', 'LIBRARY_PATH=/etc'], ['config-set', 'PLAY_MEMORY_MB=8G'],
+            ['play-start', '--approve'], ['play-start', 'x'], ['play-stop', '--wait', '300'], ['play-stop', 'x'], ['play-status', 'x'],
+            ['config-set', 'PLAY_SESSION_HOURS=25'], ['config-set', 'PLAY_SEAT_CPUS=0-15;rm'], ['config-set', 'PLAY_CPU_PERFORMANCE=true']];
     foreach ($good as $args) { ok(psu_ctl_args_ok($args), json_encode($args) . ' should pass'); }
     foreach ($bad as $args) { ok(!psu_ctl_args_ok($args), json_encode($args) . ' should fail'); }
 });
@@ -185,11 +188,14 @@ t('the play view is read-only, reduced to validated fields and tells "no session
     [$code, , $body] = $get();
     eq([$code, json_decode($body, true)['error']], [502, 'unavailable']);
     foreach (stub_calls() as $call) { eq($call, ['polyseatd-status']); }
-    // The play verbs stay out of reach: not by GET, not by POST, not through the argument allowlist.
+    // The session's own verbs stay out of reach: not by GET, not by POST, not through the argument allowlist. Start and
+    // stop of a session are the POST actions play_start/play_stop (below); never by GET, never with a body argument.
     stub_reset(['gate' => 'open']);
-    foreach (['polyseatd_play', 'polyseatd-play', 'play_start', 'play_stop', 'polyseatd-stop'] as $action) {
+    foreach (['polyseatd_play', 'polyseatd-play', 'play-start', 'play-stop', 'polyseatd-stop'] as $action) {
         [$code] = post(['action' => $action]);
         eq($code, 400, $action);
+    }
+    foreach (['polyseatd_play', 'polyseatd-play', 'play_start', 'play_stop', 'play-start', 'play-stop', 'polyseatd-stop'] as $action) {
         [$code] = psu_handle(['REQUEST_METHOD' => 'GET'], ['action' => $action], []);
         eq($code, 400, "GET $action");
     }
@@ -220,7 +226,7 @@ t('POST rejects bad method, origin and csrf before anything else', function () u
 t('destructive actions need the exact typed phrase', function () use ($SHA) {
     stub_reset(['gate' => 'open']);
     foreach ([['service', ['do' => 'stop'], 'STOP'], ['service', ['do' => 'restart'], 'RESTART'],
-              ['rollback', [], 'ROLLBACK'], ['recover', [], 'RECOVER'], ['config_reset', [], 'RESET'],
+              ['rollback', [], 'ROLLBACK'], ['recover', [], 'RECOVER'], ['config_reset', [], 'RESET'], ['play_stop', [], 'STOP'],
               ['activate', ['sha' => $SHA], 'ACTIVATE abababab']] as [$action, $extra, $phrase]) {
         [$code, $b] = post(['action' => $action] + $extra);
         eq([$code, $b['error']], [400, 'confirm'], "$action without phrase");
@@ -257,6 +263,33 @@ t('allowed actions reach the controller with exactly the validated vector', func
     eq($mutations, [['start'], ['stop'], ['activate', $SHA, '--approve'], ['rollback', '--approve'],
                     ['config-set', 'SERVICE=enabled', 'HEALTH_TIMEOUT=45'],
                     ['config-set', 'PLAY_CPU_PERCENT=50', 'PLAY_MEMORY_MB=0', 'LIBRARY_PATH=/mnt/tank/games']]);
+});
+
+t('play start and stop: start only where an admin click is the approval, stop with the typed phrase', function () {
+    stub_reset(['gate' => 'canary', 'mode' => 'owner']);
+    [$code, $b] = post(['action' => 'play_stop']);
+    eq([$code, $b['error']], [400, 'confirm']);
+    [$code] = post(['action' => 'play_stop', 'confirm' => 'STOP']); eq($code, 200);
+    [$code] = post(['action' => 'play_start']); eq($code, 200);
+    eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), [['play-stop'], ['play-start']]);
+    // a signed-approval build: the stop still works, the start is refused before the controller is asked
+    stub_reset(['gate' => 'canary', 'mode' => 'signed']);
+    [$code, $b] = post(['action' => 'play_start']);
+    eq([$code, $b['error']], [423, 'locked']);
+    ok(strpos($b['detail'], 'console') !== false);
+    [$code] = post(['action' => 'play_stop', 'confirm' => 'STOP']); eq($code, 200);
+    eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), [['play-stop']]);
+    // the same with a missing mode (an older controller) and with a closed gate
+    stub_reset(['gate' => 'canary']);
+    [$code] = post(['action' => 'play_start']); eq($code, 423);
+    stub_reset(['gate' => 'closed', 'mode' => 'owner']);
+    [$code] = post(['action' => 'play_start']); eq($code, 423);
+    [$code] = post(['action' => 'play_stop', 'confirm' => 'STOP']); eq($code, 423);
+    eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), []);
+    // extra fields never become arguments
+    stub_reset(['gate' => 'canary', 'mode' => 'owner']);
+    [$code] = post(['action' => 'play_start', 'wait' => '300', 'approve' => '1', 'args' => ['--approve']]); eq($code, 200);
+    eq(array_values(array_filter(stub_calls(), fn($c) => $c[0] !== 'status')), [['play-start']]);
 });
 
 t('bad parameters never reach the controller', function () use ($SHA) {

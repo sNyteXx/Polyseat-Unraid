@@ -68,13 +68,17 @@ $psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed'];
     <dl class="psu-kv">
      <dt>Address</dt><dd data-bind="play-url">-</dd>
      <dt>Seats</dt><dd data-bind="play-seats">-</dd>
-     <dt>Approval left</dt><dd data-bind="play-remaining">-</dd>
+     <dt>Session time left</dt><dd data-bind="play-remaining">-</dd>
     </dl>
     <div class="psu-actions" style="margin-top:12px">
+     <button type="button" class="psu-btn primary" data-do="play-start" disabled>Start</button>
+     <button type="button" class="psu-btn danger" data-do="play-stop" disabled>Stop</button>
      <a class="psu-btn primary" data-bind="play-open" target="_blank" rel="noopener noreferrer" hidden>Open Polyseat</a>
     </div>
     <p class="psu-muted">Seats, pairing and streaming are managed in Polyseat's own interface, which opens in a new tab.
-     A play session is started and stopped on the console with a signed approval; this page only shows its state.</p>
+     In an owner build, Start verifies and stages the runtime, seat image and daemon from the flash drive and starts a
+     session that ends by itself after the configured length (Settings, Play); nothing starts after a reboot by itself.
+     Otherwise a session is started and stopped on the console with a signed approval and this card only shows its state.</p>
    </div>
   </div>
 

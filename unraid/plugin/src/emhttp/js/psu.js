@@ -50,6 +50,7 @@
       case 'rollback': return 'ROLLBACK';
       case 'recover': return 'RECOVER';
       case 'stop': return 'STOP';
+      case 'play_stop': return 'STOP';
       case 'restart': return 'RESTART';
       case 'config_reset': return 'RESET';
       default: return '';
@@ -101,6 +102,19 @@
     var left = typeof d.expires_at === 'number' ? PSU.fmtDuration(d.expires_at - now) : '-';
     if (!d.alive) { return { text: 'Polyseat is down', cls: 'crit', url: '', seats: seats, remaining: left }; }
     return { text: 'Play session running', cls: 'ok', url: PSU.playUrl(d.url), seats: seats, remaining: left };
+  };
+
+  /* Which Polyseat-card buttons may be pressed. Mirrors what the controller and lib.php enforce (they are the guards):
+     a session starts only where the build lets an admin's click approve it, never while one runs or Incus is up. */
+  PSU.playButtons = function (status, playResp) {
+    var off = { start: false, stop: false };
+    if (!status || status.release_gate === 'closed' || !playResp || !playResp.ok) { return off; }
+    var running = !!playResp.data;
+    return {
+      start: status.approval_mode === 'owner' && !running &&
+        (status.state === 'ACTIVE' || status.state === 'ABSENT'),
+      stop: running
+    };
   };
 
   PSU.errorText = function (resp) {
@@ -335,7 +349,8 @@
     rows.forEach(function (b) {
       var role = b.current ? h('span', { class: 'psu-pill ok', text: 'active' }) : (b.previous ? h('span', { class: 'psu-pill muted', text: 'previous' }) : h('span', { class: 'psu-muted', text: 'staged' }));
       var btn = h('button', { type: 'button', class: 'psu-btn', text: 'Activate' });
-      btn.disabled = locked || b.current || !b.has_archive || !b.has_signature;
+      /* an owner build activates a bundle only as part of starting a session */
+      btn.disabled = locked || b.current || !b.has_archive || !b.has_signature || (status && status.approval_mode === 'owner');
       btn.addEventListener('click', function () {
         runAction(scope, 'Activate bundle', 'activate', { sha: b.sha }, b.sha, {
           danger: true, body: 'Switch the runtime to version ' + b.version + ' (' + b.sha.slice(0, 8) + '). The service restarts if it is running and rolls back automatically if the health check fails.' });
@@ -354,14 +369,17 @@
     Object.assign(cfg, config || {});
     var logState = { which: 'controller', lines: '200' };
     var lastStatus = null;
+    var lastPlay = null;
 
     function refreshAll() {
       Promise.all([PSU.api('status'), PSU.api('metrics'), PSU.api('list'), PSU.api('play')]).then(function (r) {
         if (r[0].ok) { lastStatus = r[0].data; paintStatus(scope, lastStatus); cfg.gate = lastStatus.release_gate; applyLocks(); }
         else { paintStatus(scope, null); }
         if (r[1].ok) { paintMetrics(scope, r[1].data); }
+        lastPlay = r[3];
         renderBundles(scope, r[2], lastStatus);
         paintPlay(scope, r[3]);
+        applyLocks();
       });
     }
 
@@ -370,11 +388,18 @@
       var banner = scope.querySelector('[data-bind="gate-banner"]');
       if (banner) { banner.hidden = !locked; }
       var state = lastStatus && lastStatus.state;
-      var map = { start: state === 'ACTIVE', stop: state === 'RUNNING', restart: state === 'RUNNING',
+      /* In an owner build a session is started from the Polyseat card; the service itself is not started on its own. */
+      var owner = !!lastStatus && lastStatus.approval_mode === 'owner';
+      var map = { start: state === 'ACTIVE' && !owner, stop: state === 'RUNNING', restart: state === 'RUNNING' && !owner,
                   rollback: state === 'RUNNING' || state === 'ACTIVE', recover: state === 'JOURNAL_PENDING' };
       Object.keys(map).forEach(function (k) {
         var b = scope.querySelector('[data-do="' + k + '"]');
         if (b) { b.disabled = locked || !map[k]; }
+      });
+      var play = PSU.playButtons(lastStatus, lastPlay);
+      Object.keys(play).forEach(function (k) {
+        var b = scope.querySelector('[data-do="play-' + k + '"]');
+        if (b) { b.disabled = !play[k]; }
       });
     }
 
@@ -414,6 +439,17 @@
         runAction(scope, s[0], 'service', { 'do': k }, '', Object.assign({ phraseAction: k }, s[2]));
       }); }
     });
+    var ps = scope.querySelector('[data-do="play-start"]');
+    if (ps) { ps.addEventListener('click', function () {
+      runAction(scope, 'Start play session', 'play_start', {}, '', { alwaysConfirm: true,
+        body: 'Verify the runtime, seat image and daemon on the flash drive, stage them and start a play session. ' +
+          'This takes up to a minute; the session ends by itself after the configured length.' });
+    }); }
+    var pp = scope.querySelector('[data-do="play-stop"]');
+    if (pp) { pp.addEventListener('click', function () {
+      runAction(scope, 'Stop play session', 'play_stop', {}, '', { danger: true,
+        body: 'End the play session: players are disconnected, seats stop in order, Incus records a clean stop and the host is restored.' });
+    }); }
     var rb = scope.querySelector('[data-do="rollback"]');
     if (rb) { rb.addEventListener('click', function () { runAction(scope, 'Roll back', 'rollback', {}, '', { danger: true, body: 'Return to the previous runtime bundle.' }); }); }
     var rc = scope.querySelector('[data-do="recover"]');
