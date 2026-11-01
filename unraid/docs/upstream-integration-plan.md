@@ -19,12 +19,12 @@ names no new Tower write; every Tower step needs its own gate.
 | RTX 5070 Ti by device access while the passthrough VMs keep priority (guard and watchdog) | J3, [tower-run8-gpu.md](tower-run8-gpu.md) |
 | Steam with compat32 and Vulkan on the GPU; LAN on br0 with the `fe:` host-veth patch; persistent storage on `cache/polyseat` | J4, [tower-run12-steam.md](tower-run12-steam.md), [tower-run13-14-steam-storage.md](tower-run13-14-steam-storage.md) |
 | Moonlight pairing and an NVENC stream (59 fps) over the LAN only; Steam QR login persists | J5, [tower-run15-19-session.md](tower-run15-19-session.md) |
+| Persistent Incus state on `cache/polyseat`, reopened only after a recorded clean stop, nothing autostarted (step 2) | J6, [tower-run20-21-persist.md](tower-run20-21-persist.md) |
 
 ## Open
 
 - input;
 - polyseatd itself on Unraid;
-- persistent Incus state;
 - games and Proton, Big Picture and gamescope;
 - two seats;
 - an installable `.plg`.

@@ -21,13 +21,13 @@ Unraid 7.3.3. Every run had its own signed approval token and a verified rollbac
 - **J4:** Steam with 32-bit GL and Vulkan, the LAN via br0 for the session only, and persistent storage on the
   cache pool.
 - **J5:** the first Moonlight stream (PIN pairing, NVENC at 59 fps over the LAN only) and a Steam sign-in by QR code.
+- **J6:** persistent Incus state on the cache pool, reopened only after a recorded clean stop.
 
 Not proven:
 - input (disabled on purpose);
 - games;
 - two seats;
 - the upstream daemon on Unraid;
-- persistent Incus state;
 - upgrades;
 - an installable `.plg`.
 
