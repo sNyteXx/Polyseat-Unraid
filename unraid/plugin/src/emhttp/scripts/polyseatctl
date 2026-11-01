@@ -276,7 +276,7 @@ write_json_atomic() { # path json-text
 cfg_get() { # KEY fallback : user setting, else schema default, else fallback
   local key=$1 fallback=$2 value="" have=0
   if [[ -f $CFG && ! -L $CFG ]]; then
-    value=$(awk -F= -v k="$key" '$1==k { v=$2; gsub(/^"|"$/, "", v); print v; found=1; exit } END { exit !found }' "$CFG") && have=1
+    value=$(awk -F= -v k="$key" '$1==k { v=$0; sub(/^[^=]*=/, "", v); gsub(/^"|"$/, "", v); print v; found=1; exit } END { exit !found }' "$CFG") && have=1
   fi
   if [[ $have -eq 0 && -f $SCHEMA ]]; then
     value=$(jq -r --arg k "$key" '.[$k].default // empty' "$SCHEMA" 2>/dev/null || true)
@@ -298,7 +298,7 @@ schema_validate() { # key value
     | $s != null and (
         if $s.type=="enum" then ($s.values | index($v)) != null
         elif $s.type=="int" then ($v|test("^[0-9]{1,10}$")) and (($v|tonumber) >= $s.min) and (($v|tonumber) <= $s.max)
-        elif $s.type=="path" then ($v=="" or ($v|test($s.pattern)))
+        elif $s.type=="path" or $s.type=="string" then ($v=="" or ($v|test($s.pattern)))
         else false end)' "$SCHEMA" >/dev/null 2>&1
 }
 
@@ -3638,7 +3638,7 @@ cmd_boot() {
 # ----------------------------------------------------- settings/lists ----
 user_cfg_json() {
   if [[ -f $CFG && ! -L $CFG ]]; then
-    awk -F= '/^[A-Z_]+="?[^"]*"?$/ { v=$2; gsub(/^"|"$/, "", v); print $1 "\t" v }' "$CFG" |
+    awk -F= '/^[A-Z_]+="?[^"]*"?$/ { v=$0; sub(/^[^=]*=/, "", v); gsub(/^"|"$/, "", v); print $1 "\t" v }' "$CFG" |
       jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}'
   else
     echo '{}'

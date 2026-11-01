@@ -15,7 +15,7 @@ import time
 import unittest
 from pathlib import Path
 
-from unraid.tests.ctl_support import CTL
+from unraid.tests.ctl_support import CTL, Sandbox
 from unraid.tests.test_desktop_canary import source_ctl
 
 ARCHIVE = b"archive"
@@ -255,6 +255,30 @@ class ModeGateTests(unittest.TestCase):
         text = CTL.read_text()
         self.assertEqual(len(re.findall(r"^POLYSEAT_APPROVAL_MODE=", text, re.M)), 1)
         self.assertIn("approval_mode:$mode", text)
+
+
+class SettingsTests(unittest.TestCase):
+    def test_a_value_may_contain_an_equals_sign_and_survives_other_changes(self):
+        sb = Sandbox()
+        self.addCleanup(sb.cleanup)
+        value = "seat1=0-7;seat2=8-15"
+        self.assertEqual(sb.ctl("config-set", f"PLAY_SEAT_CPUS={value}").code, 0)
+        self.assertEqual(sb.ctl("config-set", "PLAY_SESSION_HOURS=12").code, 0)
+
+        def entry(key):
+            return next(e for e in json.loads(sb.ctl("config-get").out) if e["key"] == key)
+
+        self.assertEqual(entry("PLAY_SEAT_CPUS")["value"], value)
+        self.assertEqual(entry("PLAY_SESSION_HOURS")["value"], "12")
+        self.assertEqual((entry("PLAY_CPU_PERFORMANCE")["value"], entry("PLAY_SESSION_HOURS")["default"]), ("no", "6"))
+        res = source_ctl('init_paths; CFG=$2; cfg_get PLAY_SEAT_CPUS x', "-", str(sb.flash / "polyseat-unraid.cfg"))
+        self.assertEqual(res.stdout.strip(), value)
+
+    def test_new_play_settings_are_locked_while_a_session_runs(self):
+        schema = json.loads((CTL.parent.parent / "schema.json").read_text())
+        for key in ("PLAY_SESSION_HOURS", "PLAY_CPU_PERFORMANCE", "PLAY_SEAT_CPUS"):
+            self.assertTrue(schema[key]["locked_while_running"], key)
+            self.assertEqual(schema[key]["tab"], "play")
 
 
 if __name__ == "__main__":

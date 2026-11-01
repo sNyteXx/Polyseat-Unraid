@@ -56,7 +56,11 @@ t('validate_setting accepts and rejects like the schema', function () {
              ['DATA_DIR', ''], ['DATA_DIR', '/mnt/cache/appdata/polyseat'], ['DATA_DIR', '/mnt/a/.hidden'], ['DATA_DIR', '/mnt/a/b..c'], ['DATA_DIR', '/mnt/disk1/a.b-c_d'],
              ['PLAY_CPU_PERCENT', '0'], ['PLAY_CPU_PERCENT', '100'], ['PLAY_CPU_PERCENT', '007'], ['PLAY_MEMORY_MB', '0'], ['PLAY_MEMORY_MB', '4194304'],
              ['PLAY_IDLE_STOP_MINUTES', '0'], ['PLAY_IDLE_STOP_MINUTES', '1440'], ['PLAY_IDLE_STOP_MINUTES', '030'],
-             ['LIBRARY_PATH', ''], ['LIBRARY_PATH', '/mnt/download/polyseat-games'], ['LIBRARY_PATH', '/mnt/disk1/a.b-c_d']];
+             ['LIBRARY_PATH', ''], ['LIBRARY_PATH', '/mnt/download/polyseat-games'], ['LIBRARY_PATH', '/mnt/disk1/a.b-c_d'],
+             ['PLAY_SESSION_HOURS', '1'], ['PLAY_SESSION_HOURS', '6'], ['PLAY_SESSION_HOURS', '24'], ['PLAY_SESSION_HOURS', '06'],
+             ['PLAY_CPU_PERFORMANCE', 'yes'], ['PLAY_CPU_PERFORMANCE', 'no'],
+             ['PLAY_SEAT_CPUS', ''], ['PLAY_SEAT_CPUS', '0-15'], ['PLAY_SEAT_CPUS', '0,2,4-7'], ['PLAY_SEAT_CPUS', 'seat1=0-7;seat2=8-15'],
+             ['PLAY_SEAT_CPUS', 'seat-1=3']];
     $bad = [['SERVICE', 'maybe'], ['SERVICE', ''], ['ACCEPT_NO_LSM', 'YES'], ['HEALTH_TIMEOUT', '9'], ['HEALTH_TIMEOUT', '301'],
             ['HEALTH_TIMEOUT', '1e2'], ['HEALTH_TIMEOUT', '-10'], ['HEALTH_TIMEOUT', ' 30'], ['HEALTH_TIMEOUT', "30\n"],
             ['SUBID_COUNT', '1'], ['DATA_DIR', '/etc'], ['DATA_DIR', '/mnt/'], ['DATA_DIR', '/mnt/../etc'], ['DATA_DIR', '/mnt/a/../b'], ['DATA_DIR', '/mnt/a/..'], ['DATA_DIR', '/mnt/./a'], ['DATA_DIR', '/mnt/a/'], ['DATA_DIR', '/mnt//a'],
@@ -65,7 +69,12 @@ t('validate_setting accepts and rejects like the schema', function () {
             ['PLAY_CPU_PERCENT', ' 5'], ['PLAY_CPU_PERCENT', "5\n"], ['PLAY_MEMORY_MB', '4194305'], ['PLAY_MEMORY_MB', '8G'], ['PLAY_MEMORY_MB', '99999999999'],
             ['PLAY_IDLE_STOP_MINUTES', '1441'], ['PLAY_IDLE_STOP_MINUTES', ''], ['PLAY_IDLE_STOP_MINUTES', '5.5'], ['PLAY_IDLE_STOP_MINUTES', "30\n"],
             ['LIBRARY_PATH', '/etc'], ['LIBRARY_PATH', '/mnt/'], ['LIBRARY_PATH', '/mnt/a/../b'], ['LIBRARY_PATH', '/mnt/a/'], ['LIBRARY_PATH', "/mnt/a\n"],
-            ['LIBRARY_PATH', '/mnt/a b'], ['PLAY_PIDS_MAX', '1']];
+            ['LIBRARY_PATH', '/mnt/a b'], ['PLAY_PIDS_MAX', '1'],
+            ['PLAY_SESSION_HOURS', '0'], ['PLAY_SESSION_HOURS', '25'], ['PLAY_SESSION_HOURS', ''], ['PLAY_SESSION_HOURS', '1.5'], ['PLAY_SESSION_HOURS', "6\n"],
+            ['PLAY_CPU_PERFORMANCE', 'true'], ['PLAY_CPU_PERFORMANCE', 'YES'], ['PLAY_CPU_PERFORMANCE', ''],
+            ['PLAY_SEAT_CPUS', '0-'], ['PLAY_SEAT_CPUS', '-3'], ['PLAY_SEAT_CPUS', '0 -3'], ['PLAY_SEAT_CPUS', 'seat1='], ['PLAY_SEAT_CPUS', 'Seat1=0-7'],
+            ['PLAY_SEAT_CPUS', 'seat1=0-7;'], ['PLAY_SEAT_CPUS', 'seat1=0-7;seat2'], ['PLAY_SEAT_CPUS', '0-7;seat1=1'], ['PLAY_SEAT_CPUS', 'seat1=0-7,'],
+            ['PLAY_SEAT_CPUS', "0-15\n"], ['PLAY_SEAT_CPUS', '12345'], ['PLAY_SEAT_CPUS', str_repeat('1,', 200) . '1'], ['PLAY_SEAT_CPUS', '$(id)']];
     foreach ($good as [$k, $v]) { ok(psu_validate_setting($k, $v), "$k=$v should pass"); }
     foreach ($bad as [$k, $v]) { ok(!psu_validate_setting($k, $v), "$k=" . json_encode($v) . ' should fail'); }
 });

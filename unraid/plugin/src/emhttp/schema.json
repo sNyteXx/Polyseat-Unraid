@@ -98,5 +98,36 @@
     "label": "Game library: the mount point of its own ZFS dataset, with a quota, owned by root, under /mnt. Checked when a play session starts.",
     "locked_while_running": true,
     "title": "Game library path"
+  },
+  "PLAY_SESSION_HOURS": {
+    "type": "int",
+    "min": 1,
+    "max": 24,
+    "default": "6",
+    "tab": "play",
+    "label": "How long one play session may last, in hours. It ends by itself then (seats stop in order, the host is restored). Applies to the next play session.",
+    "locked_while_running": true,
+    "title": "Play session length (h)"
+  },
+  "PLAY_CPU_PERFORMANCE": {
+    "type": "enum",
+    "values": [
+      "yes",
+      "no"
+    ],
+    "default": "no",
+    "tab": "play",
+    "label": "Set every CPU's energy profile (energy_performance_preference) to performance while a play session runs, and put the previous values back exactly when it ends. Applies to the next play session.",
+    "locked_while_running": true,
+    "title": "CPU performance profile"
+  },
+  "PLAY_SEAT_CPUS": {
+    "type": "string",
+    "pattern": "^(?=.{0,300}$)(?:[0-9]{1,4}(?:-[0-9]{1,4})?(?:,[0-9]{1,4}(?:-[0-9]{1,4})?)*|[a-z0-9][a-z0-9-]{0,62}=[0-9]{1,4}(?:-[0-9]{1,4})?(?:,[0-9]{1,4}(?:-[0-9]{1,4})?)*(?:;[a-z0-9][a-z0-9-]{0,62}=[0-9]{1,4}(?:-[0-9]{1,4})?(?:,[0-9]{1,4}(?:-[0-9]{1,4})?)*)*)$",
+    "default": "",
+    "tab": "play",
+    "label": "Pin the seats to CPUs (empty = no pinning). One list for all seats, e.g. 0-15 (P-cores of an i7-14700K), or per seat, e.g. seat1=0-7;seat2=8-15. Only processes inside a seat's container are pinned. Checked against the host's CPUs when saved and when a session starts.",
+    "locked_while_running": true,
+    "title": "Seat CPUs"
   }
 }

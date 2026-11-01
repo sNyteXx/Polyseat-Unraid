@@ -83,6 +83,7 @@ function psu_validate_setting(string $key, string $value): bool
             return preg_match('/^[0-9]{1,10}$/D', $value) === 1
                 && (int)$value >= $rule['min'] && (int)$value <= $rule['max'];
         case 'path':
+        case 'string':
             return $value === '' || preg_match('~' . $rule['pattern'] . '~D', $value) === 1;
     }
     return false;
@@ -461,7 +462,8 @@ function psu_render_field(array $entry): string
             . ' data-min="' . psu_e($entry['min'] ?? '') . '" data-max="' . psu_e($entry['max'] ?? '') . '">';
     } else {
         $control = '<input type="text" autocomplete="off" spellcheck="false"' . $attrs . ' value="' . psu_e($value) . '"'
-            . ' placeholder="' . psu_e((string)($entry['default'] ?? '') !== '' ? $entry['default'] : '/mnt/pool/polyseat') . '">';
+            . ' placeholder="' . psu_e((string)($entry['default'] ?? '') !== '' ? $entry['default']
+                : (($entry['type'] ?? '') === 'string' ? 'e.g. 0-15 or seat1=0-7;seat2=8-15' : '/mnt/pool/polyseat')) . '">';
     }
     $default = $entry['default'] === '' ? '(none)' : (string)$entry['default'];
     $help = $label . '<br><span class="psu-muted">Default: ' . psu_e($default)

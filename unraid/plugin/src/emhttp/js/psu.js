@@ -68,7 +68,7 @@
     if (rule.type === 'int') {
       return /^[0-9]{1,10}$/.test(value) && Number(value) >= rule.min && Number(value) <= rule.max;
     }
-    if (rule.type === 'path') { return value === '' || new RegExp(rule.pattern).test(value); }
+    if (rule.type === 'path' || rule.type === 'string') { return value === '' || new RegExp(rule.pattern).test(value); }
     return false;
   };
 

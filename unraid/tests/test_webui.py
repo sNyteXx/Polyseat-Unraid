@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -90,9 +91,15 @@ class SchemaConsistencyTests(unittest.TestCase):
                       "PLAY_MEMORY_MB": (["0", "1024", "4194304"], ["4194305", "-1", "", "8G", "99999999999"]),
                       "PLAY_IDLE_STOP_MINUTES": (["0", "1", "1440", "030"], ["1441", "-1", "", "30m", "1e1", " 5"]),
                       "LIBRARY_PATH": (["", "/mnt/download/polyseat-games", "/mnt/disk1/a.b-c_d"],
-                                       ["/etc", "/mnt/", "/mnt/a/../b", "/mnt/a/", "/mnt//a", "/mnt/a b"])})
+                                       ["/etc", "/mnt/", "/mnt/a/../b", "/mnt/a/", "/mnt//a", "/mnt/a b"]),
+                      "PLAY_SESSION_HOURS": (["1", "6", "24", "06"], ["0", "25", "", "1.5", "6h", " 6"]),
+                      "PLAY_CPU_PERFORMANCE": (["yes", "no"], ["true", "YES", "", "1"]),
+                      # shape only here; the host's CPU count is the controller's own check (test_owner_mode)
+                      "PLAY_SEAT_CPUS": (["", "0-15", "0,2,4-7", "seat1=0-7;seat2=8-15"],
+                                         ["0-", "-3", "seat1=", "Seat1=0-7", "seat1=0-7;", "0-7;seat1=1", "12345", "$(id)"])})
         for key, (good, bad) in cases.items():
-            if key not in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "PLAY_IDLE_STOP_MINUTES", "LIBRARY_PATH"):
+            if key not in ("PLAY_CPU_PERCENT", "PLAY_MEMORY_MB", "PLAY_IDLE_STOP_MINUTES", "LIBRARY_PATH", "PLAY_SESSION_HOURS",
+                           "PLAY_CPU_PERFORMANCE", "PLAY_SEAT_CPUS"):
                 continue
             for value in good:
                 self.assertEqual(sb.ctl("config-set", f"{key}={value}").code, 0, (key, value))
@@ -104,15 +111,16 @@ class SchemaConsistencyTests(unittest.TestCase):
         schema = json.loads((EMHTTP / "schema.json").read_text())
         for key, rule in schema.items():
             self.assertRegex(key, r"^[A-Z_]+$")
-            self.assertIn(rule["type"], ("enum", "int", "path"))
+            self.assertIn(rule["type"], ("enum", "int", "path", "string"))
             self.assertIn("default", rule)
             self.assertIn(rule["tab"], ("general", "storage", "advanced", "play"))
             if rule["type"] == "enum":
                 self.assertIn(rule["default"], rule["values"])
             if rule["type"] == "int":
                 self.assertTrue(rule["min"] <= int(rule["default"]) <= rule["max"])
-            if rule["type"] == "path":
+            if rule["type"] in ("path", "string"):
                 self.assertNotIn("~", rule["pattern"])
+                self.assertTrue(rule["default"] == "" or re.search(rule["pattern"], rule["default"]), key)
 
 
 @unittest.skipUnless(shutil.which("node"), "node not available")
@@ -167,9 +175,12 @@ class JsTests(unittest.TestCase):
             t('PLAY_MEMORY_MB','4194304'), t('PLAY_MEMORY_MB','4194305'), t('PLAY_MEMORY_MB',''),
             t('PLAY_IDLE_STOP_MINUTES','0'), t('PLAY_IDLE_STOP_MINUTES','1440'), t('PLAY_IDLE_STOP_MINUTES','1441'),
             t('PLAY_IDLE_STOP_MINUTES','5.5'),
-            t('LIBRARY_PATH','/mnt/download/polyseat-games'), t('LIBRARY_PATH','/etc'), t('LIBRARY_PATH','')]));""")
+            t('LIBRARY_PATH','/mnt/download/polyseat-games'), t('LIBRARY_PATH','/etc'), t('LIBRARY_PATH',''),
+            t('PLAY_SESSION_HOURS','24'), t('PLAY_SESSION_HOURS','25'), t('PLAY_CPU_PERFORMANCE','yes'), t('PLAY_CPU_PERFORMANCE','true'),
+            t('PLAY_SEAT_CPUS',''), t('PLAY_SEAT_CPUS','seat1=0-7;seat2=8-15'), t('PLAY_SEAT_CPUS','seat1='), t('PLAY_SEAT_CPUS','0-15\\n')]));""")
         self.assertEqual(out, [True, False, True, False, True, False, True, False,
-                               True, True, False, False, True, False, False, True, True, False, False, True, False, True])
+                               True, True, False, False, True, False, False, True, True, False, False, True, False, True,
+                               True, False, True, False, True, True, False, False])
 
     def test_play_card_helpers(self):
         out = self.run_node(f"""
