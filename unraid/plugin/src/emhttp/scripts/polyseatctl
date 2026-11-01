@@ -2690,11 +2690,13 @@ polyseatd_verify() { # the staged bundle is the pinned or a signed one (as daemo
   local sha=""
   [[ -d $POLYSEATD_DIR && ! -L $POLYSEATD_DIR && $(stat -c '%u %a' -- "$POLYSEATD_DIR") == '0 700' &&
      -f $POLYSEATD_BIN && ! -L $POLYSEATD_BIN && $(stat -c '%u %a' -- "$POLYSEATD_BIN") == '0 755' &&
-     -f $POLYSEATD_DIR/.bundle-sha256 && ! -L $POLYSEATD_DIR/.bundle-sha256 ]] && sha=$(< "$POLYSEATD_DIR/.bundle-sha256") ||
+     -f $POLYSEATD_DIR/.bundle-sha256 && ! -L $POLYSEATD_DIR/.bundle-sha256 ]] ||
     { log error "polyseatd: no staged daemon bundle (daemon-stage first)"; return 1; }
-  [[ $sha =~ ^[0-9a-f]{64}$ ]] && { [[ $sha == "$POLYSEATD_SHA256" ]] ||
-    [[ -f $POLYSEATD_DIR/.bundle-signed && ! -L $POLYSEATD_DIR/.bundle-signed && $(< "$POLYSEATD_DIR/.bundle-signed") == "$sha" ]]; } ||
-    { log error "polyseatd: the staged bundle is neither the pinned nor a signed one"; return 1; }
+  sha=$(< "$POLYSEATD_DIR/.bundle-sha256")
+  if ! [[ $sha =~ ^[0-9a-f]{64}$ ]] || { [[ $sha != "$POLYSEATD_SHA256" ]] &&
+      ! [[ -f $POLYSEATD_DIR/.bundle-signed && ! -L $POLYSEATD_DIR/.bundle-signed && $(< "$POLYSEATD_DIR/.bundle-signed") == "$sha" ]]; }; then
+    log error "polyseatd: the staged bundle is neither the pinned nor a signed one"; return 1
+  fi
   (cd -- "$POLYSEATD_DIR" && sha256sum --check --strict --quiet MANIFEST >/dev/null 2>&1) ||
     { log error "polyseatd: the staged bundle differs from its MANIFEST"; return 1; }
 }
@@ -2831,7 +2833,17 @@ polyseatd_run_state_remove() { # polyseatd's own RAM directory (observer records
   [[ -d $dir && ! -L $dir && $(stat -c %u -- "$dir") == 0 ]] || { log error "polyseatd: $POLYSEATD_RUN_STATE is not its directory"; return 1; }
   ! awk -v r="$dir" '$5 == r || index($5, r "/") == 1' /proc/self/mountinfo | grep -q . ||
     { log error "polyseatd: something is mounted below $POLYSEATD_RUN_STATE"; return 1; }
-  # No recursion: anything but plain files stays for inspection.
+  # The input broker's marks (broker.py SEALED): a tree of empty directories named after device paths. Only such a
+  # tree is removed, deepest first with rmdir; a file or link anywhere in it leaves all of it for inspection (run 28).
+  if [[ -d $dir/sealed && ! -L $dir/sealed ]]; then
+    if find "$dir/sealed" -xdev ! -type d -print -quit | grep -q .; then
+      log error "polyseatd: $POLYSEATD_RUN_STATE/sealed holds more than the broker's marks"; return 1
+    fi
+    while IFS= read -r -d '' f; do
+      rmdir -- "$f" || { log error "polyseatd: cannot remove the broker's marks in $POLYSEATD_RUN_STATE/sealed"; return 1; }
+    done < <(find "$dir/sealed" -xdev -depth -type d -print0)
+  fi
+  # No recursion otherwise: anything but plain files stays for inspection.
   for f in "$dir"/* "$dir"/.[!.]*; do
     [[ -e $f || -L $f ]] || continue
     [[ -f $f && ! -L $f ]] || { log error "polyseatd: unexpected entry ${f##*/} in $POLYSEATD_RUN_STATE"; return 1; }

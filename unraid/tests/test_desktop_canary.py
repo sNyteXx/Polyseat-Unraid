@@ -1129,6 +1129,19 @@ class PolyseatdTests(unittest.TestCase):
         res = source_ctl(script, str(d))
         self.assertNotEqual(res.returncode, 0)
         self.assertTrue((run / "sub").is_dir())  # left for inspection, never recursed into
+        shutil.rmtree(run)
+        marks = run / "sealed/devices/virtual/misc/uhid"
+        marks.mkdir(parents=True)
+        (run / "sealed/devices/virtual/input").mkdir()
+        (run / "uhid-owners.json").write_text("{}")
+        self.assertEqual(source_ctl(script, str(d)).returncode, 0)  # the broker's marks (Tower run 28)
+        self.assertFalse(run.exists())
+        marks.mkdir(parents=True)
+        (marks / "stray").write_text("x")
+        res = source_ctl(script, str(d))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("more than the broker's marks", res.stderr)
+        self.assertTrue((marks / "stray").is_file())
 
     def test_operator_commands_need_no_token_and_do_not_queue(self):
         for cmd in ("polyseatd-status", "polyseatd-stop"):
