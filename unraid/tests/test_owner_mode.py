@@ -868,7 +868,7 @@ class CpuSettingsTests(unittest.TestCase):
         self.assertEqual(pin.count("taskset"), 1)
         seat = re.search(r"^play_payload_seat\(\) \{.*?^\}", text, re.MULTILINE | re.DOTALL).group(0)
         self.assertIn("play_payload_seat", pin)   # the one place that decides what a seat is (play's own group only)
-        self.assertIn(r"lxc\.payload\.", seat)
+        self.assertIn(r"lxc\\.payload\\.", seat)
         self.assertNotIn("lxc.monitor", pin + seat)
 
 
