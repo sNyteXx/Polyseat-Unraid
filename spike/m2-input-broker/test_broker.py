@@ -80,6 +80,7 @@ class WhoOwnsADevice(unittest.TestCase):
         self._owner = broker.device_owner
         broker._reported.clear()
         broker._uhid_seen = {}
+        broker._correlated.clear()
 
     def tearDown(self):
         broker.device_owner = self._owner
@@ -127,6 +128,56 @@ class WhoOwnsADevice(unittest.TestCase):
             "vince", "vince")
 
         self.assertEqual(mine, {})
+
+
+class AGamepadStaysWithoutTheObserver(unittest.TestCase):
+    """Without the uhid observer (no bpftrace on Unraid) a gamepad is correlated to
+    the one container that opened a uhid descriptor in that cycle. The next cycle
+    has no new descriptor; the gamepad must stay where it was put rather than be
+    taken away a second after attaching (Tower run 29)."""
+
+    PAD = {"event19": {"sysname": "input40", "name": "Sunshine (libvirtualhid) X-Box Series Controller",
+                       "syspath": "/sys/devices/virtual/misc/uhid/0003:045E:0B12.0001/input/input40"}}
+
+    def setUp(self):
+        self._owner, self._observer = broker.device_owner, broker.uhid_observer
+        broker._reported.clear()
+        broker._uhid_seen = {}
+        broker._correlated.clear()
+        self.holders = {}
+        holders = self.holders
+
+        class Owner:
+            @staticmethod
+            def owners():
+                return {}
+
+            @staticmethod
+            def uhid_holders():
+                return dict(holders)
+
+        class Observer:
+            @staticmethod
+            def owner_of_node(node):
+                return "unknown"
+
+        broker.device_owner, broker.uhid_observer = Owner, Observer
+
+    def tearDown(self):
+        broker.device_owner, broker.uhid_observer = self._owner, self._observer
+
+    def test_the_pad_stays_with_the_seat_it_was_correlated_to(self):
+        self.holders["fd1"] = "seat1"
+        self.assertIn("event19", broker.attribute(dict(self.PAD), "seat1", "seat1"))
+        for _ in range(3):  # later cycles: nothing new opened
+            self.assertIn("event19", broker.attribute(dict(self.PAD), "seat1", "seat1"))
+
+    def test_another_seat_never_gets_it_and_a_new_device_is_judged_afresh(self):
+        self.holders["fd1"] = "seat2"
+        self.assertEqual(broker.attribute(dict(self.PAD), "seat1", "seat1"), {})
+        self.assertEqual(broker.attribute(dict(self.PAD), "seat1", "seat1"), {})
+        broker.attribute({}, "seat1", "seat1")  # the pad is gone: its answer goes with it
+        self.assertEqual(broker._correlated, {})
 
 
 class SealingReachesWhatTheHostAlreadyHolds(unittest.TestCase):

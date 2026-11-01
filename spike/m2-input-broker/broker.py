@@ -213,6 +213,14 @@ _reported = set()
 # device to one descriptor just as uinput does.
 _uhid_seen = {}
 
+# uhid devices already correlated to a container, by sysfs path. The evidence,
+# a descriptor that was new in that cycle, is gone by the next one, and without
+# the observer the following cycle would then fall back to the name and take
+# the gamepad away again a second after attaching it (seen on Unraid, which has
+# no bpftrace). The answer holds for as long as that very device exists; the
+# HID id in the path is never reused while the host runs.
+_correlated = {}
+
 
 def contradicts(name, tag, others):
     """Does this device name claim a seat that is not ours?
@@ -269,6 +277,9 @@ def attribute(candidates, seat, tag, others=()):
     # Distinct containers that opened a uhid descriptor since the last cycle.
     candidates_from_fresh = {c for c in fresh.values() if c}
     _uhid_seen = holders
+    present = {dev["syspath"] for dev in candidates.values()}
+    for gone in [s for s in _correlated if s not in present]:
+        del _correlated[gone]
 
     mine = {}
     for node, dev in candidates.items():
@@ -299,9 +310,12 @@ def attribute(candidates, seat, tag, others=()):
 
             # The observer did not see it, usually because it was created
             # before the observer started. Fall back to the correlation.
-            if len(candidates_from_fresh) == 1:
-                # Exactly one container just opened a descriptor: correlate.
-                correlated = next(iter(candidates_from_fresh))
+            remembered = _correlated.get(dev["syspath"])
+            if remembered is not None or len(candidates_from_fresh) == 1:
+                # Exactly one container just opened a descriptor, or one did
+                # when this device first appeared: correlate.
+                correlated = remembered or next(iter(candidates_from_fresh))
+                _correlated[dev["syspath"]] = correlated
                 dev["attribution"] = "uhid-correlated"
                 if correlated == seat:
                     # The descriptor is the evidence and the name is only a
