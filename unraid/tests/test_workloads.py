@@ -1354,7 +1354,7 @@ class BootTests(Fixture):
         self.assertIn('"$CTL" workloads-stop --wait 600 > /dev/null 2>&1 &', stopping)
         self.assertIn('wait "$workloads"', stopping)
         self.assertLess(stopping.index('"$CTL" workloads-stop --wait 600 > /dev/null 2>&1 &'), stopping.index('"$CTL" play-stop --wait 300 > /dev/null 2>&1'))
-        self.assertLess(stopping.index('"$CTL" stop > /dev/null 2>&1'), stopping.index('wait "$workloads"'))
+        self.assertLess(stopping.index('"$CTL" stop --emergency > /dev/null 2>&1'), stopping.index('wait "$workloads"'))
 
 
 class CoexistenceTests(Fixture):
