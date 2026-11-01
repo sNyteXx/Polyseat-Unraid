@@ -4,7 +4,7 @@
 > **EXPERIMENTAL UNRAID PORT — NOT INSTALLABLE, NOT PRODUCTION-READY, NOT SUPPORTED.**
 > This fork is actively being developed and is **not a drop-in replacement** for the upstream Polyseat project.
 > Do **not** install it on Unraid, run `polyseat-prepare`, change GPU passthrough, modify Docker/libvirt/networking, or remove your existing gaming setup.
-> The native Unraid `.plg` is intentionally disabled. Signed one-time canary runs on the owner's Unraid server showed a desktop seat, the GPU with NVENC, Steam, a first Moonlight stream and persistent Incus state (acceptance J2–J6); **input, two seats, the upstream daemon on Unraid and any installable plugin are not proven**.
+> The native Unraid `.plg` is intentionally disabled. Signed one-time canary runs on the owner's Unraid server showed a desktop seat, the GPU with NVENC, Steam, a first Moonlight stream, persistent Incus state and upstream's polyseatd on the LAN (acceptance J2–J7); **input, seats run by the upstream daemon, two seats and any installable plugin are not proven**.
 > Follow [Unraid WIP status and safety gates](UNRAID-WIP.md) and [Draft PR #1](https://github.com/sNyteXx/Polyseat-Unraid/pull/1).
 
 ---

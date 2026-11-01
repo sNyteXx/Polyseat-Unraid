@@ -22,12 +22,13 @@ Unraid 7.3.3. Every run had its own signed approval token and a verified rollbac
   cache pool.
 - **J5:** the first Moonlight stream (PIN pairing, NVENC at 59 fps over the LAN only) and a Steam sign-in by QR code.
 - **J6:** persistent Incus state on the cache pool, reopened only after a recorded clean stop.
+- **J7:** upstream's polyseatd on the LAN, with its password set before the first start and host actions locked; no seats yet.
 
 Not proven:
 - input (disabled on purpose);
 - games;
 - two seats;
-- the upstream daemon on Unraid;
+- seats run by the upstream daemon;
 - upgrades;
 - an installable `.plg`.
 
