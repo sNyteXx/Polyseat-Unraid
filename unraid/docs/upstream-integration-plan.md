@@ -100,6 +100,20 @@ clean stop of the previous run.**
 | Proof | unit tests; CI job `persist-canary` with a real ZFS pool `cache` and dataset `cache/polyseat`: run A fresh, run B reused (nothing autostarted), run C refused without a record; then Tower |
 | Tower setup | `/mnt/cache/polyseat` back to `root:root 0755`. "New Permissions" had set it to `nobody:users 0777`, and it now excludes `polyseat` |
 
+## Step 3 design: polyseatd on the LAN, no seats (owner, 2026-11-01: "muss in LAN sein")
+
+| | |
+|---|---|
+| Binary | upstream `cmd/polyseatd`, built static (`CGO_ENABLED=0`, `-trimpath`) in the CI build job. The canary controller **pins its SHA-256** at package build time. `daemon-stage FILE` (its own token action) copies only that exact binary into RAM (`/var/lib/polyseat-unraid-daemon`, root 0700). The controller package itself stays script-only |
+| Password | upstream lets whoever opens the interface first choose the password. On the LAN that window must never open, so `credentials.json` (argon2id, written by upstream's own `internal/auth` through `unraid/cmd/polyseat-passwd`) must exist in `/mnt/cache/polyseat/polyseatd` (root 0700/0600) before the first start. Without it nothing starts |
+| Interface | `listen` is exactly the single IPv4 address of `br0` on port 47800 (TLS, upstream's login). The controller checks `/proc/net/tcp`: that one listener and no other, and `setup:false` |
+| Config (written per run, RAM) | `update_check`, `web_update`, `web_uninstall` and `web_lan_bridge` all false: prepare, update, restart, uninstall and the LAN bridge answer 403. `uplink` br0; state and library on `cache/polyseat` |
+| Run | `polyseatd-session` (operation 7) starts the persistent Incus (clean-stop rule from step 2) and then polyseatd, in its own child of the canary cgroup (budget, watchdog, hard stop). Its `PATH` starts with the deny-tools. The controller itself only reads Incus and shuts it down |
+| While running | polyseatd reaches the Incus API directly, so every 10 s the policy guard runs and every seat must still be stopped; anything outside the policy ends the run. Status every 30 s (`polyseatd-status`); `polyseatd-stop` ends it |
+| Stop | SIGTERM; polyseatd must exit by itself within 30 s. Then the Incus clean stop and `/run/polyseat` removed (plain files only) |
+| Measured locally (disposable container, real runtime) | at start polyseatd changes nothing in Incus. `/api/setup` gets 409 when a password exists, a wrong login 401, `/api/state` without login 401, the five host actions 403. Its uhid observer backs off on the missing python3 (input is a later step) |
+| Proof | unit tests; CI run D in `persist-canary` (fixture `br0` 10.77.0.1, every HTTP check from outside, localhost not served); then Tower |
+
 Unchanged throughout:
 - no main merge, no release, no unreviewed `.plg`;
 - every Tower step needs its own gate;

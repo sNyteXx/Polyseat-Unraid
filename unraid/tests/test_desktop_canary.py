@@ -913,11 +913,157 @@ class PersistentStateTests(unittest.TestCase):
         text = CTL.read_text()
         self.assertIn("persist-smoke) cmd_persist_smoke", text)
         self.assertIn("6) canary_approval_for persist-smoke ;;", text)
-        self.assertIn('if [[ $CANARY_OPERATION -eq 6 ]]; then persist_state_prepare "$active_sha"', text)
+        self.assertIn('if [[ $CANARY_OPERATION -eq 6 || $CANARY_OPERATION -eq 7 ]]; then persist_state_prepare "$active_sha"', text)
         body = re.search(r"^cmd_persist_smoke\(\) \([^\n]*\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
         self.assertIn('canary_failure_cleanup "$PERSIST_INSTANCE"; svc_stop full', body)
         self.assertLess(body.index("persist_clean_stop || exit"), body.index("  svc_stop full || exit"))
         self.assertNotIn("run_incus delete", body)
+
+
+class PolyseatdTests(unittest.TestCase):
+    """Step 3 (owner, 2026-11-01: "muss in LAN sein"): upstream's polyseatd on the persistent Incus, its interface on
+    the host bridge's LAN address only, the password set before its first start, the binary pinned by the package."""
+    PIN = "ab" * 32
+
+    def allowed(self, operation, command):
+        return PersistentStateTests.allowed(self, operation, command)
+
+    def test_the_controller_itself_only_reads_and_shuts_incus_down(self):
+        for command in ("admin shutdown --timeout 60", "stop polyseat-persist-cpu --force --timeout 5",
+                        "query /1.0/instances?recursion=1", "query /1.0/profiles?recursion=1"):
+            with self.subTest(command=command):
+                self.assertTrue(self.allowed(7, command))
+        for command in ("start polyseat-persist-cpu", PersistentStateTests.INIT, "delete polyseat-persist-cpu",
+                        "image import /var/lib/polyseat-unraid-seat-image/image --alias polyseat-desktop",
+                        "exec polyseat-persist-cpu -- /usr/local/bin/polyseat-selftest desktop",
+                        "storage create default dir source=/mnt/cache/polyseat/incus/incus/storage-pools/default"):
+            with self.subTest(command=command):
+                self.assertFalse(self.allowed(7, command))
+
+    def test_listener_address_is_the_little_endian_form_proc_shows(self):
+        res = source_ctl('polyseatd_hex_ip 192.168.178.24; polyseatd_hex_ip 10.77.0.1')
+        self.assertEqual(res.stdout.split(), ["18B2A8C0:BAB8", "01004D0A:BAB8"])
+
+    def test_only_a_single_ipv4_on_the_bridge_is_accepted(self):
+        script = r"""
+          ip() { printf '%s' "$IPOUT"; }
+          polyseatd_lan_ip
+        """
+        one = "5: br0    inet 192.168.178.24/24 brd 192.168.178.255 scope global br0\n"
+        res = source_ctl(script, env={"PATH": "/usr/bin:/bin", "IPOUT": one})
+        self.assertEqual(res.stdout.strip(), "192.168.178.24")
+        for out in ("", one + one.replace(".24/", ".25/")):
+            self.assertNotEqual(source_ctl(script, env={"PATH": "/usr/bin:/bin", "IPOUT": out}).returncode, 0)
+
+    def fixture(self, pin=PIN, staged=True, creds=True, listeners=""):
+        d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-psd"))
+        self.addCleanup(shutil.rmtree, d)
+        daemon = d / "var/lib/polyseat-unraid-daemon"
+        if staged:
+            daemon.mkdir(parents=True)
+            daemon.chmod(0o700)
+            (daemon / "polyseatd").write_bytes(b"pinned-daemon")
+            (daemon / "polyseatd").chmod(0o755)
+        state = d / "mnt/cache/polyseat/polyseatd"
+        state.mkdir(parents=True)
+        state.chmod(0o700)
+        if creds:
+            (state / "credentials.json").write_text(json.dumps(
+                {"username": "owner", "algorithm": "argon2id", "salt": "c2FsdA==", "hash": "aGFzaA=="}))
+            (state / "credentials.json").chmod(0o600)
+        pin = hashlib.sha256(b"pinned-daemon").hexdigest() if pin == self.PIN else pin
+        script = r"""
+          POLYSEAT_RELEASE_GATE=canary ROOT="$1"
+          init_paths 2>/dev/null; ROOT="$1"; POLYSEATD_DIR="$1/var/lib/polyseat-unraid-daemon" POLYSEATD_BIN="$POLYSEATD_DIR/polyseatd"
+          POLYSEATD_SHA256="$2" LISTENERS=$3
+          me=$(id -u)
+          stat() { local out; out=$(command stat "$@") || return; printf '%s\n' "${out//$me /0 }"; }
+          polyseatd_lan_ip() { echo 192.168.178.24; }
+          polyseatd_listeners() { printf '%s' "$LISTENERS"; }
+          polyseatd_precheck
+        """
+        return source_ctl(script, str(d), pin, listeners)
+
+    def test_precheck_needs_the_pin_the_staged_binary_a_password_and_a_free_port(self):
+        self.assertEqual(self.fixture().returncode, 0, self.fixture().stderr)
+        for kwargs, needle in (({"pin": ""}, "pins no daemon"), ({"pin": "cd" * 32}, "differs from the pinned"),
+                               ({"staged": False}, "no staged daemon"), ({"creds": False}, "no password set"),
+                               ({"listeners": "18B2A8C0:BAB8"}, "already in use")):
+            with self.subTest(**kwargs):
+                res = self.fixture(**kwargs)
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn(needle, res.stderr)
+
+    def test_daemon_stage_accepts_only_the_pinned_binary(self):
+        text = CTL.read_text()
+        body = re.search(r"^cmd_daemon_stage\(\) \([^\n]*\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
+        self.assertLess(body.index("polyseatd differs from the controller's pin"), body.index('cp -- "$src"'))
+        self.assertIn("require_approval daemon-stage", body)
+        self.assertIn('rm -f -- "$POLYSEATD_BIN" "$POLYSEATD_DIR/.incoming"', text)  # uninstall removes it
+
+    def test_the_session_starts_only_on_the_lan_address_with_a_password_and_watches_incus(self):
+        text = CTL.read_text()
+        body = re.search(r"^cmd_polyseatd_session\(\) \([^\n]*\n(.*?)^\)", text, re.MULTILINE | re.DOTALL).group(1)
+        self.assertLess(body.index("polyseatd_precheck ||"), body.index("svc_start"))
+        self.assertIn('--arg listen "$ip:$POLYSEATD_PORT"', body)
+        for flag in ("update_check: false", "web_update: false", "web_uninstall: false", "web_lan_bridge: false"):
+            self.assertIn(flag, body)
+        self.assertIn('.listeners == [$l] and .session.setup == false', body)
+        loop = body[body.index("while (( $(date -u +%s) < deadline ))"):body.index("done", body.index("while (( $(date"))]
+        for needle in ("canary_profile_guard", "persist_instances", "canary_budget_check", "polyseatd_alive"):
+            self.assertIn(needle, loop)
+        self.assertLess(body.index('polyseatd_stop "$pid" || exit'), body.index("persist_clean_stop"))
+
+    def test_run_state_cleanup_removes_plain_files_only(self):
+        d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-run"))
+        self.addCleanup(shutil.rmtree, d)
+        script = r"""
+          ROOT="$1"; me=$(id -u)
+          stat() { local out; out=$(command stat "$@") || return; printf '%s\n' "${out//$me/0}"; }
+          sandbox() { return 0; }; ci_real_system() { return 1; }
+          polyseatd_run_state_remove
+        """
+        run = d / "run/polyseat"
+        run.mkdir(parents=True)
+        (run / "uhid-owner-1").write_text("x")
+        (run / ".hidden").write_text("x")
+        self.assertEqual(source_ctl(script, str(d)).returncode, 0)
+        self.assertFalse(run.exists())
+        run.mkdir()
+        (run / "sub").mkdir()
+        res = source_ctl(script, str(d))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertTrue((run / "sub").is_dir())  # left for inspection, never recursed into
+
+    def test_operator_commands_need_no_token_and_do_not_queue(self):
+        for cmd in ("polyseatd-status", "polyseatd-stop"):
+            res = source_ctl('POLYSEAT_RELEASE_GATE=canary ROOT=""; id() { printf "0\\n"; }; '
+                             'canary_approval_for() { exit 99; }; require_mutation_allowed "$1"', cmd)
+            self.assertEqual(res.returncode, 0, res.stderr)
+        main = CTL.read_text().split("\nmain() {", 1)[1]
+        early = main[:main.index("  acquire_lock\n")]
+        self.assertIn("polyseatd-stop) cmd_polyseatd_stop; return ;;", early)
+        res = source_ctl('POLYSEAT_RELEASE_GATE=canary ROOT=""; id() { printf "0\\n"; }; '
+                         'canary_approval_for() { exit 99; }; require_mutation_allowed polyseatd-session')
+        self.assertEqual(res.returncode, 99)
+
+    def test_package_build_pins_the_daemon_only_when_asked(self):
+        build = CTL.parents[5] / "unraid/scripts/build-plugin-package.sh"
+        for pin, ok in (("", True), ("ab" * 32, True), ("AB" * 32, False), ("ab" * 31, False)):
+            with self.subTest(pin=pin):
+                out = Path(tempfile.mkdtemp(prefix="polyseat-pkg-"))
+                self.addCleanup(shutil.rmtree, out)
+                env = {"PATH": os.environ["PATH"]}
+                if pin:
+                    env["POLYSEATD_SHA256"] = pin
+                res = subprocess.run(["sh", str(build), "2026.11.01", str(out), "closed"], env=env,
+                                     capture_output=True, text=True)
+                self.assertEqual(res.returncode == 0, ok, res.stderr)
+                if ok:
+                    ctl = subprocess.run(["tar", "-xJOf", str(next(out.glob("*.txz"))),
+                                          "usr/local/emhttp/plugins/polyseat-unraid/scripts/polyseatctl"],
+                                         capture_output=True, text=True, check=True).stdout
+                    self.assertIn(f'POLYSEATD_SHA256="{pin}"\n', ctl)
 
 
 class NftStubTests(unittest.TestCase):

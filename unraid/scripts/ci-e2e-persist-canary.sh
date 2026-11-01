@@ -4,7 +4,9 @@
 # own token and the plugin's RAM state removed in between exactly as before a Tower run:
 #   A  fresh: workspace created, seat created from the real seat image, self-test, clean stop recorded;
 #   B  reused: the persisted database and seat start again, nothing auto-started, self-test, clean stop recorded;
-#   C  no clean-stop record (as after a crash): refused before anything starts.
+#   C  no clean-stop record (as after a crash): refused before anything starts;
+#   D  step 3: upstream polyseatd on the persisted Incus, its interface on the fixture LAN address only, the
+#      password set before its first start; login, the locked host actions and the clean stop checked from outside.
 # Disposable GitHub-hosted runner ONLY. Throwaway keys. Not Unraid evidence.
 set -euo pipefail
 umask 077
@@ -20,7 +22,7 @@ fail() { printf 'PERSIST CANARY E2E BLOCKED/FAILED: %s\n' "$*" >&2; exit 2; }
 [[ ${SEAT_IMAGE_DIR:-} == "$GITHUB_WORKSPACE"/* && -d $SEAT_IMAGE_DIR && ! -L $SEAT_IMAGE_DIR ]] ||
   fail 'SEAT_IMAGE_DIR must be the downloaded seat image artifact inside the workspace'
 for tool in bash python3 jq git ssh-keygen sha256sum tar findmnt mount umount mountpoint \
-            pgrep stat readlink timeout setpriv zpool zfs; do
+            pgrep stat readlink timeout setpriv zpool zfs curl ip; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing CI prerequisite: $tool"
 done
 [[ -c /dev/zfs ]] || fail 'ZFS kernel module not loaded'
@@ -94,6 +96,7 @@ cleanup() {
       rmdir -- "$group" || status=2
     fi
   done
+  ip link del br0 2>/dev/null
   zpool list -H -o name cache >/dev/null 2>&1 && zpool destroy -f cache
   [[ -n $pool_file ]] && rm -f -- "$pool_file"
   rm -f -- "$work/release-key" "$work/approval-key"
@@ -198,13 +201,13 @@ ram_state_fresh() { # Tower: /run is a fresh 128 MiB noexec tmpfs; the plugin's 
   mount -t tmpfs -o size=128m,nosuid,nodev,noexec,mode=0755 tmpfs "$fixture/var/run"
 }
 
-install_run() { # name : a token for this run only, then stage, activate and seat-image-stage
-  local now
+install_run() { # name [token actions as JSON] : a token for this run only, then stage, activate and seat-image-stage
+  local now actions=${2:-'["stage","activate","seat-image-stage","persist-smoke"]'}
   now=$(date -u +%s)
   rm -f -- "$flash/canary-approval.json" "$flash/canary-approval.json.sig"
-  jq -n --arg host "$host_sha" --arg archive "$archive_sha" --arg seat "$seat_sha" --argjson now "$now" \
+  jq -n --arg host "$host_sha" --arg archive "$archive_sha" --arg seat "$seat_sha" --argjson now "$now" --argjson actions "$actions" \
     '{schema:1,host_sha256:$host,archive_sha256:$archive,seat_image_sha256:$seat,issued_at:$now,
-      expires_at:($now+1500),actions:["stage","activate","seat-image-stage","persist-smoke"]}' > "$flash/canary-approval.json"
+      expires_at:($now+1500),actions:$actions}' > "$flash/canary-approval.json"
   ssh-keygen -q -Y sign -f "$work/approval-key" -n polyseat-unraid-canary-approval-v1 "$flash/canary-approval.json"
   chmod 0600 "$flash/canary-approval.json" "$flash/canary-approval.json.sig"
   ctl stage "$runtime_archive" "$work/runtime.manifest.json" "$work/runtime.manifest.json.sig" --approve > "$evidence/$1-install.txt" 2>&1
@@ -215,6 +218,8 @@ install_run() { # name : a token for this run only, then stage, activate and sea
 finish_run() { # name : collect the controller's evidence, uninstall, check that nothing runs and the state stayed
   [[ ! -e $fixture/var/run/polyseat-unraid/persist-evidence ]] ||
     cp -r -- "$fixture/var/run/polyseat-unraid/persist-evidence" "$evidence/$1-controller-evidence"
+  [[ ! -e $fixture/var/run/polyseat-unraid/polyseatd-evidence ]] ||
+    cp -r -- "$fixture/var/run/polyseat-unraid/polyseatd-evidence" "$evidence/$1-polyseatd-evidence"
   ctl uninstall --approve >> "$evidence/$1-install.txt" 2>&1
   if pgrep -x incusd >/dev/null; then fail "$1: Incus daemon survived"; fi
   [[ ! -e $workload && ! -e $watchdog ]] || fail "$1: the run did not remove its groups"
@@ -263,6 +268,60 @@ if pgrep -x incusd >/dev/null; then fail 'run C: an Incus daemon was started'; f
 finish_run C
 step run-c-refused-without-clean-stop
 
+# --- run D: upstream polyseatd on the persisted Incus, its interface on the LAN address only ---
+mv -- "$work/clean-stop.json.hidden" "$state/clean-stop.json"  # the record run B wrote
+daemon="$proof/daemon"
+(cd "$daemon" && sha256sum --check --strict --quiet SHA256SUMS) || fail 'daemon build checksums'
+ip link add br0 type bridge
+ip addr add 10.77.0.1/24 dev br0
+ip link set br0 up
+lan=10.77.0.1
+psd="$fixture/mnt/cache/polyseat/polyseatd"
+install_run D '["stage","activate","seat-image-stage","daemon-stage","polyseatd-session"]'
+ctl daemon-stage "$daemon/polyseatd" --approve >> "$evidence/D-install.txt" 2>&1 || fail 'run D: daemon-stage'
+rc=0; ctl polyseatd-session --approve > "$evidence/D-no-password.txt" 2>&1 || rc=$?
+[[ $rc != 0 ]] || fail 'run D: started without a password'
+grep -q 'no password set' "$evidence/D-no-password.txt" || fail 'run D: refused for another reason than the missing password'
+install -d -m 0700 -o 0 -g 0 "$psd"
+password=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-20)
+printf '%s\n' "$password" | "$daemon/polyseat-passwd" "$psd" owner || fail 'run D: password tool'
+[[ $(stat -c '%u %a' "$psd/credentials.json") == '0 600' ]] || fail 'run D: credentials mode'
+ctl polyseatd-session --approve > "$evidence/D-polyseatd-session.txt" 2>&1 &
+session_pid=$!
+for _ in $(seq 120); do ctl polyseatd-status > "$evidence/D-status.json" 2>/dev/null && break; kill -0 "$session_pid" 2>/dev/null || break; sleep 1; done
+jq -e '.alive and .listeners == ["01004D0A:BAB8"] and .session.setup == false' "$evidence/D-status.json" >/dev/null ||
+  fail "run D: polyseatd not serving exactly $lan:47800 with a password set ($(head -c 300 "$evidence/D-status.json"))"
+base="https://$lan:47800"
+http() { curl -sk --max-time 10 -o "$evidence/D-http-body" -w '%{http_code}' "$@"; }
+json=(-H 'Content-Type: application/json')
+[[ $(http "$base/api/state") == 401 ]] || fail 'run D: state without login'
+[[ $(http "${json[@]}" -X POST -d '{"username":"x","password":"takeover-attempt"}' "$base/api/setup") == 409 ]] || fail 'run D: setup takeover'
+[[ $(http "${json[@]}" -X POST -d '{"username":"owner","password":"wrong-password"}' "$base/api/login") == 401 ]] || fail 'run D: wrong login'
+[[ $(http "${json[@]}" -c "$work/jar" -X POST -d "{\"username\":\"owner\",\"password\":\"$password\"}" "$base/api/login") == 200 ]] ||
+  fail 'run D: login'
+[[ $(http -b "$work/jar" "$base/api/state") == 200 ]] || fail 'run D: state after login'
+jq -e '.seats == [] and .config.web_update == false and .config.web_uninstall == false and .config.web_lan_bridge == false
+  and .config.update_check == false' "$evidence/D-http-body" >/dev/null || fail 'run D: state content'
+cp "$evidence/D-http-body" "$evidence/D-state.json"
+for action in prepare update restart uninstall lan-bridge; do
+  [[ $(http "${json[@]}" -b "$work/jar" -X POST -d '{}' "$base/api/$action") == 403 ]] || fail "run D: /api/$action not locked"
+done
+[[ $(http "$base/") == 200 ]] || fail 'run D: page'
+! curl -sk --max-time 5 -o /dev/null "https://127.0.0.1:47800/api/session" || fail 'run D: also served on localhost'
+step run-d-polyseatd-on-the-lan-only
+ctl polyseatd-stop >> "$evidence/D-install.txt" 2>&1 || fail 'run D: stop request'
+rc=0; wait "$session_pid" || rc=$?
+[[ $rc == 0 ]] || fail "run D failed (rc=$rc, see D-polyseatd-session.txt)"
+grep -q "^PASS: polyseatd served https://$lan:47800 on the LAN only" "$evidence/D-polyseatd-session.txt" || fail 'run D: no PASS'
+[[ ! -e /run/polyseat ]] || fail 'run D: /run/polyseat left behind'
+if pgrep -f "$fixture/var/lib/polyseat-unraid-daemon/polyseatd" >/dev/null; then fail 'run D: polyseatd survived'; fi
+jq -e '.instances == [{"name":"polyseat-persist-cpu","status":"Stopped","autostart":"false"}]' "$state/clean-stop.json" >/dev/null ||
+  fail 'run D: no clean stop recorded'
+finish_run D
+[[ ! -e $fixture/var/lib/polyseat-unraid-daemon ]] || fail 'run D: uninstall left the staged daemon'
+ip link del br0
+step run-d-clean-stop
+
 host_mounts_after=$(awk '{print $5}' /proc/self/mountinfo | sort | sha256sum)
 [[ $host_mounts_before == "$host_mounts_after" ]] || fail 'mount table changed across the runs'
 du -sh "$state" > "$evidence/state-size.txt"
@@ -279,7 +338,7 @@ jq -n --arg commit "$commit" --arg archive "$archive_sha" --arg seat "$seat_sha"
     steps:($steps|split("\n")|map(select(length>0))),
     caveat:"Persistent-state canary on disposable Linux; not an Unraid test or production approval"}' \
   > "$proof/persist-canary-rehearsal.json"
-printf 'PASS: persistent Incus state on a ZFS dataset (fresh, reused without autostart, refused without a clean stop); NOT Unraid approval.\n' \
+printf 'PASS: persistent Incus state on a ZFS dataset (fresh, reused without autostart, refused without a clean stop) and polyseatd on the LAN only; NOT Unraid approval.\n' \
   > "$proof/persist-canary-e2e-result.txt"
 chmod a+r "$proof/persist-canary-rehearsal.json" "$proof/persist-canary-e2e-result.txt"
 passed=1

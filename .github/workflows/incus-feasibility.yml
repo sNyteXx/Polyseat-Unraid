@@ -181,6 +181,17 @@ jobs:
           jq -n --arg run "$GITHUB_RUN_ID" '{schema:1, reused:false, built_in_run:($run|tonumber)}' \
             > incus-build-proof/runtime-provenance.json
 
+      - name: Build upstream polyseatd and the password tool (static; the canary controller pins polyseatd)
+        run: |
+          mkdir -p incus-build-proof/daemon
+          v="$(sed -n 's/^pkgver=//p' packaging/aur/PKGBUILD)-unraid.${GITHUB_SHA::12}"
+          export CGO_ENABLED=0 GOFLAGS=-mod=readonly
+          go build -trimpath -ldflags "-s -w -buildid= -X github.com/superuser404notfound/Polyseat/internal/version.Version=$v" \
+            -o incus-build-proof/daemon/polyseatd ./cmd/polyseatd
+          go build -trimpath -ldflags "-s -w -buildid=" -o incus-build-proof/daemon/polyseat-passwd ./unraid/cmd/polyseat-passwd
+          (cd incus-build-proof/daemon && sha256sum polyseatd polyseat-passwd > SHA256SUMS && printf '%s\n' "$v" > version.txt)
+          cat incus-build-proof/daemon/SHA256SUMS incus-build-proof/daemon/version.txt
+
       - name: Exact CPU-only canary lifecycle and hard stop on disposable runner
         timeout-minutes: 12
         run: |
@@ -260,6 +271,8 @@ jobs:
             incus-build-proof/bin/incusd incus-build-proof/govulncheck.txt
           sh unraid/scripts/ci-govulncheck.sh "$RUNNER_TEMP/govulncheck-bin/govulncheck" \
             incus-build-proof/bin/incus incus-build-proof/govulncheck-cli.txt
+          sh unraid/scripts/ci-govulncheck.sh "$RUNNER_TEMP/govulncheck-bin/govulncheck" \
+            incus-build-proof/daemon/polyseatd incus-build-proof/govulncheck-polyseatd.txt
 
       - name: Preserve scan diagnostics even if a scanner failed
         if: always()

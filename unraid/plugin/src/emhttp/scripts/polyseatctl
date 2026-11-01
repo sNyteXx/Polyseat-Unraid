@@ -103,6 +103,15 @@ PERSIST_DATA_DIR="$PERSIST_MOUNT/incus"
 PERSIST_INSTANCE="polyseat-persist-cpu"
 PERSIST_MIN_FREE_KB=$((8 * 1024 * 1024))
 PERSIST_FRESH=0
+# Step 3 (owner, 2026-11-01: "muss in LAN sein"): upstream's polyseatd on the persistent Incus, its interface on the
+# LAN address of the host bridge only. The package build pins the exact daemon binary here; empty = no daemon.
+POLYSEATD_SHA256=""
+POLYSEATD_STATE="$PERSIST_MOUNT/polyseatd"
+POLYSEATD_LIBRARY="$PERSIST_MOUNT/library"
+POLYSEATD_PORT=47800
+POLYSEATD_RUN_STATE="/run/polyseat"
+POLYSEATD_MIN_SECONDS=600
+POLYSEATD_TEARDOWN_SECONDS=240
 CANARY_GPU_PCI=""
 CANARY_INSTANCE="polyseat-canary-cpu"
 CANARY_SIGN_IDENTITY="polyseat-unraid-canary-approver"
@@ -148,6 +157,8 @@ init_paths() {
   SEAT_DIR="$ROOT/var/lib/polyseat-unraid-seat-image"
   SEAT_IMAGE="$SEAT_DIR/image"
   SEAT_MANIFEST="$SEAT_DIR/manifest.json"
+  POLYSEATD_DIR="$ROOT/var/lib/polyseat-unraid-daemon"
+  POLYSEATD_BIN="$POLYSEATD_DIR/polyseatd"
   SEAT_EVIDENCE="$RUN_DIR/desktop-evidence"
   PIDFILE="$RUN_DIR/incusd.pid"
   LOCKFILE="$RUN_DIR/lock"
@@ -315,7 +326,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
       (unique | length) == length and all(.[];
        . == "stage" or . == "activate" or . == "start" or . == "canary-smoke" or
        . == "seat-image-stage" or . == "desktop-smoke" or . == "gpu-smoke" or . == "steam-smoke" or . == "steam-session" or
-       . == "persist-smoke" or
+       . == "persist-smoke" or . == "daemon-stage" or . == "polyseatd-session" or
        . == "config-set" or . == "config-reset")) and
     (.actions | index($action) != null)' "$CANARY_APPROVAL" >/dev/null 2>&1 ||
     die $EX_BLOCKED "canary approval expired, wrong host, invalid scope or bad schema"
@@ -325,7 +336,7 @@ canary_approval_for() { # command args... (root only, non-sandbox)
       [[ -f ${1:-} && ! -L ${1:-} ]] || die $EX_BLOCKED "canary stage archive unavailable"
       target=$(sha256sum -- "$1" | awk '{print $1}') ;;
     activate) target=${1:-} ;;
-    start | canary-smoke)
+    start | canary-smoke | daemon-stage | polyseatd-session)
       read_pointer
       target=$PTR_CURRENT ;;
     seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session | persist-smoke)
@@ -384,7 +395,7 @@ require_mutation_allowed() {
         stop | uninstall | recover) ;;  # emergency teardown works even after expiry
         # They only talk to a running session, which holds the lock and its own approved token, through root-private
         # files in $RUN_DIR; they never reach Incus or the host.
-        steam-session-pin | steam-session-status | steam-session-stop) ;;
+        steam-session-pin | steam-session-status | steam-session-stop | polyseatd-status | polyseatd-stop) ;;
         *) canary_approval_for "$@" ;;
       esac
       ;;
@@ -998,7 +1009,7 @@ canary_secure_path() { # existing absolute directory (ancestors included)
 
 canary_validate_data_dir() { # candidate, may be absent for the first start
   local requested=$1 parent
-  if [[ $CANARY_OPERATION -eq 6 ]]; then persist_validate_data_dir; return; fi
+  if [[ $CANARY_OPERATION -eq 6 || $CANARY_OPERATION -eq 7 ]]; then persist_validate_data_dir; return; fi
   [[ -z $requested || $requested == "$CANARY_DATA_DIR" ]] || {
     log error "canary: only the fixed ephemeral workspace is allowed"; return 1;
   }
@@ -1124,6 +1135,12 @@ canary_command_allowed() {
     "query /1.0/instances/$STEAM_INSTANCE/state" | "query /1.0/instances/$PERSIST_INSTANCE/state")
       [[ $CANARY_OPERATION -ne 1 ]] && return 0 ;;
   esac
+  if [[ $CANARY_OPERATION -eq 7 ]]; then
+    case "$*" in
+      "stop $PERSIST_INSTANCE --force --timeout 5" | 'admin shutdown --timeout 60') return 0 ;;
+    esac
+    return 1
+  fi
   if [[ $CANARY_OPERATION -eq 6 ]]; then
     # The first run creates pool, image and seat; later runs only start the persisted seat. Never delete it.
     case "$*" in
@@ -1388,7 +1405,7 @@ canary_process_starttime() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
 
 canary_budget_check() {
   local kb bytes=0 file size
-  if [[ ${CANARY_OPERATION:-0} -eq 6 ]]; then
+  if [[ ${CANARY_OPERATION:-0} -eq 6 || ${CANARY_OPERATION:-0} -eq 7 ]]; then
     # Persistent state on the dataset: its quota caps the size; walking a seat's rootfs every second would not.
     kb=$(df -Pk -- "$DATA_REAL" 2>/dev/null | awk 'NR == 2 {print $4}')
     [[ $kb =~ ^[0-9]+$ && $kb -ge $PERSIST_MIN_FREE_KB ]] || return 1
@@ -1398,7 +1415,7 @@ canary_budget_check() {
     kb=$( { du -skx -- "$DATA_REAL" 2>/dev/null || true; } | awk 'NR == 1 {print $1}')
     [[ $kb =~ ^[0-9]+$ && $kb -le $CANARY_DATA_MAX_KB ]] || return 1
   fi
-  for file in "$LOG_DIR/incusd.log" "$LOG_DIR/incusd.out" "$LOG_DIR/$PLUGIN.log" "$LOG_DIR/$PLUGIN.log.1"; do
+  for file in "$LOG_DIR/incusd.log" "$LOG_DIR/incusd.out" "$LOG_DIR/$PLUGIN.log" "$LOG_DIR/$PLUGIN.log.1" "$LOG_DIR/polyseatd.log"; do
     [[ ! -e $file && ! -L $file ]] && continue
     [[ -f $file && ! -L $file && $(stat -c %u -- "$file") == 0 ]] || return 1
     size=$(stat -c %s -- "$file") || return 1
@@ -1775,6 +1792,7 @@ svc_start() {
       4) canary_approval_for steam-smoke ;;
       5) canary_approval_for steam-session ;;
       6) canary_approval_for persist-smoke ;;
+      7) canary_approval_for polyseatd-session ;;
       *) canary_approval_for start ;;
     esac
     canary_host_pressure_check || { log error "canary: host memory/load outside approved safety window"; return 1; }
@@ -1809,7 +1827,7 @@ svc_start() {
     for tool in unshare setpriv mount umount setsid renice; do command -v "$tool" >/dev/null || return 1; done
     # Read-only topology checks first, so a mismatch leaves no one-shot state behind.
     canary_cgroup_precheck || return 1
-    if [[ $CANARY_OPERATION -eq 6 ]]; then persist_state_prepare "$active_sha" || return 1
+    if [[ $CANARY_OPERATION -eq 6 || $CANARY_OPERATION -eq 7 ]]; then persist_state_prepare "$active_sha" || return 1
     else canary_fresh_state_prepare "$active_sha" || return 1; fi
     canary_deny_tools_prepare || return 1
     [[ -d $LOG_DIR && ! -L $LOG_DIR && $(stat -c %u -- "$LOG_DIR") == 0 ]] || return 1
@@ -2577,6 +2595,217 @@ cmd_persist_smoke() ( # step 2: a seat whose Incus database and rootfs persist o
     "$PERSIST_DATASET" "$phase"
 )
 
+# ------------------------------------------------------------ polyseatd ----
+polyseatd_verify() { # the staged binary is exactly the one the signed controller pins
+  [[ $POLYSEATD_SHA256 =~ ^[0-9a-f]{64}$ ]] || { log error "polyseatd: this controller pins no daemon"; return 1; }
+  [[ -f $POLYSEATD_BIN && ! -L $POLYSEATD_BIN && ! -L $POLYSEATD_DIR &&
+     $(stat -c '%u %a' -- "$POLYSEATD_DIR") == '0 700' && $(stat -c '%u %a' -- "$POLYSEATD_BIN") == '0 755' ]] ||
+    { log error "polyseatd: no staged daemon (daemon-stage first)"; return 1; }
+  [[ $(sha256sum < "$POLYSEATD_BIN" | cut -c1-64) == "$POLYSEATD_SHA256" ]] ||
+    { log error "polyseatd: the staged daemon differs from the pinned one"; return 1; }
+}
+
+cmd_daemon_stage() ( # FILE : copies the pinned polyseatd into RAM after checking its hash
+  local src=${1:-} tmp
+  [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 1 ]] || die $EX_BLOCKED "daemon-stage needs a canary build and one file"
+  require_approval daemon-stage
+  require_no_journal
+  [[ $POLYSEATD_SHA256 =~ ^[0-9a-f]{64}$ ]] || die $EX_BLOCKED "this controller pins no polyseatd"
+  [[ -f $src && ! -L $src ]] || die $EX_BLOCKED "daemon file unavailable"
+  [[ $(sha256sum < "$src" | cut -c1-64) == "$POLYSEATD_SHA256" ]] || die $EX_VERIFY "polyseatd differs from the controller's pin"
+  [[ ! -L $POLYSEATD_DIR ]] || die $EX_BLOCKED "refusing a symlinked daemon directory"
+  { (umask 077; mkdir -p -- "$POLYSEATD_DIR") && chmod 0700 -- "$POLYSEATD_DIR"; } || die $EX_BLOCKED "cannot create the daemon directory"
+  tmp="$POLYSEATD_DIR/.incoming"
+  rm -f -- "$tmp"
+  { cp -- "$src" "$tmp" && chmod 0755 -- "$tmp" && mv -f -- "$tmp" "$POLYSEATD_BIN"; } || die $EX_BLOCKED "cannot stage polyseatd"
+  polyseatd_verify || die $EX_VERIFY "staged polyseatd failed verification"
+  log info "polyseatd $POLYSEATD_SHA256 staged in RAM"
+)
+
+polyseatd_lan_ip() { # the host bridge's single IPv4 address: the interface is reachable on the LAN and nowhere else
+  local addrs
+  addrs=$(ip -4 -o addr show dev "$STEAM_NIC_PARENT" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+  [[ $addrs =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { log error "polyseatd: $STEAM_NIC_PARENT needs exactly one IPv4 address"; return 1; }
+  printf '%s\n' "$addrs"
+}
+
+polyseatd_listeners() { # the TCP listeners on the interface port, as /proc/net/tcp shows them (read-only)
+  awk -v port="$(printf '%04X' "$POLYSEATD_PORT")" 'FNR > 1 && $4 == "0A" && substr($2, length($2) - 3) == port { print $2 }' \
+    /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+polyseatd_hex_ip() { # dotted IPv4 -> the little-endian hex address:port /proc/net/tcp shows
+  local a b c d
+  IFS=. read -r a b c d <<< "$1"
+  printf '%02X%02X%02X%02X:%04X\n' "$d" "$c" "$b" "$a" "$POLYSEATD_PORT"
+}
+
+polyseatd_precheck() { # read-only before anything starts: binary, password, LAN address, free port
+  local state=$ROOT$POLYSEATD_STATE creds
+  polyseatd_verify || return 1
+  # Upstream lets whoever opens the interface first choose the password. On the LAN that window must never open.
+  creds=$state/credentials.json
+  [[ -d $state && ! -L $state && $(stat -c '%u %a' -- "$state") == '0 700' &&
+     -f $creds && ! -L $creds && $(stat -c '%u %a' -- "$creds") == '0 600' ]] ||
+    { log error "polyseatd: no password set in $POLYSEATD_STATE (root 0700, credentials.json root 0600)"; return 1; }
+  jq -e '(.username | type == "string" and length > 0) and .algorithm == "argon2id" and
+    (.hash | type == "string" and length > 0)' "$creds" >/dev/null 2>&1 ||
+    { log error "polyseatd: credentials.json is not a usable password record"; return 1; }
+  polyseatd_lan_ip >/dev/null || return 1
+  [[ -z $(polyseatd_listeners) ]] || { log error "polyseatd: port $POLYSEATD_PORT is already in use"; return 1; }
+}
+
+polyseatd_alive() { # pid : the exact staged binary, in its own child of the canary group
+  local pid=$1
+  [[ $pid =~ ^[1-9][0-9]*$ && -d /proc/$pid ]] || return 1
+  [[ $(readlink -f -- "/proc/$pid/exe" 2>/dev/null) == "$(readlink -f -- "$POLYSEATD_BIN")" ]] || return 1
+  sandbox && ! ci_real_system && return 0
+  [[ $(< "/proc/$pid/cgroup") == "0::/${CANARY_CGROUP##*/}/polyseatd" ]]
+}
+
+polyseatd_launch() { # config : setsid in its own child of the canary group, so budget, watchdog and hard stop cover it
+  local config=$1 group="$CANARY_CGROUP/polyseatd" pid
+  if ! sandbox || ci_real_system; then
+    [[ -d $group ]] || mkdir -- "$group" || return 1
+  fi
+  (
+    if ! sandbox || ci_real_system; then printf '%s\n' "$BASHPID" > "$group/cgroup.procs" || exit 1; fi
+    cd / || exit 1
+    exec setsid env -i PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$SAFE_PATH" HOME="$RUN_DIR" LANG=C \
+      INCUS_DIR="$INCUS_DIR" "$POLYSEATD_BIN" -config "$config" >> "$LOG_DIR/polyseatd.log" 2>&1 < /dev/null 9>&-
+  ) &
+  pid=$!
+  printf '%s\n' "$pid" > "$RUN_DIR/polyseatd.pid"
+  printf '%s\n' "$pid"
+}
+
+polyseatd_stop() { # pid : SIGTERM and an exit by itself; a daemon that has to be killed is a failure
+  local pid=$1 i
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+  if polyseatd_alive "$pid"; then kill -TERM "$pid" 2>/dev/null || true; fi
+  for ((i = 0; i < 60; i++)); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+  if kill -0 "$pid" 2>/dev/null; then
+    log error "polyseatd: did not exit within 30 s; killing it"
+    kill -KILL "$pid" 2>/dev/null || true
+    return 1
+  fi
+  rm -f -- "$RUN_DIR/polyseatd.pid"
+}
+
+polyseatd_run_state_remove() { # polyseatd's own RAM directory (observer records): its plain files, then the directory
+  local dir f
+  dir=$(lxc_mount_real "$POLYSEATD_RUN_STATE")
+  [[ -e $dir || -L $dir ]] || return 0
+  [[ -d $dir && ! -L $dir && $(stat -c %u -- "$dir") == 0 ]] || { log error "polyseatd: $POLYSEATD_RUN_STATE is not its directory"; return 1; }
+  ! awk -v r="$dir" '$5 == r || index($5, r "/") == 1' /proc/self/mountinfo | grep -q . ||
+    { log error "polyseatd: something is mounted below $POLYSEATD_RUN_STATE"; return 1; }
+  # No recursion: anything but plain files stays for inspection.
+  for f in "$dir"/* "$dir"/.[!.]*; do
+    [[ -e $f || -L $f ]] || continue
+    [[ -f $f && ! -L $f ]] || { log error "polyseatd: unexpected entry ${f##*/} in $POLYSEATD_RUN_STATE"; return 1; }
+    rm -f -- "$f"
+  done
+  rmdir -- "$dir"
+}
+
+polyseatd_status() { # ip pid : one JSON line for the operator (no secret in it)
+  local session listeners alive=false
+  session=$(curl -sk --max-time 5 "https://$1:$POLYSEATD_PORT/api/session" 2>/dev/null | head -c 4096)
+  listeners=$(polyseatd_listeners | tr '\n' ' ')
+  polyseatd_alive "$2" && alive=true
+  jq -nc --arg url "https://$1:$POLYSEATD_PORT" --arg pid "$2" --arg listeners "$listeners" --arg session "$session" \
+    --argjson alive "$alive" '{ok: true, url: $url, alive: $alive, pid: $pid,
+      listeners: ($listeners | split(" ") | map(select(length > 0))), session: ($session | try fromjson catch null)}'
+}
+
+cmd_polyseatd_session() ( # step 3: upstream's polyseatd, no seats, its interface on the LAN until the operator stops it
+  local dir="$RUN_DIR/polyseatd-evidence" ip pid="" cfg remaining deadline last guard=0 out i
+  [[ $POLYSEAT_RELEASE_GATE == canary && $# -eq 0 ]] || die $EX_BLOCKED "polyseatd-session needs a canary build and takes no arguments"
+  require_approval polyseatd-session
+  require_no_journal
+  read_pointer
+  [[ -n $PTR_CURRENT && $(current_sha_from_link) == "$PTR_CURRENT" ]] || die $EX_BLOCKED "no active canary bundle"
+  { verify_bundle_files "$PTR_CURRENT" && verify_slot "$PTR_CURRENT"; } || die $EX_VERIFY "runtime bundle failed verification"
+  ! svc_pid >/dev/null 2>&1 || die $EX_BLOCKED "a daemon is already running; polyseatd-session starts its own"
+  polyseatd_precheck || die $EX_BLOCKED "polyseatd prechecks failed; nothing was started"
+  ip=$(polyseatd_lan_ip) || die $EX_BLOCKED "no LAN address"
+  remaining=$(( $(jq -er .expires_at "$CANARY_APPROVAL") - $(date -u +%s) ))
+  (( remaining >= POLYSEATD_MIN_SECONDS + POLYSEATD_TEARDOWN_SECONDS )) ||
+    die $EX_BLOCKED "polyseatd-session needs $((POLYSEATD_MIN_SECONDS + POLYSEATD_TEARDOWN_SECONDS)) s left on the token, it has $remaining s"
+  rm -f -- "$RUN_DIR/polyseatd-stop" "$RUN_DIR/polyseatd-status.json"
+  [[ ! -e $dir && ! -L $dir ]] || die $EX_BLOCKED "polyseatd evidence from an earlier run exists; collect it first"
+  (umask 077; mkdir -- "$dir") || die $EX_BLOCKED "cannot create evidence directory"
+  canary_budget_select persist
+  CANARY_OPERATION=7
+  # shellcheck disable=SC2154  # rc is assigned inside the trap itself
+  trap 'rc=$?; if [[ -n $pid ]]; then polyseatd_stop "$pid" || true; fi
+    if [[ $CANARY_RUN_OWNED -eq 1 ]]; then canary_failure_cleanup "$PERSIST_INSTANCE"; svc_stop full || rc=4; fi
+    polyseatd_run_state_remove || true; rm -f -- "$RUN_DIR/polyseatd-status.json"; exit "$rc"' EXIT
+  svc_start || exit $EX_HEALTH
+  canary_profile_guard || exit $EX_HEALTH
+  persist_instances > "$dir/instances-at-start.json" || { log error "polyseatd: a persisted seat runs or would autostart"; exit $EX_HEALTH; }
+  cfg="$RUN_DIR/polyseatd.json"
+  (umask 077; jq -n --arg listen "$ip:$POLYSEATD_PORT" --arg state "$ROOT$POLYSEATD_STATE" --arg lib "$ROOT$POLYSEATD_LIBRARY" \
+    --arg uplink "$STEAM_NIC_PARENT" '{listen: $listen, state_dir: $state, library_dir: $lib, uplink: $uplink,
+      update_check: false, web_update: false, web_uninstall: false, web_lan_bridge: false}' > "$cfg") || exit $EX_HEALTH
+  cp -- "$cfg" "$dir/polyseatd.json"
+  log info "polyseatd phase: start (https://$ip:$POLYSEATD_PORT, no seats)"
+  pid=$(polyseatd_launch "$cfg") || exit $EX_HEALTH
+  for ((i = 0; i < 60; i++)); do
+    polyseatd_alive "$pid" || { log error "polyseatd: exited during start"; exit $EX_HEALTH; }
+    [[ $(polyseatd_listeners) == "$(polyseatd_hex_ip "$ip")" ]] && break
+    sleep 1
+  done
+  out=$(polyseatd_status "$ip" "$pid")
+  printf '%s\n' "$out" > "$dir/status-start.json"
+  # Exactly the LAN address, a password already set, no first-come setup.
+  jq -e --arg l "$(polyseatd_hex_ip "$ip")" '.alive and .listeners == [$l] and .session.setup == false and
+    .session.authenticated == false' <<< "$out" >/dev/null ||
+    { log error "polyseatd: not serving exactly https://$ip:$POLYSEATD_PORT with a set password: $out"; exit $EX_HEALTH; }
+  (umask 077; printf '%s\n' "$out" > "$RUN_DIR/polyseatd-status.json")
+  log info "polyseatd: up at https://$ip:$POLYSEATD_PORT ($(grep -o 'certificate=[0-9A-F:]*' "$LOG_DIR/polyseatd.log" | tail -n 1))"
+  deadline=$(( $(jq -er .expires_at "$CANARY_APPROVAL") - POLYSEATD_TEARDOWN_SECONDS )) last=$(date -u +%s)
+  while (( $(date -u +%s) < deadline )) && [[ ! -e $RUN_DIR/polyseatd-stop ]]; do
+    polyseatd_alive "$pid" || { log error "polyseatd: exited on its own"; exit $EX_HEALTH; }
+    canary_budget_check || exit $EX_HEALTH
+    if (( ++guard % 5 == 0 )); then
+      # polyseatd reaches the Incus API directly: anything it creates outside the policy ends the run.
+      canary_profile_guard || exit $EX_HEALTH
+      persist_instances >/dev/null || { log error "polyseatd: a seat was started"; exit $EX_HEALTH; }
+    fi
+    if (( $(date -u +%s) - last >= 30 )); then
+      last=$(date -u +%s)
+      out=$(polyseatd_status "$ip" "$pid")
+      (umask 077; printf '%s\n' "$out" > "$RUN_DIR/polyseatd-status.json.new") &&
+        mv -f -- "$RUN_DIR/polyseatd-status.json.new" "$RUN_DIR/polyseatd-status.json"
+    fi
+    sleep 2
+  done
+  log info "polyseatd phase: stop ($([[ -e $RUN_DIR/polyseatd-stop ]] && echo 'stop requested' || echo 'token time is up'))"
+  polyseatd_stop "$pid" || exit $EX_HEALTH
+  pid=""
+  head -c 1048576 -- "$LOG_DIR/polyseatd.log" > "$dir/polyseatd.log" 2>/dev/null || true
+  canary_profile_guard || exit $EX_HEALTH
+  log info "polyseatd phase: clean stop"
+  persist_clean_stop || exit $EX_HEALTH
+  svc_stop full || exit $EX_HEALTH
+  polyseatd_run_state_remove || exit $EX_HEALTH
+  rm -f -- "$RUN_DIR/polyseatd-stop" "$RUN_DIR/polyseatd-status.json"
+  trap - EXIT
+  printf 'PASS: polyseatd served https://%s:%s on the LAN only (password set before start, host actions off), created nothing in Incus, exited by itself; Incus clean stop recorded.\n' \
+    "$ip" "$POLYSEATD_PORT"
+)
+
+# Operator side of a running polyseatd session: root-private files in $RUN_DIR only, like the Steam session's.
+cmd_polyseatd_status() {
+  [[ -f $RUN_DIR/polyseatd-status.json ]] || die $EX_BLOCKED "no polyseatd session is running"
+  cat -- "$RUN_DIR/polyseatd-status.json"
+}
+cmd_polyseatd_stop() {
+  [[ -f $RUN_DIR/polyseatd-status.json ]] || die $EX_BLOCKED "no polyseatd session is running"
+  (umask 077; : > "$RUN_DIR/polyseatd-stop") && printf 'stop requested; polyseatd and Incus stop within a minute\n'
+}
+
 # --------------------------------------------------------- transaction ----
 # Only a service that was running is restarted after a switch/restore. Starting an
 # enabled service is the boot path's job (it runs once the pool is mounted); a plugin
@@ -2792,6 +3021,8 @@ cmd_uninstall() {
   subid_file_remove "$SUBID_DIR/subgid" || true
   rm -f -- "$PIDFILE"
   seat_image_remove_exact
+  rm -f -- "$POLYSEATD_BIN" "$POLYSEATD_DIR/.incoming"
+  rmdir -- "$POLYSEATD_DIR" 2>/dev/null || true
   rmdir -- "$RUN_DIR/client" 2>/dev/null || true
   rmdir -- "$SLOTS" "$RAM_DIR" 2>/dev/null || true
   rmdir -- "$BUNDLE_DIR" "$STATE_DIR" 2>/dev/null || true
@@ -3304,6 +3535,8 @@ usage: polyseatctl COMMAND [args]
              steam-session --approve (M3: one bounded LAN session) | steam-session-pin NNNN | steam-session-status
              steam-session-stop
              persist-smoke --approve (step 2: the Incus state persists on the cache dataset across runs)
+             daemon-stage FILE --approve | polyseatd-session --approve (step 3: polyseatd on the LAN, no seats)
+             polyseatd-status | polyseatd-stop
  installs (need --approve): stage ARCHIVE MANIFEST SIG | activate SHA | update ARCHIVE MANIFEST SIG
                             rollback | recover | uninstall
 EOF
@@ -3334,7 +3567,8 @@ main() {
     logs) cmd_logs "${args[@]}"; return ;;
     config-get) cmd_config_get; return ;;
     stage | config-set | config-reset | activate | update | rollback | recover | uninstall | start | stop | restart | boot | canary-smoke | seat-image-stage | desktop-smoke | gpu-smoke | steam-smoke | steam-session | steam-session-pin | \
-    steam-session-status | steam-session-stop | persist-smoke) ;;
+    steam-session-status | steam-session-stop | persist-smoke | daemon-stage | polyseatd-session | \
+    polyseatd-status | polyseatd-stop) ;;
     *) usage ;;
   esac
   require_mutation_allowed "$cmd" "${args[@]}"
@@ -3352,6 +3586,8 @@ main() {
       steam-session-pin) cmd_steam_session_pin "${args[@]}"; return ;;
       steam-session-status) cmd_steam_session_status; return ;;
       steam-session-stop) cmd_steam_session_stop; return ;;
+      polyseatd-status) cmd_polyseatd_status; return ;;
+      polyseatd-stop) cmd_polyseatd_stop; return ;;
     esac
   fi
   ensure_state_dirs
@@ -3373,6 +3609,8 @@ main() {
     steam-smoke) cmd_steam_smoke "${args[@]}" ;;
     steam-session) cmd_steam_session "${args[@]}" ;;
     persist-smoke) cmd_persist_smoke "${args[@]}" ;;
+    daemon-stage) cmd_daemon_stage "${args[@]}" ;;
+    polyseatd-session) cmd_polyseatd_session "${args[@]}" ;;
     start)
       require_no_journal
       read_pointer

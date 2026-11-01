@@ -47,6 +47,14 @@ ctl="$dest/scripts/polyseatctl"
 [ "$(grep -c '^POLYSEAT_RELEASE_GATE="closed"' "$ctl")" -eq 1 ] || die 'release gate line not found exactly once'
 sed -i "s/^POLYSEAT_RELEASE_GATE=\"closed\"/POLYSEAT_RELEASE_GATE=\"$gate\"/" "$ctl"
 grep -q "^POLYSEAT_RELEASE_GATE=\"$gate\"" "$ctl" || die 'could not set the release gate'
+# Optional (CI): pin the exact upstream polyseatd binary built in the same run. Without a pin the controller
+# refuses to stage or run any daemon.
+if [ -n "${POLYSEATD_SHA256:-}" ]; then
+  printf '%s' "$POLYSEATD_SHA256" | grep -Eqx '[0-9a-f]{64}' || die 'POLYSEATD_SHA256 must be 64 lowercase hex digits'
+  [ "$(grep -c '^POLYSEATD_SHA256=""$' "$ctl")" -eq 1 ] || die 'polyseatd pin line not found exactly once'
+  sed -i "s/^POLYSEATD_SHA256=\"\"$/POLYSEATD_SHA256=\"$POLYSEATD_SHA256\"/" "$ctl"
+  grep -q "^POLYSEATD_SHA256=\"$POLYSEATD_SHA256\"$" "$ctl" || die 'could not pin polyseatd'
+fi
 
 # Normalize every shipped directory, including install/usr/local ancestors.
 # The outer mktemp directory stays private (0700); it is not part of the archive.
