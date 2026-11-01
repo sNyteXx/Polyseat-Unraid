@@ -1264,6 +1264,36 @@ class PlayTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(self.allowed(command))
 
+    def test_seat_compositors_run_above_the_game_and_nothing_else_is_touched(self):
+        """Run 30: the play daemon no longer runs at nice 19, and a seat's sway, gamescope, Xwayland and wineserver are
+        lifted to -12 thread by thread (upstream relies on ananicy for that); host processes and the game are not."""
+        d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-prio"))
+        self.addCleanup(shutil.rmtree, d)
+        def proc(pid, comm, cgroup, threads):
+            base = d / str(pid)
+            base.mkdir()
+            (base / "comm").write_text(comm + "\n")
+            (base / "cgroup").write_text(cgroup + "\n")
+            for tid, nice in threads:
+                (base / "task" / str(tid)).mkdir(parents=True)
+                fields = ["S"] + ["0"] * 15 + [str(nice)] + ["0"] * 20
+                (base / "task" / str(tid) / "stat").write_text(f"{tid} ({comm}) " + " ".join(fields) + "\n")
+        proc(100, "sway", "0::/polyseat-unraid-canary/lxc.payload.seat1", [(100, 19), (101, 8), (102, -12)])
+        proc(200, "gamescope-wl", "0::/polyseat-unraid-canary/lxc.payload.seat2/init.scope", [(200, 19)])
+        proc(300, "sway", "0::/user.slice", [(300, 0)])
+        proc(400, "nx:MainThread", "0::/polyseat-unraid-canary/lxc.payload.seat1", [(400, -8)])
+        proc(500, "wineserver", "0::/polyseat-unraid-canary/lxc.payload.seat1", [(500, -12)])
+        script = r"""
+          renice() { printf '%s\n' "$*" >> "$1/calls"; }
+          PLAY_PROC="$1" play_seat_priorities
+        """
+        res = source_ctl(script.replace("$1/calls", str(d / "calls")), str(d))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        calls = sorted((d / "calls").read_text().split("\n")[:-1])
+        self.assertEqual(calls, ["-n -12 -p 100", "-n -12 -p 101", "-n -12 -p 200"])
+        launch = re.search(r"^canary_launch\(\) \{.*?^\}", CTL.read_text(), re.MULTILINE | re.DOTALL).group(0)
+        self.assertIn('if [[ $CANARY_OPERATION -ne 8 ]]; then renice -n 19 -p "$BASHPID"', launch)
+
     def test_only_a_play_token_may_cover_six_hours(self):
         app = DesktopApprovalTests("test_stage_and_smoke_are_bound_to_bundle_and_image")
         app.setUp()

@@ -1791,7 +1791,9 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   parent_mnt_ns=$(readlink /proc/self/ns/mnt) || return 1
   [[ $parent_mnt_ns =~ ^mnt:\[[0-9]+\]$ ]] || return 1
   [[ ! -e $RUN_DIR/canary-emergency-stop ]] && canary_watchdog_check || return 1
-  renice -n 19 -p "$BASHPID" >/dev/null || return 1
+  # The bounded tests run their daemon at the lowest priority. Play does not: every seat process inherits it, and a
+  # compositor at nice 19 loses the CPU to the game it composites, so the stream lags while the game is fine (run 30).
+  if [[ $CANARY_OPERATION -ne 8 ]]; then renice -n 19 -p "$BASHPID" >/dev/null || return 1; fi
   printf '%s\n' "$BASHPID" > "$CANARY_CGROUP/daemon/cgroup.procs" || return 1
   # The OUTER parent has the hard aggregate limits. Do NOT enable controllers
   # in its subtree: this daemon leaf then advertises no controllers to LXC.
@@ -3088,6 +3090,28 @@ play_instances() { # prints [{name, status, autostart}]; with "stopped" fails un
 
 play_real() { ! sandbox || ci_real_system; }  # modules and udev only on a real system
 
+# What ananicy does for upstream on a CachyOS host (internal/seat/provision.go, limits.kernel.nice): a seat's compositors
+# and wineserver run above the game, so the frames Sunshine captures do not leave late. Unraid has no such daemon.
+PLAY_PRIORITY_NICE=-12
+PLAY_PRIORITY_COMMS='^(sway|wineserver|gamescope.*|Xwayland)$'
+
+play_seat_priorities() { # every thread of those processes in a seat's payload cgroup, never anything else
+  local proc=${PLAY_PROC:-/proc} p t cg comm nice
+  [[ -n ${PLAY_PROC:-} ]] || play_real || return 0
+  for p in "$proc"/[0-9]*; do
+    cg=$(cat -- "$p/cgroup" 2>/dev/null) || continue
+    [[ $cg =~ lxc\.payload\.[a-z0-9][a-z0-9-]* ]] || continue
+    comm=$(cat -- "$p/comm" 2>/dev/null) || continue
+    [[ $comm =~ $PLAY_PRIORITY_COMMS ]] || continue
+    for t in "$p"/task/[0-9]*; do
+      nice=$(sed 's/.*) //' "$t/stat" 2>/dev/null | awk '{print $17}') || continue
+      if [[ $nice =~ ^-?[0-9]+$ ]] && (( nice > PLAY_PRIORITY_NICE )); then
+        renice -n "$PLAY_PRIORITY_NICE" -p "${t##*/}" >/dev/null 2>&1 || true
+      fi
+    done
+  done
+}
+
 play_host_on() { # console guard, uhid, udev rule, device-owner helper; every change recorded for play_host_off
   local state=$RUN_DIR/play-host.json sysrq uhid=preloaded rule=present helper=present tty sysrq_file rule_file helper_dir
   [[ ! -e $state ]] || { log error "play: an earlier session left its host changes unrestored ($state)"; return 1; }
@@ -3229,7 +3253,7 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
     polyseatd_alive "$pid" || { log error "polyseatd: exited on its own"; exit $EX_HEALTH; }
     canary_budget_check || exit $EX_HEALTH
     # polyseatd builds and changes seats through the Incus API itself: anything outside upstream's seat shape ends it.
-    if (( ++guard % 5 == 0 )); then play_seat_guard || exit $EX_HEALTH; fi
+    if (( ++guard % 5 == 0 )); then play_seat_guard || exit $EX_HEALTH; play_seat_priorities; fi
     if (( $(date -u +%s) - last >= 30 )); then
       last=$(date -u +%s)
       out=$(polyseatd_status "$ip" "$pid" | jq -c --argjson seats "$(play_instances 2>/dev/null || echo null)" \
