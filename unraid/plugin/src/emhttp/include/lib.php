@@ -470,7 +470,7 @@ function psu_handle(array $server, array $get, array $post): array
     }
 
     // play-start verifies and stages hundreds of MB from the flash drive before it returns; play-recover reads the process
-    // table, the mount table and every instance's backup.yaml first.
+    // table and every instance's backup.yaml first.
     $slow = in_array($action, ['service', 'activate', 'rollback', 'recover', 'play_start', 'play_recover'], true);
     $result = psu_run_ctl($args, $slow ? 240 : 30);
     if ($result['timeout']) {

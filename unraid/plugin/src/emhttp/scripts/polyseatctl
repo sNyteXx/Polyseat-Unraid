@@ -3483,10 +3483,8 @@ play_host_off() { # exactly what play_host_on recorded, nothing else
     rm -f -- "$rule_file"
     if play_real; then udevadm control --reload || rc=1; fi
   fi
-  if [[ $uhid == loaded ]] && play_real; then
-    log info "play: unloading uhid (the session loaded it)"
-    modprobe -r uhid 2>/dev/null || log warn "play: uhid is still in use; left loaded"
-  fi
+  if [[ $uhid == loaded ]] && play_real; then log info "play: unloading uhid (the session loaded it)"; fi
+  if [[ $uhid == loaded ]] && play_real; then modprobe -r uhid 2>/dev/null || log warn "play: uhid is still in use; left loaded"; fi
   if [[ -e $RUN_DIR/play-console.json ]]; then
     log info "play: putting the console keyboard back"
     "$POLYSEATD_DIR/bin/polyseat-console" restore "$RUN_DIR/play-console.json" || { log error "play: console keyboard not restored"; rc=1; }
