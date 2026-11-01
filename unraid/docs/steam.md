@@ -45,6 +45,29 @@ way and proves that it runs on Tower's GPU, up to its sign-in window. Nobody sig
 | Controller | before start: the directory is exactly this owner and mode, on exactly `cache/polyseat` (`findmnt`), the dataset has a quota, at least 8 GiB free. Exactly one `disk` device. Uninstall never touches it |
 | Setup (one-time, 2026-10-31) | `zfs create -o quota=150G -o recordsize=1M cache/polyseat`; `install -d -o 1001000 -g 1001000 -m 0700 /mnt/cache/polyseat/steam-seat` |
 | Grow / remove | `zfs set quota=300G cache/polyseat` / `zfs destroy cache/polyseat` (removes everything, Steam login included) |
+| New Permissions | Fix Common Problems' weekly "New Permissions" resets every top-level folder on every disk and pool to `nobody:users` 777 unless it is excluded. `polyseat` is excluded (owner, 2026-11-01). Without that, the controller refuses the storage (Tower run 17) |
+
+## M3: one Moonlight session on the LAN (owner, 2026-10-31)
+
+`polyseatctl steam-session --approve` (operation 5, its own token action `steam-session`, bound to the seat image)
+starts the same seat as `steam-smoke`, with the same NIC, storage, budget and checks, and then a session instead of
+the self-test.
+
+| | |
+|---|---|
+| Length | until the operator's `steam-session-stop`, at the latest 240 s before the token expires (token: 30 min) |
+| LAN | the seat's veth in br0 only while the session runs; DHCP with the MAC as client id, so the router keeps one address for it |
+| Sunshine | stream ports 47984–48010 in the seat, LAN only: no port forward, UPnP off. Web UI localhost only, with random credentials for this session in a root-only file in the seat |
+| Pairing | Moonlight (Shield, Tab) adds the seat by its IP and shows a PIN. The owner relays it; `steam-session-pin NNNN` hands it to Sunshine, but only if exactly one device is waiting |
+| Input | none. Sunshine would create its virtual devices with uinput on the HOST, where a keyboard reaches Unraid's text console. Steam signs in by QR code with the Steam Mobile app |
+| While running | every 2 s: VM priority on the GPU (`gpu_guard_quick`), cgroup budgets, a waiting PIN; every 30 s a status (`steam-session-status`: IP, encoder, paired clients, waiting pairings, Steam, signed-in accounts) |
+| End | `polyseat-session stop` (Steam, Sunshine, sway, credentials), then the usual teardown: seat stop, GPU released, veth gone, delete, daemon stop |
+
+First stream: Tower run 19 ([tower-run15-19-session.md](tower-run15-19-session.md)).
+
+`steam-session-pin`, `-status` and `-stop` need no token and do not wait for the controller lock, which the running
+session holds. They only read or write root-private files in the run directory; the session reads them, so they never
+reach Incus or the host.
 
 ## Budget, measured
 
@@ -63,9 +86,12 @@ The originally proposed 6 GiB would OOM. 8 GiB leaves Tower about 10 GiB, and th
 | Allow-list, policy guard (NIC, GPU, limits, volatile keys), token, LAN precheck, Vulkan manifest validation, nft stub | unit tests (`test_desktop_canary.py`) |
 | Real incusd/LXC with the controller's NIC on a fixture br0 (dnsmasq + NAT), deny-tools, `file push`, Steam from Valve to its sign-in window, veth removed | `unraid/scripts/local-steam-rehearsal.sh` (~2 min) and CI job `steam-rehearsal` |
 | NVIDIA: compat32 injection, 32 bit GL on the RTX, Vulkan, NVENC, the real br0 and LAN router | Tower only (`steam-smoke`) |
+| Session: operation 5 allow-list, PIN/stop hand-over, token-free operator commands | unit tests (`SteamSessionTests`) |
+| Session plumbing on the fixture bridge: start (LAN, Sunshine with session credentials, Steam), PIN path to Sunshine's API, stop | `local-steam-rehearsal.sh` and CI job `steam-rehearsal` |
+| Moonlight pairing and streaming from a real client | Tower only (`steam-session`) |
 
 ## Not yet
 
 - gamescope, Proton and Big Picture;
-- Moonlight pairing and input (M3);
+- input from the client (needs upstream's input broker and a host udev rule);
 - the upstream daemon itself.
