@@ -52,6 +52,11 @@ writes, and treating those as foreign tags refuses a seat's own gamepad.
 
 `--tag ""` turns the name check off entirely.
 
+**Unraid adapter extension:** a physical USB device the owner has listed, by
+exact vendor and product id, for exactly this seat in the assignment file
+(`/run/polyseat/assign.json`, see "physical devices, by assignment" below) is
+attached like a virtual one. Nothing else physical ever is.
+
     ./broker.py --seat seat1
 """
 
@@ -311,7 +316,7 @@ def assigned_to(real, seat, table):
     return f"{vendor}:{product}"
 
 
-def scan(pattern=None):
+def scan(pattern=None, seat=None):
     """Every virtual event device, or only those whose name matches a pattern.
 
     Unfiltered by default, and that is the point. This used to carry a list of
@@ -330,15 +335,28 @@ def scan(pattern=None):
     The filter on `/devices/virtual/` stays and is the real safeguard: only
     what was made through uinput or uhid may enter a seat at all. A pattern can
     still be passed to narrow things while debugging.
+
+    **The one exception** is `seat`. When given, physical event devices that the
+    owner assigned to exactly that seat in the assignment file (see above) are
+    returned as well, marked with `assigned_seat` and `usb_id`. Without it, or
+    for any physical device not assigned to that seat, nothing changes: they
+    are skipped here and never even looked at.
     """
     rx = re.compile(pattern, re.IGNORECASE) if pattern else None
+    table = load_assignments() if seat else {}
     found = {}
     for entry in os.listdir(SYS_INPUT):
         if not entry.startswith("event"):
             continue
         sysdev = f"{SYS_INPUT}/{entry}"
-        if "/devices/virtual/" not in os.path.realpath(sysdev):
-            continue
+        real = os.path.realpath(sysdev)
+        usb_id = None
+        if "/devices/virtual/" not in real:
+            if not table or "/devices/" not in real:
+                continue
+            usb_id = assigned_to(real, seat, table)
+            if usb_id is None:
+                continue
         name = read(f"{sysdev}/device/name")
         if not name or (rx and not rx.search(name)):
             continue
@@ -354,8 +372,13 @@ def scan(pattern=None):
             "syspath": os.path.realpath(sysdev).removeprefix("/sys"),
             "sysname": device_owner.sysname_of_node(entry),
             "props": classify(os.path.realpath(f"{sysdev}/device")),
-            **hidraw_info(entry),
+            # A receiver's HID interfaces also have hidraw nodes, and those
+            # speak the vendor's configuration protocol, not just input. The
+            # assignment is for the evdev node, so the raw half stays behind.
+            **(hidraw_info(entry) if usb_id is None else {"raw": None}),
         }
+        if usb_id:
+            found[entry].update(assigned_seat=seat, usb_id=usb_id)
     return found
 
 
@@ -440,6 +463,21 @@ def attribute(candidates, seat, tag, others=()):
 
     mine = {}
     for node, dev in candidates.items():
+        if "assigned_seat" in dev:
+            # A physical device the owner assigned by USB id. Decided here and
+            # nowhere below: it was not made through uinput or uhid, so neither
+            # the creator check nor the seat tag has anything to say about it,
+            # and what they would say ("created on the host") is the very
+            # answer the owner has overruled. The other direction holds too:
+            # scan() sets the mark only on physical devices, so no virtual
+            # device can arrive here and skip the creator check. A device
+            # assigned to another seat is passed over without a word; it is
+            # that seat's broker's to attach.
+            if dev["assigned_seat"] == seat:
+                dev["attribution"] = "assigned"
+                mine[node] = dev
+            continue
+
         owner = owners.get(dev["sysname"], "unknown")
         if owner == "unknown":
             # No uinput descriptor claims it, so it came through uhid.
@@ -995,6 +1033,8 @@ def attach(backend, seat, dev):
            "uhid-correlated": "uhid descriptor correlated",
            "tag": "name tag only, unverified"}.get(
         dev.get("attribution", ""), dev.get("attribution", ""))
+    if dev.get("attribution") == "assigned":
+        how = f"assigned by USB id {dev['usb_id']}"
     print(f"  + {node:<10} {dev['name']}")
     print(f"    {how}: {' '.join(dev['props'])}")
 
@@ -1057,10 +1097,23 @@ def remove_orphans(backend, seat, tag):
     Returns how many were removed."""
     stale = 0
     remembered = load_state(seat)
+    # What the owner assigned to this seat and is plugged in right now. Such a
+    # device carries no seat tag by nature, so the name test below would call
+    # it an orphan on every restart and take it away for the one cycle it
+    # takes to attach it again.
+    assigned = {node for node, dev in scan(seat=seat).items()
+                if "assigned_seat" in dev}
     for node in backend.attached_nodes(seat):
         sysdev = f"{SYS_INPUT}/{node}"
         name = read(f"{sysdev}/device/name")
-        if not name or (tag and f"({tag})" not in name):
+        if node in assigned:
+            continue
+        # The reverse case: attached as an assigned device by an earlier run,
+        # and the assignment has gone while the broker was down. The tag test
+        # cannot be relied on to notice that (with --tag "" it never fires), so
+        # the memory is asked.
+        was_assigned = "assigned_seat" in remembered.get(node, {})
+        if not name or was_assigned or (tag and f"({tag})" not in name):
             print(f"  ~ {node:<10} orphaned, removing")
             if node in remembered:
                 detach(backend, seat, node, remembered[node])
@@ -1074,14 +1127,23 @@ def remove_orphans(backend, seat, tag):
 
 def cycle(backend, seat, tag, others, match, known):
     """One pass: attach what appeared, detach what went, return what is attached."""
-    current = attribute(scan(match), seat, tag, others)
+    current = attribute(scan(match, seat), seat, tag, others)
     for node, dev in current.items():
         # Before attaching, and on every pass afterwards. The mark
         # seal() leaves makes a udev retrigger hide the device again,
         # but only with a rule file that reads it; with an older one a
         # retrigger puts the permissions back to what the name rules
         # decided, and for a device no pattern matches that is open.
-        if seal(node):
+        #
+        # Not for an assigned physical device. Sealing exists to stop the
+        # host's desktop from also reading a seat's virtual device; this one is
+        # the host's own hardware, the host is headless (no compositor, no
+        # Steam), and sealing would chmod a node the owner may still want on
+        # the console after the assignment is removed, mark its DEVPATH for a
+        # udev rule that has no reason to hide it, and announce a real USB
+        # device as removed and added again. The seat gets its own node by
+        # path, which a root:root 0600 node would not change either way.
+        if dev.get("attribution") != "assigned" and seal(node):
             print(f"  * {node:<10} taken off the host desktop ({dev['name']})")
         if node not in known:
             attach(backend, seat, dev)

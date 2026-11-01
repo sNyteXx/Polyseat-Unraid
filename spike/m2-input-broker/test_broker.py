@@ -15,6 +15,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -464,6 +465,253 @@ class WhichUsbDeviceAnInputNodeIs(APhysicalDevicesWorld):
         table = {("1532", "00a4"): ("seat1", frozenset({0}))}
         self.assertIsNotNone(broker.assigned_to(self.real("event7"), "seat1", table))
         self.assertIsNone(broker.assigned_to(self.real("event8"), "seat1", table))
+
+
+class FakeBackend:
+    """Records what the broker asked a container runtime to do."""
+
+    def __init__(self):
+        self.nodes = {}         # seat -> set of attached nodes
+        self.calls = []
+
+    def attach_node(self, seat, node, major, minor, raw=None):
+        self.calls.append(("attach", seat, node, raw))
+        self.nodes.setdefault(seat, set()).add(node)
+
+    def detach_node(self, seat, node):
+        self.calls.append(("detach", seat, node))
+        self.nodes.setdefault(seat, set()).discard(node)
+
+    def attached_nodes(self, seat):
+        return sorted(self.nodes.get(seat, ()))
+
+    def run(self, seat, argv, stdin=None):
+        self.calls.append(("run", seat, argv[0]))
+
+    def of(self, kind):
+        return [c for c in self.calls if c[0] == kind]
+
+
+class APhysicalMouseGoesToTheSeatItIsAssignedTo(APhysicalDevicesWorld):
+    """scan(), attribute() and the pass that attaches, against the Razer."""
+
+    def setUp(self):
+        super().setUp()
+        self._owner = broker.device_owner
+        broker._reported.clear()
+        broker._uhid_seen = {}
+        broker._correlated.clear()
+
+        class Owner:
+            @staticmethod
+            def owners():
+                return {}
+
+            @staticmethod
+            def uhid_holders():
+                return {}
+
+            @staticmethod
+            def sysname_of_node(node):
+                real = os.path.realpath(f"{broker.SYS_INPUT}/{node}")
+                return os.path.basename(os.path.dirname(real))
+
+        broker.device_owner = Owner
+
+        self._env = os.environ.get("XDG_RUNTIME_DIR")
+        os.environ["XDG_RUNTIME_DIR"] = self.dir.name
+        self._sealing = (broker.seal, broker.SEALED)
+        self.sealed = []
+        broker.seal = lambda node: self.sealed.append(node) or False
+        broker.SEALED = os.path.join(self.dir.name, "sealed")
+        self.backend = FakeBackend()
+        self.quiet = contextlib.redirect_stdout(io.StringIO())
+        self.quiet.__enter__()
+
+    def tearDown(self):
+        self.quiet.__exit__(None, None, None)
+        broker.device_owner = self._owner
+        broker.seal, broker.SEALED = self._sealing
+        if self._env is None:
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+        else:
+            os.environ["XDG_RUNTIME_DIR"] = self._env
+        super().tearDown()
+
+    def mine(self, seat, **kw):
+        return broker.attribute(broker.scan(seat=seat, **kw), seat, seat)
+
+    def unplug(self, nodes=("event7", "event8", "event9", "event10")):
+        for node in nodes:
+            os.unlink(f"{self.sys_root}/class/input/{node}")
+        shutil.rmtree(f"{self.sys_root}/{self.RAZER}")
+
+    def test_the_assigned_seat_gets_every_node_of_the_device(self):
+        self.write([self.razer("seat1")])
+
+        mine = self.mine("seat1")
+
+        self.assertEqual(sorted(mine), ["event10", "event7", "event8", "event9"])
+        for dev in mine.values():
+            self.assertEqual(dev["attribution"], "assigned")
+            self.assertEqual(dev["assigned_seat"], "seat1")
+            self.assertEqual(dev["usb_id"], "1532:00a4")
+            self.assertIsNone(dev["raw"])
+
+    def test_the_nodes_are_classified_like_any_other(self):
+        self.write([self.razer("seat1")])
+
+        mine = self.mine("seat1")
+
+        self.assertIn("ID_INPUT_MOUSE=1", mine["event7"]["props"])
+        self.assertNotIn("ID_INPUT_KEYBOARD=1", mine["event7"]["props"])
+        self.assertIn("ID_INPUT_KEYBOARD=1", mine["event8"]["props"])
+        self.assertEqual(mine["event7"]["name"], "Razer Razer Naga Pro Mouse")
+        self.assertEqual((mine["event7"]["major"], mine["event7"]["minor"]), (13, 71))
+
+    def test_the_other_seats_broker_never_gets_it(self):
+        self.write([self.razer("seat1")])
+        self.assertEqual(self.mine("seat2"), {})
+        self.assertEqual(broker.scan(seat="seat2"), {})
+
+    def test_without_a_seat_scan_still_ignores_physical_devices(self):
+        self.write([self.razer("seat1")])
+        self.assertEqual(broker.scan(), {})
+
+    def test_a_device_nobody_listed_is_still_ignored(self):
+        # Same vendor, other product: a different Razer on the same host.
+        self.usb_device("devices/pci0000:00/0000:00:14.0/usb1/1-3", "1532", "0099",
+                        (("event11", 0, "Razer Other Mouse", "mouse"),), first_input=40)
+        self.usb_device("devices/pci0000:00/0000:00:14.0/usb1/1-4", "046d", "c077",
+                        (("event12", 0, "Logitech Mouse", "mouse"),), first_input=50)
+        self.write([self.razer("seat1")])
+
+        self.assertEqual(sorted(self.mine("seat1")),
+                         ["event10", "event7", "event8", "event9"])
+
+    def test_interfaces_narrow_it_to_the_mouse(self):
+        self.write([self.razer("seat1", interfaces=[0])])
+        self.assertEqual(sorted(self.mine("seat1")), ["event7"])
+
+    def test_a_missing_invalid_or_duplicate_file_attaches_nothing(self):
+        for data in (None, "{", [self.razer("seat1"), self.razer("seat2")],
+                     [self.razer("seat1"), {"vendor": "1532"}]):
+            if data is not None:
+                self.write(data)
+            for seat in ("seat1", "seat2"):
+                self.assertEqual(self.mine(seat), {}, (data, seat))
+
+    def test_a_virtual_device_cannot_borrow_an_assignment(self):
+        # The creator check still applies to everything that is not assigned
+        # by its USB id: a host-made virtual device is refused as before.
+        inp = f"{self.sys_root}/devices/virtual/input/input99"
+        self.put(f"{inp}/event30/dev", "13:94")
+        self.put(f"{inp}/name", "Razer Razer Naga Pro Mouse")
+        os.symlink(f"{inp}/event30", f"{self.sys_root}/class/input/event30")
+        os.symlink(inp, f"{inp}/event30/device")
+        self.write([self.razer("seat1")])
+        broker.device_owner.owners = staticmethod(lambda: {"input99": None})
+
+        self.assertIn("event30", broker.scan(seat="seat1"))    # considered ...
+        self.assertNotIn("event30", self.mine("seat1"))        # ... and refused
+
+    def test_a_pass_attaches_without_sealing_and_logs_the_usb_id(self):
+        self.write([self.razer("seat1", interfaces=[0])])
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            known = broker.cycle(self.backend, "seat1", "seat1", (), None, {})
+
+        self.assertEqual(sorted(known), ["event7"])
+        self.assertEqual(self.backend.of("attach"),
+                         [("attach", "seat1", "event7", None)])
+        self.assertEqual(self.sealed, [])
+        self.assertIn("+ event7", out.getvalue())
+        self.assertIn("Razer Razer Naga Pro Mouse", out.getvalue())
+        self.assertIn("assigned by USB id 1532:00a4: ID_INPUT=1 ID_INPUT_MOUSE=1",
+                      out.getvalue())
+        # And the synthetic event that makes the seat notice it.
+        self.assertIn(("run", "seat1", broker.FAKEUDEV), self.backend.calls)
+
+    def test_a_second_pass_changes_nothing(self):
+        self.write([self.razer("seat1")])
+        known = broker.cycle(self.backend, "seat1", "seat1", (), None, {})
+        count = len(self.backend.calls)
+
+        again = broker.cycle(self.backend, "seat1", "seat1", (), None, known)
+
+        self.assertEqual(again, known)
+        self.assertEqual(len(self.backend.calls), count)
+
+    def test_unplugging_detaches_it(self):
+        self.write([self.razer("seat1", interfaces=[0])])
+        known = broker.cycle(self.backend, "seat1", "seat1", (), None, {})
+
+        self.unplug()
+        known = broker.cycle(self.backend, "seat1", "seat1", (), None, known)
+
+        self.assertEqual(known, {})
+        self.assertEqual(self.backend.of("detach"), [("detach", "seat1", "event7")])
+        self.assertEqual(self.backend.nodes["seat1"], set())
+
+    def test_removing_the_assignment_detaches_it(self):
+        self.write([self.razer("seat1")])
+        known = broker.cycle(self.backend, "seat1", "seat1", (), None, {})
+        self.assertEqual(len(known), 4)
+
+        self.write([])
+        known = broker.cycle(self.backend, "seat1", "seat1", (), None, known)
+
+        self.assertEqual(known, {})
+        self.assertEqual(len(self.backend.of("detach")), 4)
+
+    def test_reassigning_to_another_seat_moves_it(self):
+        self.write([self.razer("seat1", interfaces=[0])])
+        known = broker.cycle(self.backend, "seat1", "seat1", (), None, {})
+
+        self.write([self.razer("seat2", interfaces=[0])])
+        known = broker.cycle(self.backend, "seat1", "seat1", (), None, known)
+        other = broker.cycle(self.backend, "seat2", "seat2", (), None, {})
+
+        self.assertEqual(known, {})
+        self.assertEqual(sorted(other), ["event7"])
+
+    def test_a_broker_restart_keeps_it(self):
+        self.write([self.razer("seat1", interfaces=[0])])
+        broker.cycle(self.backend, "seat1", "seat1", (), None, {})
+        self.assertEqual(self.backend.nodes["seat1"], {"event7"})
+
+        # The broker comes back: state file and attachment survive, `known`
+        # does not. The name carries no "(seat1)", which is what makes any
+        # other device look like an orphan.
+        removed = broker.remove_orphans(self.backend, "seat1", "seat1")
+
+        self.assertEqual(removed, 0)
+        self.assertEqual(self.backend.of("detach"), [])
+        self.assertEqual(self.backend.nodes["seat1"], {"event7"})
+
+    def test_an_assignment_removed_while_the_broker_was_down_is_cleaned_up(self):
+        self.write([self.razer("seat1", interfaces=[0])])
+        broker.cycle(self.backend, "seat1", "seat1", (), None, {})
+
+        self.write([])
+        # With the name check off, as `--tag ""` does, only the memory can tell.
+        removed = broker.remove_orphans(self.backend, "seat1", None)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.backend.nodes["seat1"], set())
+        # The remove event went out too, because the state file remembered it.
+        self.assertIn(("run", "seat1", broker.FAKEUDEV), self.backend.calls)
+
+    def test_a_device_unplugged_while_the_broker_was_down_is_cleaned_up(self):
+        self.write([self.razer("seat1", interfaces=[0])])
+        broker.cycle(self.backend, "seat1", "seat1", (), None, {})
+
+        self.unplug()
+        removed = broker.remove_orphans(self.backend, "seat1", "seat1")
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.backend.nodes["seat1"], set())
 
 
 if __name__ == "__main__":
