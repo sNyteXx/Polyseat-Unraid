@@ -21,6 +21,7 @@ names no new Tower write; every Tower step needs its own gate.
 | Moonlight pairing and an NVENC stream (59 fps) over the LAN only; Steam QR login persists | J5, [tower-run15-19-session.md](tower-run15-19-session.md) |
 | Persistent Incus state on `cache/polyseat`, reopened only after a recorded clean stop, nothing autostarted (step 2) | J6, [tower-run20-21-persist.md](tower-run20-21-persist.md) |
 | Upstream polyseatd on the LAN (`192.168.178.24:47800`), password before first start, host actions locked, no seats (step 3) | J7, [tower-run22-polyseatd.md](tower-run22-polyseatd.md) |
+| Every GPU container start needs the supervisor's fresh admission, so a VM keeps priority even over polyseatd's own starts (step 4) | J8, [tower-run23-gpu-admission.md](tower-run23-gpu-admission.md) |
 
 ## Open
 
