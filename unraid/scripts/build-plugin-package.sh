@@ -2,6 +2,9 @@
 # WIP / DO NOT USE. Builds the controller/WebUI/event package as a deterministic
 # Slackware-style .txz. Build host only: refuses on Unraid and never installs anything.
 # usage: build-plugin-package.sh VERSION OUTDIR GATE   (GATE: closed | test-host)
+# Optional environment: POLYSEATD_SHA256 (pin the daemon bundle), POLYSEAT_APPROVAL_MODE=signed|owner (default signed).
+# Owner approval mode (an Unraid admin's click in the WebUI replaces the signed per-session token) exists only together
+# with GATE canary, and GATE canary is only built here for it: the signed canary package stays build-canary-package.py's.
 set -eu
 
 die() { printf 'BLOCKED: %s\n' "$1" >&2; exit 2; }
@@ -19,8 +22,14 @@ esac
 case "$version" in
   *[!0-9A-Za-z.]*) die 'VERSION may contain only digits, letters and dots' ;;
 esac
+mode=${POLYSEAT_APPROVAL_MODE:-signed}
+case "$mode" in
+  signed | owner) ;;
+  *) die 'POLYSEAT_APPROVAL_MODE must be signed or owner' ;;
+esac
 case "$gate" in
-  closed | test-host) ;;
+  closed | test-host) [ "$mode" = signed ] || die 'POLYSEAT_APPROVAL_MODE=owner needs GATE canary' ;;
+  canary) [ "$mode" = owner ] || die 'GATE canary needs POLYSEAT_APPROVAL_MODE=owner here; the signed canary package is built by build-canary-package.py in a separately approved job' ;;
   *) die 'GATE must be closed or test-host; "open" is reserved for a separately approved release job' ;;
 esac
 if [ ! -d "$outdir" ] || [ -L "$outdir" ]; then die 'OUTDIR must be an existing real directory'; fi
@@ -47,6 +56,9 @@ ctl="$dest/scripts/polyseatctl"
 [ "$(grep -c '^POLYSEAT_RELEASE_GATE="closed"' "$ctl")" -eq 1 ] || die 'release gate line not found exactly once'
 sed -i "s/^POLYSEAT_RELEASE_GATE=\"closed\"/POLYSEAT_RELEASE_GATE=\"$gate\"/" "$ctl"
 grep -q "^POLYSEAT_RELEASE_GATE=\"$gate\"" "$ctl" || die 'could not set the release gate'
+[ "$(grep -c '^POLYSEAT_APPROVAL_MODE="signed"' "$ctl")" -eq 1 ] || die 'approval mode line not found exactly once'
+sed -i "s/^POLYSEAT_APPROVAL_MODE=\"signed\"/POLYSEAT_APPROVAL_MODE=\"$mode\"/" "$ctl"
+grep -q "^POLYSEAT_APPROVAL_MODE=\"$mode\"" "$ctl" || die 'could not set the approval mode'
 # Optional (CI): pin the exact polyseat daemon bundle (polyseat-daemon.tar) built in the same run. Without a pin the controller
 # refuses to stage or run any daemon.
 if [ -n "${POLYSEATD_SHA256:-}" ]; then

@@ -27,6 +27,8 @@ grep -q '@BUNDLE_SHA256@' "$template" ||
   fail 'the PLG template lost its placeholders and might be installable'
 grep -q '^POLYSEAT_RELEASE_GATE="closed"' unraid/plugin/src/emhttp/scripts/polyseatctl ||
   fail 'the committed controller must keep its release gate closed'
+grep -q '^POLYSEAT_APPROVAL_MODE="signed"' unraid/plugin/src/emhttp/scripts/polyseatctl ||
+  fail 'the committed controller must keep signed approvals'
 if grep -Eq 'rm +(-[A-Za-z]*[rR]|--recursive)' unraid/plugin/src/emhttp/scripts/polyseatctl; then
   fail 'the controller must not use recursive deletion'
 fi

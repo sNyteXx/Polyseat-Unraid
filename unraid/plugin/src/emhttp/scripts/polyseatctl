@@ -17,6 +17,10 @@ set -u -o pipefail
 umask 077
 
 POLYSEAT_RELEASE_GATE="closed"   # closed | test-host | canary | open (release rendering only)
+# Who approves a canary action: "signed" (today: a short-lived Ed25519 token from another machine) or "owner" (an Unraid
+# admin starting a session from the WebUI; see owner_approval_for). Fixed at package build, and "owner" exists only
+# together with the canary gate: every other combination refuses all mutations (require_mutation_allowed).
+POLYSEAT_APPROVAL_MODE="signed"
 CTL_VERSION="0.1.0-wip"
 PLUGIN="polyseat-unraid"
 SIGN_IDENTITY="polyseat-unraid-release"

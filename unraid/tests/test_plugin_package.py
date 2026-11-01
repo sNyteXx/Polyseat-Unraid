@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -277,6 +278,54 @@ class PackageTests(unittest.TestCase):
             self.assertIn("install/slack-desc", members)
         self.assertIn('POLYSEAT_RELEASE_GATE="closed"',
                       (PLUGIN / "src/emhttp/scripts/polyseatctl").read_text())
+
+    def build_mode(self, mode, gate, out=None, version="2026.10.30"):
+        env = {"PATH": os.environ["PATH"]}
+        if mode is not None:
+            env["POLYSEAT_APPROVAL_MODE"] = mode
+        return subprocess.run([str(SCRIPTS / "build-plugin-package.sh"), version, str(out or self.tmp), gate],
+                              capture_output=True, text=True, env=env)
+
+    def controller(self, package):
+        return subprocess.run(["tar", "-xJOf", str(package), "usr/local/emhttp/plugins/polyseat-unraid/scripts/polyseatctl"],
+                              capture_output=True, text=True, check=True).stdout
+
+    def test_approval_mode_stays_signed_unless_the_owner_build_asks_for_it(self):
+        source = (PLUGIN / "src/emhttp/scripts/polyseatctl").read_text()
+        self.assertEqual(re.findall(r'^POLYSEAT_APPROVAL_MODE=.*$', source, re.MULTILINE), ['POLYSEAT_APPROVAL_MODE="signed"'])
+        package = self.tmp / "polyseat-unraid-2026.10.30-noarch-1.txz"
+        for mode, gate in ((None, "closed"), ("signed", "closed"), (None, "test-host"), ("signed", "test-host")):
+            with self.subTest(mode=mode, gate=gate):
+                package.unlink(missing_ok=True)
+                self.assertEqual(self.build_mode(mode, gate).returncode, 0)
+                ctl = self.controller(package)
+                self.assertEqual(re.findall(r'^POLYSEAT_APPROVAL_MODE=.*$', ctl, re.MULTILINE), ['POLYSEAT_APPROVAL_MODE="signed"'])
+                self.assertEqual(ctl, source.replace('POLYSEAT_RELEASE_GATE="closed"', f'POLYSEAT_RELEASE_GATE="{gate}"'))
+
+    def test_owner_approval_mode_needs_the_canary_gate_and_the_substitution_is_exact(self):
+        source = (PLUGIN / "src/emhttp/scripts/polyseatctl").read_text()
+        built = self.build_mode("owner", "canary")
+        self.assertEqual(built.returncode, 0, built.stderr)
+        ctl = self.controller(self.tmp / "polyseat-unraid-2026.10.30-noarch-1.txz")
+        self.assertEqual(re.findall(r'^POLYSEAT_APPROVAL_MODE=.*$', ctl, re.MULTILINE), ['POLYSEAT_APPROVAL_MODE="owner"'])
+        self.assertEqual(re.findall(r'^POLYSEAT_RELEASE_GATE="[a-z-]+"', ctl, re.MULTILINE), ['POLYSEAT_RELEASE_GATE="canary"'])
+        # nothing else in the controller differs from the committed source: two lines, no more
+        expected = source.replace('POLYSEAT_APPROVAL_MODE="signed"', 'POLYSEAT_APPROVAL_MODE="owner"')
+        expected = expected.replace('POLYSEAT_RELEASE_GATE="closed"', 'POLYSEAT_RELEASE_GATE="canary"')
+        self.assertEqual(ctl, expected)
+
+    def test_owner_mode_is_refused_without_the_canary_gate_and_the_canary_gate_without_owner_mode(self):
+        for mode, gate, needle in (("owner", "closed", "needs GATE canary"), ("owner", "test-host", "needs GATE canary"),
+                                   ("owner", "open", "reserved"), (None, "canary", "separately approved"),
+                                   ("signed", "canary", "separately approved"), ("Owner", "canary", "must be signed or owner"),
+                                   ("owner;x", "canary", "must be signed or owner")):
+            with self.subTest(mode=mode, gate=gate):
+                out = self.tmp / f"refused-{len(list(self.tmp.iterdir()))}"
+                out.mkdir()
+                result = self.build_mode(mode, gate, out)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(needle, result.stderr)
+                self.assertEqual(list(out.iterdir()), [])
 
     def test_package_is_reproducible_and_gate_open_is_refused(self):
         first, second = self.tmp / "a", self.tmp / "b"
