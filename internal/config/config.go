@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // DefaultPath is where the daemon looks unless told otherwise.
@@ -173,6 +174,53 @@ type Config struct {
 	// because luck that somebody has measured beats a rule they cannot turn
 	// off.
 	GPUAllCards bool `json:"gpu_all_cards"`
+
+	// IdleStopMinutes stops a running seat that nobody is using, to give its
+	// memory and processor back to the machine. Zero, the default, never does.
+	//
+	// Nobody is using a seat when no Moonlight client has been connected for
+	// the stream grace period and nothing in it has the shared library open,
+	// which is what a running game and a downloading Steam both look like from
+	// outside. That has to hold for this many minutes in a row: any stream or
+	// any game starts the count again, and so does the seat starting.
+	//
+	// Off by default because a stopped seat cannot be woken from Moonlight.
+	// Sunshine is not running in it, so there is nothing for the client to
+	// connect to, and it is started again from this daemon's interface. A
+	// seat that is being built, updated or otherwise operated on is never
+	// stopped, and neither is one that cannot say whether somebody is
+	// streaming.
+	//
+	// A day at most. Anything longer is a seat that is never stopped, and zero
+	// says that more honestly.
+	IdleStopMinutes int `json:"idle_stop_minutes"`
+}
+
+// MaxIdleStopMinutes is the largest IdleStopMinutes: a day.
+const MaxIdleStopMinutes = 1440
+
+// IdleStop is IdleStopMinutes as a duration, or zero when standby is off.
+func (c Config) IdleStop() time.Duration {
+	if c.IdleStopMinutes <= 0 {
+		return 0
+	}
+
+	return time.Duration(c.IdleStopMinutes) * time.Minute
+}
+
+// Validate refuses a configuration that names a value the daemon cannot honour.
+//
+// Only what has a range is checked here. Paths and addresses are left to the
+// parts that use them, which can say what is wrong with them in their own
+// words, and a daemon that will not start for a mistyped interface name is
+// harder to put right than one that says so in its log.
+func (c Config) Validate() error {
+	if c.IdleStopMinutes < 0 || c.IdleStopMinutes > MaxIdleStopMinutes {
+		return fmt.Errorf("idle_stop_minutes is %d, it must be between 0 (off) and %d",
+			c.IdleStopMinutes, MaxIdleStopMinutes)
+	}
+
+	return nil
 }
 
 // Default returns the configuration used when no file exists.
@@ -204,6 +252,9 @@ func Default() Config {
 		// GPUAllCards, and note that a machine with one card cannot tell the
 		// difference either way.
 		GPUAllCards: false,
+
+		// Zero, which is off. See IdleStopMinutes.
+		IdleStopMinutes: 0,
 	}
 }
 
@@ -226,6 +277,10 @@ func Load(path string) (Config, error) {
 	}
 
 	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("%s: %w", path, err)
+	}
+
+	if err := cfg.Validate(); err != nil {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
 
