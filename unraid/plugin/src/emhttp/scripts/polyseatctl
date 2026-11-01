@@ -183,6 +183,12 @@ init_paths() {
   OWNER_DAEMON="$OWNER_DAEMON_DIR/polyseat-daemon.tar"
   OWNER_APPROVAL="$RUN_DIR/owner-approval.json"
   CTL_SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
+  # Per Incus instance: a second daemon (the permanent workloads one, see wl_enter) points these at its own files.
+  INCUS_CLIENT_DIR="$RUN_DIR/client"
+  INCUSD_LOG="$LOG_DIR/incusd.log"
+  # What a second daemon and a play stop share (see wl_shared_rmdir).
+  WL_CLAIM="$RUN_DIR/workloads.claim"
+  WL_SHARED_LOCK="$RUN_DIR/lxc-shared.lock"
   # Every reader of the approval's end (budget, watchdog, session loops) looks at $CANARY_APPROVAL; in owner mode that
   # is the host-local file, so none of them needs to know the difference. The signed token is not consulted at all.
   if [[ $POLYSEAT_APPROVAL_MODE == owner ]]; then CANARY_APPROVAL=$OWNER_APPROVAL; fi
@@ -1054,9 +1060,21 @@ remove_lxc_rootfs_mount() {
   for f in $CANARY_DENIED_TOOLS nft; do rm -f -- "$(lxc_mount_real "$CANARY_DENY_DIR/$f")"; done
   rmdir -- "$(lxc_mount_real "$CANARY_DENY_DIR")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/hooks")" 2>/dev/null || true
-  rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")" 2>/dev/null || true
+  # liblxc's rootfs mount point is compiled in, so the permanent workloads daemon uses this very directory (inside its own
+  # private mount namespace). While that daemon holds its claim the directory stays, and with it its parent.
+  wl_shared_rmdir "$(lxc_mount_real "$LXC_STATE_PARENT/rootfs")"
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT/root")" 2>/dev/null || true
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT")" 2>/dev/null || true
+}
+
+wl_claimed() { [[ -e $WL_CLAIM || -L $WL_CLAIM ]]; }
+
+wl_shared_rmdir() { # dir : the shared LXC mount point goes away with a play stop unless the workloads daemon has claimed it
+  if [[ -d $RUN_DIR && ! -L $RUN_DIR ]]; then
+    ( flock -w 10 7 && ! wl_claimed && rmdir -- "$1" ) 7> "$WL_SHARED_LOCK" 2>/dev/null || true
+  else
+    rmdir -- "$1" 2>/dev/null || true
+  fi
 }
 
 # The LXC nvidia mount hook runs as the container's root INSIDE its user namespace (host uid SUBID_START), so it
@@ -1222,10 +1240,12 @@ daemon_programs_check() { # resolved slot
   [[ -z $missing ]] || { log error "required daemon programs missing on PATH:$missing"; return 1; }
 }
 
-svc_pid() {
-  local pid cmd
-  [[ -f $PIDFILE && ! -L $PIDFILE ]] || return 1
-  pid=$(cat -- "$PIDFILE")
+svc_pid() { incusd_pid "$PIDFILE"; }
+
+incusd_pid() { # pid file : the pid it names, if that is one of our incusd processes
+  local pid cmd file=$1
+  [[ -f $file && ! -L $file ]] || return 1
+  pid=$(cat -- "$file")
   [[ $pid =~ ^[0-9]+$ ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || return 1
@@ -1239,14 +1259,17 @@ run_incus() { # args...
   [[ -n $INCUS_DIR && $INCUS_DIR == "$DATA_REAL/incus" ]] || { log error "refusing to run incus without a validated INCUS_DIR"; return 1; }
   if [[ $POLYSEAT_RELEASE_GATE == canary ]]; then
     canary_command_allowed "$@" || { log error "canary: Incus command outside the fixed CPU-only path"; return 1; }
-    canary_watchdog_check || { log error "canary: expiry supervisor is not healthy"; return 1; }
+    # A permanent daemon (operation 9, the workloads one) has no expiry supervisor to be healthy.
+    if [[ $CANARY_OPERATION -ne 9 ]]; then
+      canary_watchdog_check || { log error "canary: expiry supervisor is not healthy"; return 1; }
+    fi
     if [[ $CANARY_HEALTH_DEADLINE -gt 0 ]]; then
       remaining=$((CANARY_HEALTH_DEADLINE - $(canary_monotonic_seconds)))
       [[ $remaining -gt 0 ]] || return 1
       [[ $limit -le $remaining ]] || limit=$remaining
     fi
   fi
-  env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" INCUS_CONF="$RUN_DIR/client" \
+  env -i PATH="$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" INCUS_CONF="$INCUS_CLIENT_DIR" \
     timeout "$limit" "$CURRENT/payload/bin/incus" "$@"
 }
 
@@ -1535,15 +1558,24 @@ canary_cgroup_remove() { # one exact plugin-owned cgroup and its descendants
 
 # After both groups are gone no canary code may run anywhere: neither a bundled binary (incusd, its forks,
 # the incus CLI) nor the supervisor/witness/launcher shells, which are recognised by their exact argv0.
+# Two daemons of the one runtime can run side by side (play and the permanent workloads one): each process only looks
+# for its own instance's leftovers. What belongs to the other instance's cgroup (CANARY_OTHER_CGROUP, a prefix of the
+# group name) is that instance's business; anything outside both groups is a leak of either.
+CANARY_OTHER_CGROUP="polyseat-unraid-workloads"
+
 canary_leak_check() {
-  local proc pid exe found="" element
+  local proc pid exe found="" element cgroup
   local -a argv
   [[ $SLOTS == /*/slots ]] || { log error "canary: leak check without a valid slot root"; return 1; }
   for proc in /proc/[0-9]*; do
     pid=${proc#/proc/}
     [[ $pid == "$$" || $pid == "$BASHPID" ]] && continue
+    { cgroup=$(< "$proc/cgroup"); } 2>/dev/null || cgroup=""
+    [[ $cgroup == "0::/$CANARY_OTHER_CGROUP"* ]] && continue
     exe=$(readlink -- "$proc/exe" 2>/dev/null) || exe=""
     exe=${exe% (deleted)}
+    # A permanent daemon is administered with the bundled incus client from a shell: that is no leftover of the daemon.
+    [[ $CANARY_OPERATION -eq 9 && $exe == "$SLOTS"/*/payload/bin/incus ]] && continue
     if [[ -n $exe && $exe == "$SLOTS"/* ]]; then found+=" $pid"; continue; fi
     mapfile -d '' -t argv 2>/dev/null < "$proc/cmdline" || continue  # silence first: the process may be gone
     for element in "${argv[@]}"; do
@@ -1761,7 +1793,7 @@ CANARY_DENIED_TOOLS="modprobe insmod rmmod btrfs lvm zfs zpool qemu-system-x86_6
 canary_deny_tools_prepare() {
   local tool out dir
   dir=$(lxc_mount_real "$CANARY_DENY_DIR")
-  [[ -d $(lxc_mount_real "$LXC_STATE_PARENT") && ! -L $(lxc_mount_real "$LXC_STATE_PARENT") ]] || return 1
+  [[ -d $(dirname -- "$dir") && ! -L $(dirname -- "$dir") ]] || return 1
   [[ ! -e $dir && ! -L $dir ]] || return 1
   mkdir -m 0700 -- "$dir" || return 1
   for tool in $CANARY_DENIED_TOOLS; do
@@ -1900,13 +1932,19 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   # can reach it (Tower run 26). LXC takes that fallback whenever "/" has the type rootfs, which a bind of the root
   # keeps (run 27). In this daemon's own mount namespace only, the root becomes a small tmpfs holding binds of every
   # top-level entry (switch_root's trick), so "/" is no longer rootfs, and LXC can pivot again.
+  # A permanent daemon (operation 9, the workloads one) needs the same switch for the same reason, with a directory of its own.
   [[ $CANARY_OPERATION -eq 8 ]] && switch_root=$(lxc_mount_real "$LXC_STATE_PARENT/root")
+  [[ $CANARY_OPERATION -eq 9 ]] && switch_root=$(lxc_mount_real "$WL_LXC_STATE/root")
   parent_mnt_ns=$(readlink /proc/self/ns/mnt) || return 1
   [[ $parent_mnt_ns =~ ^mnt:\[[0-9]+\]$ ]] || return 1
-  [[ ! -e $RUN_DIR/canary-emergency-stop ]] && canary_watchdog_check || return 1
+  # Operation 9 has no expiry supervisor: it is permanent, and its start is guarded by its own supervisor process.
+  if [[ $CANARY_OPERATION -ne 9 ]]; then
+    [[ ! -e $RUN_DIR/canary-emergency-stop ]] && canary_watchdog_check || return 1
+  fi
   # The bounded tests run their daemon at the lowest priority. Play does not: every seat process inherits it, and a
   # compositor at nice 19 loses the CPU to the game it composites, so the stream lags while the game is fine (run 30).
-  if [[ $CANARY_OPERATION -ne 8 ]]; then renice -n 19 -p "$BASHPID" >/dev/null || return 1; fi
+  # Neither does a permanent daemon: everything in its containers inherits it.
+  if [[ $CANARY_OPERATION -ne 8 && $CANARY_OPERATION -ne 9 ]]; then renice -n 19 -p "$BASHPID" >/dev/null || return 1; fi
   printf '%s\n' "$BASHPID" > "$CANARY_CGROUP/daemon/cgroup.procs" || return 1
   # The OUTER parent has the hard aggregate limits. Do NOT enable controllers
   # in its subtree: this daemon leaf then advertises no controllers to LXC.
@@ -1917,7 +1955,7 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
   # Drop explicit kernel-module/raw-I/O privileges for the entire process tree.
   # shellcheck disable=SC2016  # launcher body must expand in its new namespaces
   exec setsid env -i PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$slot_real/payload/tools:$SAFE_PATH" HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" \
-    INCUS_CONF="$RUN_DIR/client" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
+    INCUS_CONF="$INCUS_CLIENT_DIR" INCUS_EXEC_PATH="$slot_real/payload/bin/incusd" \
     INCUS_LXC_HOOK="$(lxc_mount_real "$LXC_HOOK_DIR")" INCUS_SKIP_INSTANCE_TYPES=true INCUS_SECURITY_APPARMOR=false \
     POLYSEAT_SWITCH_ROOT="$switch_root" \
     setpriv --bounding-set=-sys_module,-sys_rawio \
@@ -1977,7 +2015,7 @@ canary_launch() { # resolved slot; called in the disposable launch subshell
       shift 2
       exec "$@"
     ' polyseat-canary-launch "$PIDFILE" "$parent_mnt_ns" "$slot_real/payload/bin/incusd" \
-      --group "" --logfile "$LOG_DIR/incusd.log" 9>&-
+      --group "" --logfile "$INCUSD_LOG" 9>&- 8>&-
 }
 
 # An incusd that is not ours. Helper processes of running containers (forklxc, forkexec, ...) carry the
@@ -2695,9 +2733,11 @@ persist_mount_check() { # read-only: the dataset itself is mounted at its root, 
   (( avail >= PERSIST_MIN_FREE_KB )) || { log error "persist: only $avail KiB free on $PERSIST_DATASET"; return 1; }
 }
 
-persist_validate_data_dir() { # the fixed persistent workspace on the cache dataset; absent before the first run
-  local mount=$ROOT$PERSIST_MOUNT mode
-  DATA_REAL="$ROOT$PERSIST_DATA_DIR" INCUS_DIR="$ROOT$PERSIST_DATA_DIR/incus"
+persist_validate_data_dir() { persist_validate_dir "$PERSIST_DATA_DIR"; }
+
+persist_validate_dir() { # logical dir : a fixed persistent workspace on the cache dataset (play's, or the workloads one); absent before the first run
+  local dir=$1 mount=$ROOT$PERSIST_MOUNT mode
+  DATA_REAL="$ROOT$dir" INCUS_DIR="$ROOT$dir/incus"
   persist_mount_check || return 1
   # The pool root above is Unraid's (0777), but a mounted dataset root cannot be renamed or replaced, and below
   # it only root may change a name.
@@ -2706,7 +2746,7 @@ persist_validate_data_dir() { # the fixed persistent workspace on the cache data
     { log error "persist: $PERSIST_MOUNT must be root:root and writable by root only"; return 1; }
   [[ ! -e $DATA_REAL && ! -L $DATA_REAL ]] && return 0
   [[ -d $DATA_REAL && ! -L $DATA_REAL && $(stat -c '%u %g %a' -- "$DATA_REAL") == '0 0 711' ]] ||
-    { log error "persist: $PERSIST_DATA_DIR must be a root:root 0711 directory"; return 1; }
+    { log error "persist: $dir must be a root:root 0711 directory"; return 1; }
 }
 
 persist_state_prepare() { # active sha : creates the workspace once; afterwards only a recorded clean stop reopens it
