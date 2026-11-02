@@ -440,6 +440,38 @@ func (c *Client) Configure(ctx context.Context, name string, config map[string]s
 	}
 
 	put := inst.Writable()
+
+	// Nothing to do is the common case once a seat is provisioned. Reporting
+	// that back matters: it is what lets provisioning skip the container
+	// restart that enabling the driver injection needs, so re-provisioning a
+	// healthy seat does not interrupt it for no reason.
+	if !mergeInto(&put, config, devices) {
+		return false, nil
+	}
+
+	op, err := c.server().UpdateInstance(name, put, etag)
+	if err != nil {
+		return false, err
+	}
+
+	return true, c.await(ctx, op)
+}
+
+// Pending says whether Configure with the same arguments would change the
+// instance, without changing it.
+func (c *Client) Pending(ctx context.Context, name string, config map[string]string, devices map[string]map[string]string) (bool, error) {
+	inst, _, err := c.server().GetInstance(name)
+	if err != nil {
+		return false, err
+	}
+
+	put := inst.Writable()
+
+	return mergeInto(&put, config, devices), nil
+}
+
+// mergeInto applies Configure's merge to put and reports whether it changed.
+func mergeInto(put *api.InstancePut, config map[string]string, devices map[string]map[string]string) bool {
 	if put.Config == nil {
 		put.Config = map[string]string{}
 	}
@@ -473,20 +505,7 @@ func (c *Client) Configure(ctx context.Context, name string, config map[string]s
 		}
 	}
 
-	// Nothing to do is the common case once a seat is provisioned. Reporting
-	// that back matters: it is what lets provisioning skip the container
-	// restart that enabling the driver injection needs, so re-provisioning a
-	// healthy seat does not interrupt it for no reason.
-	if !changed {
-		return false, nil
-	}
-
-	op, err := c.server().UpdateInstance(name, put, etag)
-	if err != nil {
-		return false, err
-	}
-
-	return true, c.await(ctx, op)
+	return changed
 }
 
 // UnsetConfig removes configuration keys. Separate from Configure because a

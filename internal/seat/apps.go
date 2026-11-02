@@ -337,6 +337,11 @@ func canonicalApps(data []byte) (string, bool) {
 const (
 	showLauncher = "/usr/local/bin/polyseat-launcher show"
 	hideLauncher = "/usr/local/bin/polyseat-launcher hide"
+
+	// showSteam brings Steam's window up in gamescope, as the launcher's Steam
+	// entry does, so that a game started from a silent Steam has a window to
+	// replace.
+	showSteam = "setsid /usr/local/bin/polyseat-steam show"
 )
 
 // Steam lives in gamescope on a workspace of its own, so picking one or the
@@ -464,7 +469,7 @@ func polyseatApps(launchers []installed, games []Game) ([]app, []string) {
 	names := []string{"Desktop", "Steam Big Picture"}
 	taken := map[string]bool{"desktop": true, "steam big picture": true}
 
-	add := func(name, launch, image string) {
+	add := func(name, launch, image string, inGamescope bool) {
 		// A game called Desktop, or one whose name matches a launcher, would
 		// otherwise put two entries with the same name in Moonlight and make
 		// which of them runs a matter of luck.
@@ -475,14 +480,32 @@ func polyseatApps(launchers []installed, games []Game) ([]app, []string) {
 
 		taken[key] = true
 
+		// A Steam game started this way is started by the Steam that runs
+		// inside gamescope, so it appears there, on the other workspace, and
+		// the entry has to go there too, first, like Steam Big Picture's. Left
+		// out, the game started and the player looked at the desktop's
+		// terminal while it ran unseen (Unraid seat, Once Human, 2026-11-01).
+		// A Lutris or flatpak title has no such parent and stays on the
+		// desktop, so its entry only hides the launcher.
+		//
+		// And Steam's own window is asked for alongside the game. A seat waits
+		// with Steam silent in gamescope, which presents nothing, so sway has
+		// no window on that workspace (see polyseat-steam). Started straight
+		// from that state, the game ran while gamescope never mapped a window
+		// for it, and the workspace stayed empty. polyseat-steam show is what
+		// the launcher's Steam entry runs; the game replaces Steam's window as
+		// soon as it opens one.
+		prepCmd := []prep{{Do: hideLauncher}}
+		detached := []string{"setsid " + launch}
+		if inGamescope {
+			prepCmd = []prep{{Do: toGamescope}, {Do: hideLauncher}}
+			detached = []string{showSteam, "setsid " + launch}
+		}
+
 		ours = append(ours, app{
-			Name:     name,
-			Detached: []string{"setsid " + launch},
-			// A Steam game started this way is started by the Steam that runs
-			// inside gamescope, so it appears there. A Lutris or flatpak title
-			// has no such parent and stays on the desktop, which is why the
-			// switch is part of the launcher's entry and not of this one.
-			PrepCmd:   []prep{{Do: hideLauncher}},
+			Name:      name,
+			Detached:  detached,
+			PrepCmd:   prepCmd,
 			ImagePath: image,
 			Polyseat:  true,
 		})
@@ -491,13 +514,13 @@ func polyseatApps(launchers []installed, games []Game) ([]app, []string) {
 	}
 
 	for _, l := range launchers {
-		add(l.Name, l.command, l.image)
+		add(l.Name, l.command, l.image, false)
 	}
 
 	// The games themselves, so that a client with a controller can start one
 	// without first starting a launcher and steering through it.
 	for _, g := range games {
-		add(g.Name, g.Launch, g.Image)
+		add(g.Name, g.Launch, g.Image, g.Steam != "")
 	}
 
 	return ours, names
@@ -995,30 +1018,13 @@ const entryPrefix = "polyseat-game-"
 // that is current, and a game whose name or artwork changed writes a new one
 // and takes the old one away.
 func (p *Provisioner) writeGameEntries(ctx context.Context, games []Game) error {
-	want := map[string][]byte{}
-
 	// What the seat can already start without any help from here. Steam and
 	// Lutris both offer to make a shortcut for a game, and somebody who took
 	// them up on it should get one entry rather than two: this launcher lists
 	// every desktop entry it finds, and ours is a different file, so nothing
 	// downstream would have merged them. Ours is the one that stands down,
 	// because theirs is the one they asked for.
-	execs := p.foreignEntries(ctx)
-
-	for _, g := range games {
-		if strings.TrimSpace(g.Name) == "" || strings.TrimSpace(g.Launch) == "" {
-			continue
-		}
-
-		if alreadyListed(execs, g.Launch) {
-			continue
-		}
-
-		body := desktopEntry(g)
-		sum := sha1.Sum(body)
-
-		want[fmt.Sprintf("%s/%s%x.desktop", entryDir, entryPrefix, sum[:8])] = body
-	}
+	want := wantedEntries(games, p.foreignEntries(ctx))
 
 	// As the player, like the writes and the removals below: the directory is
 	// theirs, and root listing it would follow a link they put there.
@@ -1081,6 +1087,36 @@ func (p *Provisioner) writeGameEntries(ctx context.Context, games []Game) error 
 	return nil
 }
 
+// wantedEntries is the entries to write for these games, by path, given the
+// commands of the entries the seat already has.
+func wantedEntries(games []Game, execs string) map[string][]byte {
+	want := map[string][]byte{}
+
+	for _, g := range games {
+		if strings.TrimSpace(g.Name) == "" || strings.TrimSpace(g.Launch) == "" {
+			continue
+		}
+
+		// It came from an entry, so it is in the launcher already. Compared
+		// here rather than left to alreadyListed, which only looks at the last
+		// word, and a ROM's path with a space in it does not end in one.
+		if g.Source == desktopSource {
+			continue
+		}
+
+		if alreadyListed(execs, g.Launch) {
+			continue
+		}
+
+		body := desktopEntry(g)
+		sum := sha1.Sum(body)
+
+		want[fmt.Sprintf("%s/%s%x.desktop", entryDir, entryPrefix, sum[:8])] = body
+	}
+
+	return want
+}
+
 // foreignEntries collects the commands of every desktop entry in the seat that
 // this did not write.
 //
@@ -1129,10 +1165,47 @@ func foreignScan(dirs []string) string {
 // entries are written by different hands: Steam's shortcut is called whatever
 // Steam calls the title and ours is called whatever the manifest says, and
 // those differ often enough. What cannot differ is the thing being started.
+//
+// Against the last word of each command rather than anywhere in the text, for
+// two reasons a substring got wrong. A longer id starts with a shorter one, so a
+// shortcut to game 23 hid game 2. And an emulator names itself in every shortcut
+// it writes for a game, with the game after it, so one Pokémon shortcut took
+// Eden's own entry out of the launcher while it stayed in Moonlight. The word
+// after the target is what makes that a different thing to start.
 func alreadyListed(execs, launch string) bool {
 	target := launchTarget(launch)
+	if target == "" {
+		return false
+	}
 
-	return target != "" && strings.Contains(execs, target)
+	for _, line := range strings.Split(execs, "\n") {
+		if startsTarget(strings.TrimPrefix(strings.TrimSpace(line), "Exec="), target) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// startsTarget reports whether an Exec value ends in target, leaving out the
+// field codes a launcher fills in when it is handed a file, which say nothing
+// about what the entry itself starts.
+func startsTarget(command, target string) bool {
+	fields := strings.Fields(command)
+
+	for len(fields) > 0 {
+		last := fields[len(fields)-1]
+
+		if len(last) == 2 && last[0] == '%' {
+			fields = fields[:len(fields)-1]
+
+			continue
+		}
+
+		return strings.Trim(last, `"'`) == target
+	}
+
+	return false
 }
 
 // launchTarget is the part of a launch command that names the game: the URI for

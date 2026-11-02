@@ -10,7 +10,7 @@ Moonlight on tvOS sends modifiers rather than text, and has an open request for
 exactly this.
 
 So the pointer and the keyboard both live in the seat and travel in the video
-stream. This turns the gamepad into the pointer; squeekboard draws the letters.
+stream. This turns the gamepad into the pointer; Stevia draws the letters.
 
 **Pointer mode follows what is in front, and that is the whole safety story.**
 A helper that turned a thumbstick into a mouse while a game was running would

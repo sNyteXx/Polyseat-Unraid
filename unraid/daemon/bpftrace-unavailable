@@ -1,0 +1,6 @@
+#!/bin/sh
+# Polyseat on Unraid ships no bpftrace yet (the upstream static build is a 591 MB AppImage). Upstream's uhid observer
+# reads this line as "the kprobe cannot be attached" and polyseatd then stops restarting it; with one seat the broker
+# attributes gamepads by correlation and name instead. Needed again for two seats.
+echo 'No matches for kprobe: bpftrace is not available on this Unraid host'
+exit 1

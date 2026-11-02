@@ -1,0 +1,38 @@
+Menu="Utilities"
+Icon="polyseat-unraid.svg"
+Title="Polyseat"
+---
+<?PHP
+/* Settings (WIP). Values are validated against schema.json in the browser, in include/api.php
+ * and again by polyseatctl config-set. Apply needs an open release gate; Reset only fills
+ * defaults into the form and saves nothing until Apply. */
+require_once '/usr/local/emhttp/plugins/polyseat-unraid/include/lib.php';
+$psu_entries = psu_json_from(psu_run_ctl(['config-get'], 15)) ?? [];
+$psu_cfg = ['csrf' => (string)($var['csrf_token'] ?? ''), 'gate' => 'closed', 'schema' => psu_schema()];
+?>
+<link rel="stylesheet" href="<?=psu_e(psu_asset('css/psu.css'))?>">
+<div id="psu-settings" class="<?=psu_e(psu_root_classes($display ?? []))?>">
+ <div class="psu-page">
+  <div class="psu-banner" data-bind="gate-banner"><strong>Locked.</strong>
+   Settings can be reviewed but not saved while the release gate is closed (WIP build).</div>
+  <div class="psu-banner" data-bind="notice" hidden role="status"></div>
+  <p class="psu-control-link"><a class="psu-btn primary" href="/Tools/PolyseatTool">Open Polyseat control (Tools &rarr; Polyseat)</a>
+   <span class="psu-muted">Start and stop play sessions and the workloads daemon there.</span></p>
+<?php if ($psu_entries === []): ?>
+  <div class="psu-banner crit"><strong>Unavailable.</strong> The controller did not return the settings.</div>
+<?php else: ?>
+  <form onsubmit="return false" autocomplete="off">
+<?=psu_render_settings_tabs($psu_entries)?>
+   <div class="psu-actions" style="margin-top:14px">
+    <button type="button" class="psu-btn primary" data-action="apply" disabled>Apply</button>
+    <button type="button" class="psu-btn" data-action="reset">Reset to defaults</button>
+    <span class="psu-muted" data-bind="dirty-note"></span>
+   </div>
+   <p class="psu-muted">Changes take effect the next time the service starts; the play limits and the game library
+    apply to the next play session, and so do the session length, the CPU performance profile and the seat CPUs. The data
+    directory, ID range and play settings cannot change while the service runs.</p>
+  </form>
+<?php endif; ?>
+ </div>
+</div>
+<?=psu_boot_script('psu-settings', 'initSettings', $psu_cfg)?>

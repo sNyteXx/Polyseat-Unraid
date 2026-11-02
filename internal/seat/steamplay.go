@@ -23,6 +23,11 @@ const (
 	// writes a real id here for a per game override; zero is the global one,
 	// which is what the Steam Play setting in the interface writes.
 	compatGlobalKey = "0"
+
+	// The path of the in-game screensaver switch inside InstallConfigStore.
+	customizationKey = "Customization"
+	screensaverKey   = "Screensaver"
+	whileInGameKey   = "WhileInGame"
 )
 
 // vdfNode is one block or one pair out of a Steam configuration file.
@@ -230,6 +235,78 @@ func SetCompatTool(data []byte, tool string) ([]byte, bool, error) {
 	return []byte(text[:name.valueStart] + quote(tool) + text[name.valueEnd:]), true, nil
 }
 
+// SetScreensaverOff stops Steam's screensaver from starting over a running game.
+//
+// Steam counts input, and a cutscene has none: after five minutes of one, the
+// screensaver came up over the game. The switch is called "Show screensavers
+// when playing a game", it is on until somebody turns it off, and Steam keeps it
+// per installation rather than per account, so every seat starts with it on.
+//
+// It lives beside Software rather than inside the Steam block the rest of this
+// file edits. Measured on 2026-10-31 with the client of 2026-10-20, in a seat
+// nobody has signed in to: a file holding only this was read at the next start,
+// with the sign in window still open, and was still there after Steam wrote the
+// file out on exit. The same seat without it read true.
+//
+// Unlike the compatibility tool this does not leave somebody else's choice
+// alone. A game covered by a slideshow is never what anybody wanted, so a seat
+// where it was turned on gets it turned off again.
+//
+// It only covers games. The idle screensaver over Steam's own menus is another
+// setting, and stays.
+func SetScreensaverOff(data []byte) ([]byte, bool, error) {
+	text := string(data)
+
+	if strings.TrimSpace(text) == "" {
+		return []byte(freshScreensaverConfig()), true, nil
+	}
+
+	root, err := parseVDF(text)
+	if err != nil {
+		return data, false, err
+	}
+
+	store := root.child("InstallConfigStore")
+	if store == nil || !store.block {
+		return data, false, fmt.Errorf("this is not a Steam configuration: it has no InstallConfigStore")
+	}
+
+	customization := store.child(customizationKey)
+	if customization == nil {
+		return []byte(insert(text, store.afterBrace, customizationBlock(store.indent+"\t"))), true, nil
+	}
+
+	if !customization.block {
+		return data, false, fmt.Errorf("%s is not a block", customizationKey)
+	}
+
+	screensaver := customization.child(screensaverKey)
+	if screensaver == nil {
+		return []byte(insert(text, customization.afterBrace,
+			screensaverBlock(customization.indent+"\t"))), true, nil
+	}
+
+	if !screensaver.block {
+		return data, false, fmt.Errorf("%s is not a block", screensaverKey)
+	}
+
+	inGame := screensaver.child(whileInGameKey)
+	if inGame == nil {
+		return []byte(insert(text, screensaver.afterBrace,
+			whileInGameLine(screensaver.indent+"\t"))), true, nil
+	}
+
+	if inGame.block {
+		return data, false, fmt.Errorf("%s is a block", whileInGameKey)
+	}
+
+	if strings.Trim(text[inGame.valueStart:inGame.valueEnd], `"`) == "0" {
+		return data, false, nil
+	}
+
+	return []byte(text[:inGame.valueStart] + quote("0") + text[inGame.valueEnd:]), true, nil
+}
+
 // insert puts text at an offset, which is the only edit this file makes.
 func insert(text string, at int, what string) string {
 	return text[:at] + what + text[at:]
@@ -272,4 +349,36 @@ func freshConfig(tool string) string {
 		"\t\t\t" + quote("Steam") + "\n\t\t\t{" +
 		mappingBlock("\t\t\t\t", tool) +
 		"\n\t\t\t}\n\t\t}\n\t}\n}\n"
+}
+
+// customizationBlock, screensaverBlock and whileInGameLine are the same switch
+// for a configuration that has less and less of the path to it.
+func customizationBlock(indent string) string {
+	return "\n" + indent + quote(customizationKey) +
+		"\n" + indent + "{" +
+		screensaverBlock(indent+"\t") +
+		"\n" + indent + "}"
+}
+
+func screensaverBlock(indent string) string {
+	return "\n" + indent + quote(screensaverKey) +
+		"\n" + indent + "{" +
+		whileInGameLine(indent+"\t") +
+		"\n" + indent + "}"
+}
+
+func whileInGameLine(indent string) string {
+	return "\n" + indent + quote(whileInGameKey) + "\t\t" + quote("0")
+}
+
+// freshScreensaverConfig is for a seat whose Steam has never run and which has
+// no Proton to name yet. The empty Steam block is there so that SetCompatTool
+// can still recognise the file on a later pass.
+func freshScreensaverConfig() string {
+	return quote("InstallConfigStore") + "\n{\n" +
+		"\t" + quote("Software") + "\n\t{\n" +
+		"\t\t" + quote("Valve") + "\n\t\t{\n" +
+		"\t\t\t" + quote("Steam") + "\n\t\t\t{\n\t\t\t}\n\t\t}\n\t}" +
+		customizationBlock("\t") +
+		"\n}\n"
 }

@@ -17,3 +17,6 @@ packaging/sunshine/*.pkg.tar.zst
 
 # The same for packaging/mangohud-shim/build.sh.
 packaging/mangohud-shim/*.pkg.tar.zst
+
+# And for packaging/stevia/build.sh.
+packaging/stevia/*.pkg.tar.zst

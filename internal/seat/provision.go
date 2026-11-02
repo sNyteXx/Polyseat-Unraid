@@ -33,7 +33,7 @@ var assets embed.FS
 // This is the mechanism that fixes the sort of drift found at the end of M4,
 // where seat1 carried security.nesting and seat2 did not simply because seat1
 // was built earlier.
-const Generation = 67
+const Generation = 69
 
 // Player is the unprivileged user inside every seat that owns the session.
 const Player = "player"
@@ -134,6 +134,7 @@ func Steps() []Step {
 		{"packages", (*Provisioner).stepPackages},
 		{"sunshine", (*Provisioner).stepSunshine},
 		{"mangohud shim", (*Provisioner).stepMangoHudShim},
+		{"stevia", (*Provisioner).stepStevia},
 		{"steam", (*Provisioner).stepSteam},
 		{"user", (*Provisioner).stepUser},
 		{"proton", (*Provisioner).stepProton},
@@ -387,6 +388,20 @@ func (p *Provisioner) waitSystemd(ctx context.Context) error {
 // is what its callers want. Should a third caller ever need this, the two are
 // worth folding together then.
 func (p *Provisioner) restartContainer(ctx context.Context) error {
+	if err := p.stopContainer(ctx); err != nil {
+		return err
+	}
+
+	if err := p.Client.Start(ctx, p.name()); err != nil {
+		return err
+	}
+
+	return p.waitSystemd(ctx)
+}
+
+// stopContainer is restartContainer's first half: the session first, then the
+// container, killed when it overruns.
+func (p *Provisioner) stopContainer(ctx context.Context) error {
 	p.Log("restarting the container so the new configuration takes effect")
 
 	if _, _, err := p.Client.Try(ctx, p.name(), append(playerPrefix(p.uid),
@@ -406,11 +421,30 @@ func (p *Provisioner) restartContainer(ctx context.Context) error {
 		}
 	}
 
-	if err := p.Client.Start(ctx, p.name()); err != nil {
-		return err
+	return nil
+}
+
+// nvidiaICDPaths are where a host's NVIDIA driver may put its Vulkan manifest:
+// distribution packages under /usr/share, NVIDIA's own installer (Unraid's
+// driver plugin, for one) under /etc.
+var nvidiaICDPaths = []string{"/usr/share/vulkan/icd.d/nvidia_icd.json", "/etc/vulkan/icd.d/nvidia_icd.json"}
+
+// readFirst reads the first of paths that exists, or reports why none did.
+func readFirst(paths []string) ([]byte, error) {
+	var first error
+
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return data, nil
+		}
+
+		if first == nil {
+			first = err
+		}
 	}
 
-	return p.waitSystemd(ctx)
+	return nil, first
 }
 
 // ------------------------------------------------------------------- network
@@ -573,6 +607,20 @@ func (p *Provisioner) stack() stack { return stackFor(p.GPU) }
 // ------------------------------------------------------------------ packages
 
 func (p *Provisioner) stepPackages(ctx context.Context) error {
+	// pacman 7 downloads as its own unprivileged user inside a Landlock
+	// sandbox. A kernel built without Landlock (Unraid's is one) refuses that
+	// sandbox, pacman then cannot switch to the user, and every download fails
+	// as "a mirror stopped mid transfer". The seat shares the host's kernel, so
+	// the host decides; pacman's own switch for exactly this case turns it off.
+	if !landlockAvailable() {
+		if _, err := p.sh(ctx, `grep -q '^DisableSandbox' /etc/pacman.conf || `+
+			`sed -i '/^\[options\]$/a DisableSandbox' /etc/pacman.conf`); err != nil {
+			return err
+		}
+
+		p.Log("this kernel has no Landlock, so pacman downloads without its sandbox")
+	}
+
 	// The seats built during the M1 spike carry the CachyOS repository, which
 	// was how Sunshine got in before it came from the upstream release. Leaving
 	// it would mean two sources for the same package and seats that differ
@@ -630,11 +678,13 @@ func (p *Provisioner) stepPackages(ctx context.Context) error {
 		"waybar", "nwg-drawer", "thunar", "gvfs", "wl-clipboard",
 		// So a seat can be used from a client that has neither keyboard nor
 		// mouse, which is most of them: an Apple TV, a phone, a television.
-		// squeekboard draws the letters and polyseat-pad-pointer turns the
-		// gamepad into a pointer to press them with. Both have to live in the
-		// seat and travel in the video stream, because the client cannot
-		// supply either: Moonlight on tvOS sends modifiers rather than text.
-		"squeekboard", "python-evdev",
+		// Stevia draws the letters, from stepStevia rather than from here, and
+		// polyseat-pad-pointer turns the gamepad into a pointer to press them
+		// with. Both have to live in the seat and travel in the video stream,
+		// because the client cannot supply either: Moonlight on tvOS sends
+		// modifiers rather than text. A seat built before keeps squeekboard
+		// installed and unused; nothing starts it.
+		"python-evdev",
 		// Flatpak is how a seat gets software. The player has no sudo by
 		// design, and `flatpak --user` needs none, so this is the one route
 		// that does not either widen what the seat may do or route every
@@ -1005,6 +1055,60 @@ func mangoHudShimIsCurrent(out string) bool {
 		fields[1] == MangoHudShimVersion+"-"+MangoHudShimBuild
 }
 
+// stepStevia installs the on-screen keyboard as a package of its own.
+//
+// squeekboard was the keyboard until it filled half of a television in white
+// with a layout nobody could change: its height has no setting, the two that
+// look like one change the width of the keys. Stevia is what Phosh replaced it
+// with. It reads its layout from the same input sources at run time, sixty of
+// them, and follows the dark style, but it is written for one compositor and
+// does not start on any other. The patch in packaging/stevia lets it run on
+// sway, sizes it as a share of the screen and puts it above the launcher, and
+// polyseat-keyboard starts it only when somebody asks for it.
+//
+// The version is Stevia's release, and the build is the package's pkgrel.
+const (
+	SteviaVersion = "0.58.0"
+	SteviaBuild   = "1"
+)
+
+// steviaPackageSHA256 is the package named by SteviaVersion and SteviaBuild, as
+// packaging/stevia/build.sh printed it.
+const steviaPackageSHA256 = "bcd376b811420374e19ec8b418f635084199dbf4a1858ae7781b6c5e26f07e7b"
+
+func steviaPackageURL() string {
+	version := SteviaVersion + "-" + SteviaBuild
+
+	return "https://github.com/superuser404notfound/Polyseat/releases/download/stevia-" +
+		version + "/polyseat-stevia-" + version + "-x86_64.pkg.tar.zst"
+}
+
+func (p *Provisioner) stepStevia(ctx context.Context) error {
+	installed, code, err := p.Client.Try(ctx, p.name(), "pacman", "-Q", "polyseat-stevia")
+	if err != nil {
+		return err
+	}
+
+	want := SteviaVersion + "-" + SteviaBuild
+
+	if code == 0 && steviaIsCurrent(installed) {
+		p.Log("stevia %s already installed", want)
+
+		return nil
+	}
+
+	p.Log("installing stevia %s", want)
+
+	return p.installOwnPackage(ctx, "polyseat-stevia", steviaPackageURL(), steviaPackageSHA256)
+}
+
+func steviaIsCurrent(out string) bool {
+	fields := strings.Fields(out)
+
+	return len(fields) == 2 && fields[0] == "polyseat-stevia" &&
+		fields[1] == SteviaVersion+"-"+SteviaBuild
+}
+
 // sunshineLatest is what LizardByte have published, for saying so and nothing
 // else. Nothing installs what this returns.
 func sunshineLatest(ctx context.Context) (string, error) {
@@ -1189,16 +1293,15 @@ func (p *Provisioner) stepProton(ctx context.Context) error {
 	// common pass is the one that finds the current build already there, and a
 	// seat that came out of an older generation, or whose Steam was running the
 	// last time this ran, still needs its setting.
+	//
+	// The rest of Steam's configuration does not depend on Proton, so a seat
+	// without a build gets that much.
 	_, code, err := p.Client.Try(ctx, p.name(), "test", "-d", protonDir+"/"+protonName)
 	if err != nil {
 		return err
 	}
 
-	if code != 0 {
-		return nil
-	}
-
-	return p.stepSteamPlay(ctx)
+	return p.stepSteamConfig(ctx, code == 0)
 }
 
 // stepGEProton adds GE-Proton to the seat, or takes it away again.
@@ -1565,7 +1668,8 @@ const steamScriptPath = "/usr/local/bin/polyseat-steam"
 // to run everything else with.
 const steamConfigPath = steamRoot + "/config/config.vdf"
 
-// stepSteamPlay makes Proton CachyOS the seat's default.
+// stepSteamConfig makes Proton CachyOS the seat's default, when the seat has it,
+// and keeps Steam's screensaver off running games.
 //
 // Otherwise the tool is merely present, and every game still runs under Valve's
 // Proton until somebody walks through Steam's settings with a gamepad, which is
@@ -1576,27 +1680,30 @@ const steamConfigPath = steamRoot + "/config/config.vdf"
 // underneath a running Steam is not merely ignored, it is reverted along with
 // anything else that changed in between. Provisioning is a reliable moment for
 // it: the session has just been rebuilt and nothing has started Steam yet.
-func (p *Provisioner) stepSteamPlay(ctx context.Context) error {
+func (p *Provisioner) stepSteamConfig(ctx context.Context, proton bool) error {
 	quiet, err := p.steamQuiet(ctx)
 	if err != nil {
 		return err
 	}
 
 	if !quiet {
-		p.Log("the default Proton stays as it is for now")
+		p.Log("Steam's configuration stays as it is for now")
 
 		return nil
 	}
 
-	return p.setCompatTool(ctx)
+	return p.writeSteamConfig(ctx, proton)
 }
 
-// setCompatTool writes the default into Steam's configuration, once Steam is
-// known not to be running.
+// writeSteamConfig changes Steam's configuration, once Steam is known not to be
+// running.
+//
+// One read and one write for both settings, so that a file neither of them
+// changes is not touched at all.
 //
 // Read and written as the player, see writeHome. The file sits five levels
 // down in a home the player owns, and any of those levels can be a link.
-func (p *Provisioner) setCompatTool(ctx context.Context) error {
+func (p *Provisioner) writeSteamConfig(ctx context.Context, proton bool) error {
 	// A seat whose Steam has never started has no file, which is not a problem
 	// to report: it is the ordinary state of a seat being built, and the setting
 	// is written into a file Steam then fills in around.
@@ -1611,14 +1718,25 @@ func (p *Provisioner) setCompatTool(ctx context.Context) error {
 		return nil
 	}
 
-	updated, changed, err := SetCompatTool(existing, protonName)
+	updated, mapped := existing, false
+
+	if proton {
+		updated, mapped, err = SetCompatTool(updated, protonName)
+		if err != nil {
+			p.Log("! Steam's configuration was left alone because it could not be read: %v", err)
+
+			return nil
+		}
+	}
+
+	updated, silenced, err := SetScreensaverOff(updated)
 	if err != nil {
 		p.Log("! Steam's configuration was left alone because it could not be read: %v", err)
 
 		return nil
 	}
 
-	if !changed {
+	if !mapped && !silenced {
 		return nil
 	}
 
@@ -1631,7 +1749,13 @@ func (p *Provisioner) setCompatTool(ctx context.Context) error {
 		return err
 	}
 
-	p.Log("Proton CachyOS is now what this seat runs Windows games with")
+	if mapped {
+		p.Log("Proton CachyOS is now what this seat runs Windows games with")
+	}
+
+	if silenced {
+		p.Log("Steam's screensaver no longer starts over a running game")
+	}
 
 	return nil
 }
@@ -2478,17 +2602,44 @@ func (p *Provisioner) stepGPU(ctx context.Context) error {
 		devices[k] = v
 	}
 
-	changed, err := p.Client.Configure(ctx, p.name(), config, devices)
-	if err != nil {
-		return err
-	}
-
 	// nvidia.runtime, security.nesting and limits.kernel.nice only take effect
 	// on a fresh start, and a device that was just added is not in a running
 	// container either, so a change here costs a restart. Nothing changed means
 	// nothing to restart, which is what keeps re-provisioning a healthy seat
 	// from interrupting it.
-	if changed {
+	//
+	// The change is made with the container stopped rather than live. Adding a
+	// disk device to a running container mounts it in through LXC's mount
+	// injection, and where the host's root is an initramfs (Unraid) moving a
+	// mount taken from it, such as the NVIDIA profiles, into the container
+	// fails with EINVAL. The same mount set up while the container starts
+	// works, and the restart happens either way.
+	pending, err := p.Client.Pending(ctx, p.name(), config, devices)
+	if err != nil {
+		return err
+	}
+
+	if pending {
+		if err := p.stopContainer(ctx); err != nil {
+			return err
+		}
+	}
+
+	changed, err := p.Client.Configure(ctx, p.name(), config, devices)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case pending:
+		if err := p.Client.Start(ctx, p.name()); err != nil {
+			return err
+		}
+
+		if err := p.waitSystemd(ctx); err != nil {
+			return err
+		}
+	case changed:
 		if err := p.restartContainer(ctx); err != nil {
 			return err
 		}
@@ -2642,7 +2793,7 @@ func (p *Provisioner) stepNvidiaUserspace(ctx context.Context) error {
 	// The Vulkan manifest carries the driver's API version, so it is copied
 	// from the host rather than generated. That also keeps it in step when the
 	// host driver is updated and the seat is provisioned again.
-	icd, err := os.ReadFile("/usr/share/vulkan/icd.d/nvidia_icd.json")
+	icd, err := readFirst(nvidiaICDPaths)
 	if err != nil {
 		p.Log("! no Vulkan manifest on the host, Vulkan will not work inside the seat: %v", err)
 	} else {

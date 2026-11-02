@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "incus_commit": "b20ec6c3cb17eaff28fc1145238b8769e44ce39d",
+  "incus_release": "v7.5.1",
+  "description": "Reviewed security overlay, not an unmodified upstream release. Exact module sums are also authenticated by sum.golang.org during the build.",
+  "source_evidence": [
+    {
+      "path": "github.com/osrg/gobgp/v4",
+      "version": "v4.9.0",
+      "sum": "h1:pKOw914kwQ4I/lWNVTfEDosEN3FuqPGytMEInXxpTyQ=",
+      "go_mod_sum": "h1:bJbFm7T2nRANggShfl3I9h0UpPCzu4uAY5J/6dTdRvs=",
+      "advisory": "GO-2026-4736",
+      "upstream_fix_commit": "583080a7258e22cc884162e15b078771aa2c2c80",
+      "release_commit": "01c5c4c27f9a1ac3b5927f433b5115f9b0eee791",
+      "review": "Official fix commit is an ancestor of v4.9.0; the conditional ValidateUpdateMsg guard and regression test remain present. The vulnerability database has no fixed-version boundary and still reports it.",
+      "files": [
+        {"path": "pkg/server/fsm.go", "sha256": "587966a5228a2ef4ff4cf43c13663a10e3d9e08f54d456381a3ced8c81191a5e"},
+        {"path": "pkg/server/fsm_test.go", "sha256": "86ea3f1e7947a20327abf73ed807a45dcf89ece952a734e6af9c54bcc254e6ef"}
+      ]
+    }
+  ],
+  "modules": [
+    {
+      "path": "golang.org/x/net",
+      "from": "v0.59.0",
+      "version": "v0.62.0",
+      "sum": "h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY=",
+      "go_mod_sum": "h1:WgDCOTH8iwtB66T4/GfI94AHo/hhdb7Hah9NDseQfiI=",
+      "reason": "Fix GO-2026-6603, GO-2026-6610, GO-2026-6611, GO-2026-6612, GO-2026-6617, GO-2026-6860 and GO-2026-6866"
+    },
+    {
+      "path": "github.com/go-jose/go-jose/v4",
+      "from": "v4.1.5",
+      "version": "v4.1.6",
+      "sum": "h1:sNRkftxFJxwsILiQukqp5z83QBSmntVwmgRY7AqBDO4=",
+      "go_mod_sum": "h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=",
+      "reason": "Fix GHSA-mgcc-cww5-fp2q: RSA JWK parsing CPU denial of service"
+    },
+    {
+      "path": "github.com/go-chi/chi/v5",
+      "from": "v5.3.2",
+      "version": "v5.4.0",
+      "sum": "h1:+ufzvFTGKyin26Or5DLrlIDq4ygIDBVcj7oVNeeaYFE=",
+      "go_mod_sum": "h1:d1IG7GtKPSjPyBP365PH8sAGVHk3qfB/IhjFNRH1wWM=",
+      "reason": "Fix GHSA-j6qf-3m9c-vwj3: trusted proxy/client IP validation"
+    },
+    {
+      "path": "golang.org/x/crypto",
+      "from": "v0.57.0",
+      "version": "v0.58.0",
+      "sum": "h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54=",
+      "go_mod_sum": "h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w=",
+      "reason": "Required by x/net v0.62.0; this is NOT a fix for the unmaintained openpgp package"
+    },
+    {
+      "path": "golang.org/x/sys",
+      "from": "v0.48.0",
+      "version": "v0.49.0",
+      "sum": "h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=",
+      "go_mod_sum": "h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=",
+      "reason": "Required by x/net v0.62.0 and x/crypto v0.58.0"
+    },
+    {
+      "path": "golang.org/x/term",
+      "from": "v0.46.0",
+      "version": "v0.47.0",
+      "sum": "h1:cpyOwQkr2Nzxe2p6KnrTG7Ei2wtzjsuSjhpXXepZ/BM=",
+      "go_mod_sum": "h1:efAfAuG6RKABvg1ArGebRkvX6LXul14SM67o2e4mUCY=",
+      "reason": "Required by x/net v0.62.0 and x/crypto v0.58.0"
+    },
+    {
+      "path": "golang.org/x/text",
+      "from": "v0.42.0",
+      "version": "v0.43.0",
+      "sum": "h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=",
+      "go_mod_sum": "h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=",
+      "reason": "Required by x/net v0.62.0"
+    },
+    {
+      "path": "golang.org/x/tools",
+      "from": "v0.50.0",
+      "version": "v0.51.0",
+      "sum": "h1:k4Xc/1Om9jwkBJBo4NVLMSARBoWtK10mx+W5BnXCeAI=",
+      "go_mod_sum": "h1:9eEncMayCV6zRMGhR5eZEC2iBx98qWcF1HZ9Z7wJOoA=",
+      "reason": "Required by x/text v0.43.0; exact transitive MVS upgrade"
+    },
+    {
+      "path": "golang.org/x/sync",
+      "from": "v0.23.0",
+      "version": "v0.24.0",
+      "sum": "h1:iqiDrGoDgyuvAKrhLQthUEzU/R378N78gXbBjxed7oA=",
+      "go_mod_sum": "h1:sUUOizhqBxiL6pEWpqNLUiaJn1ShEbZ6BBqskPbjZm0=",
+      "reason": "Required by x/text v0.43.0; exact transitive MVS upgrade"
+    },
+    {
+      "path": "golang.org/x/telemetry",
+      "from": "v0.0.0-20260908163034-4bcc4b2ee518",
+      "direct": false,
+      "version": "v0.0.0-20260924152758-ed294f943157",
+      "sum": "h1:DftxASHKl6JolFPqoN+2WrFO53JvkHwRXvFqf8gsivA=",
+      "go_mod_sum": "h1:i+ivNqjDnTF3WTElsdk5g9V5DTSBYgdNo7xTU9SDwYA=",
+      "reason": "Graph-only transitive requirement of x/tools v0.51.0; recorded, not forced into the daemon"
+    }
+  ]
+}

@@ -108,6 +108,9 @@ let libraryWanted = true;
 let libraryFetched = 0;
 let libraryLater = null;
 
+// The app ids an Uninstall is running for, see uninstallButton.
+const uninstalling = new Set();
+
 // libraryShape is what, in the state, the library view depends on: which
 // seats exist and which of them take part.
 function libraryShape(s) {
@@ -203,7 +206,6 @@ function updateChoice(state) {
   if (!release) return { kind: "none", updater };
 
   if (updater.running) return { kind: "running", release, updater };
-  if (updater.error) return { kind: "failed", release, updater };
 
   // Installed and waiting for a restart. The version on disk is the new one and
   // the version serving is still the old one.
@@ -233,14 +235,20 @@ function updateChoice(state) {
     why = "That release has no package attached to it, so it cannot be installed from here.";
   }
 
+  // A failure offers the same button again when installing is possible at
+  // all. The daemon clears the error when a new attempt starts, and without the
+  // button the only way past one, a lookup that failed while the network was
+  // down for instance, was restarting the daemon.
+  if (updater.error) return { kind: "failed", release, updater, retry: !why };
+
   if (why) return { kind: "blocked", release, updater, why };
 
   return { kind: "install", release, updater };
 }
 
-function installButton(choice) {
+function installButton(choice, label = "Install it") {
   const button = document.createElement("button");
-  button.textContent = "Install it";
+  button.textContent = label;
 
   button.onclick = () => {
     // Asked here rather than posted and refused, so that the one setting that
@@ -558,7 +566,9 @@ function updateBanner() {
     div.className = "warning";
     const failed = document.createElement("div");
     failed.textContent = "The update failed: " + updater.error;
-    div.replaceChildren(text, link, failed);
+    div.replaceChildren(
+      ...[text, link, failed, choice.retry && installButton(choice, "Try again")].filter(Boolean),
+    );
 
     return [div];
   }
@@ -1476,8 +1486,29 @@ function uninstallButton(title) {
       path += "?host_steam=close";
     }
 
-    run(() => api("DELETE", path));
+    // Closing Steam in each seat that has the title comes first and takes some
+    // seconds per seat, so the button says what is happening until the answer
+    // is in and the list is drawn again without the title.
+    //
+    // Remembered by app id rather than on the button, because the list is drawn
+    // again with every change the daemon pushes, and closing Steam in a seat
+    // pushes several.
+    uninstalling.add(title.appid);
+    renderLibrary();
+
+    run(async () => {
+      try {
+        await api("DELETE", path);
+      } finally {
+        uninstalling.delete(title.appid);
+      }
+    });
   };
+
+  if (uninstalling.has(title.appid)) {
+    remove.disabled = true;
+    remove.textContent = "Uninstalling\u2026";
+  }
 
   return remove;
 }
@@ -4228,7 +4259,9 @@ function drawOffer(state, box) {
 
     case "failed":
       detail.textContent = "The update failed: " + updater.error;
-      box.replaceChildren(line, detail, link);
+      box.replaceChildren(
+        ...[line, detail, choice.retry && installButton(choice, "Try again"), link].filter(Boolean),
+      );
 
       return;
 

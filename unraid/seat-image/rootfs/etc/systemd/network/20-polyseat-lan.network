@@ -1,0 +1,14 @@
+# The seat's LAN interface, only present when the controller gave it one (bridged, Steam/streaming tests).
+# IPv4 by DHCP from the LAN's router; no IPv6 router advertisements, no link-local, no search domains.
+[Match]
+Name=eth0
+
+[Network]
+DHCP=ipv4
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[DHCPv4]
+UseDomains=no
+# The fixed seat MAC as client id: the router gives the seat the same address every time (Moonlight finds it).
+ClientIdentifier=mac

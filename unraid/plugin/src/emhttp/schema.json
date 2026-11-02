@@ -1,0 +1,171 @@
+{
+  "SERVICE": {
+    "type": "enum",
+    "values": [
+      "enabled",
+      "disabled"
+    ],
+    "default": "disabled",
+    "tab": "general",
+    "label": "Start the Polyseat/Incus service automatically when the array starts",
+    "restart_required": false,
+    "title": "Start at array start"
+  },
+  "DATA_DIR": {
+    "type": "path",
+    "pattern": "^/mnt/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+)*$",
+    "default": "",
+    "tab": "storage",
+    "label": "Data directory on a pool or array disk (Incus state, seats, games). Never deleted by the plugin.",
+    "locked_while_running": true,
+    "title": "Data directory"
+  },
+  "ACCEPT_NO_LSM": {
+    "type": "enum",
+    "values": [
+      "yes",
+      "no"
+    ],
+    "default": "no",
+    "tab": "storage",
+    "label": "Accept running containers without AppArmor/SELinux when the host has one the bundle cannot use",
+    "title": "Accept missing LSM"
+  },
+  "HEALTH_TIMEOUT": {
+    "type": "int",
+    "min": 10,
+    "max": 300,
+    "default": "60",
+    "tab": "advanced",
+    "label": "Seconds to wait for the daemon to become healthy",
+    "title": "Health timeout (s)"
+  },
+  "SUBID_START": {
+    "type": "int",
+    "min": 100000,
+    "max": 4000000000,
+    "default": "1000000",
+    "tab": "advanced",
+    "label": "First subordinate UID/GID reserved for containers",
+    "locked_while_running": true,
+    "title": "Subordinate ID start"
+  },
+  "SUBID_COUNT": {
+    "type": "int",
+    "min": 65536,
+    "max": 2000000000,
+    "default": "1000000000",
+    "tab": "advanced",
+    "label": "Number of subordinate UIDs/GIDs reserved for containers",
+    "locked_while_running": true,
+    "title": "Subordinate ID count"
+  },
+  "PLAY_CPU_PERCENT": {
+    "type": "int",
+    "min": 0,
+    "max": 100,
+    "default": "0",
+    "tab": "play",
+    "label": "Share of the whole host's CPU that a play session may use (0 = unlimited). Applies to the next play session.",
+    "locked_while_running": true,
+    "title": "Play CPU limit (%)"
+  },
+  "PLAY_MEMORY_MB": {
+    "type": "int",
+    "min": 0,
+    "max": 4194304,
+    "default": "0",
+    "tab": "play",
+    "label": "Memory a play session may use, in MB (0 = unlimited). The stop when the host itself runs low on memory stays. Applies to the next play session.",
+    "locked_while_running": true,
+    "title": "Play memory limit (MB)"
+  },
+  "PLAY_IDLE_STOP_MINUTES": {
+    "type": "int",
+    "min": 0,
+    "max": 1440,
+    "default": "0",
+    "tab": "play",
+    "label": "Standby: stop a seat that has had no Moonlight client and no game running for this many minutes, to free its memory and CPU (0 = never). A stopped seat cannot be woken from Moonlight; start it from Polyseat's page or the Polyseat card before connecting.",
+    "locked_while_running": true,
+    "title": "Seat standby (minutes)"
+  },
+  "LIBRARY_PATH": {
+    "type": "path",
+    "pattern": "^/mnt/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]+)*$",
+    "default": "/mnt/download/polyseat-games",
+    "tab": "play",
+    "label": "Game library: the mount point of its own ZFS dataset, with a quota, owned by root, under /mnt. Checked when a play session starts.",
+    "locked_while_running": true,
+    "title": "Game library path"
+  },
+  "PLAY_SESSION_HOURS": {
+    "type": "int",
+    "min": 1,
+    "max": 24,
+    "default": "6",
+    "tab": "play",
+    "label": "How long one play session may last, in hours. It ends by itself then (seats stop in order, the host is restored). Applies to the next play session.",
+    "locked_while_running": true,
+    "title": "Play session length (h)"
+  },
+  "PLAY_CPU_PERFORMANCE": {
+    "type": "enum",
+    "values": [
+      "yes",
+      "no"
+    ],
+    "default": "no",
+    "tab": "play",
+    "label": "Set every CPU's energy profile (energy_performance_preference) to performance while a play session runs, and put the previous values back exactly when it ends. Applies to the next play session.",
+    "locked_while_running": true,
+    "title": "CPU performance profile"
+  },
+  "PLAY_SEAT_CPUS": {
+    "type": "string",
+    "pattern": "^(?=.{0,300}$)(?:[0-9]{1,4}(?:-[0-9]{1,4})?(?:,[0-9]{1,4}(?:-[0-9]{1,4})?)*|[a-z0-9][a-z0-9-]{0,62}=[0-9]{1,4}(?:-[0-9]{1,4})?(?:,[0-9]{1,4}(?:-[0-9]{1,4})?)*(?:;[a-z0-9][a-z0-9-]{0,62}=[0-9]{1,4}(?:-[0-9]{1,4})?(?:,[0-9]{1,4}(?:-[0-9]{1,4})?)*)*)$",
+    "default": "",
+    "tab": "play",
+    "label": "Pin the seats to CPUs (empty = no pinning). One list for all seats, e.g. 0-15 (P-cores of an i7-14700K), or per seat, e.g. seat1=0-7;seat2=8-15. Only processes inside a seat's container are pinned. Checked against the host's CPUs when saved and when a session starts.",
+    "locked_while_running": true,
+    "title": "Seat CPUs"
+  },
+  "WORKLOADS_ENABLED": {
+    "type": "enum",
+    "values": [
+      "yes",
+      "no"
+    ],
+    "default": "no",
+    "tab": "workloads",
+    "label": "Start the permanent workloads daemon (a second Incus, for the owner's own containers) when the array starts. A play session never starts by itself.",
+    "title": "Start workloads at array start"
+  },
+  "WORKLOADS_INSTANCES": {
+    "type": "string",
+    "pattern": "^[a-z0-9][a-z0-9-]{0,62}(?: [a-z0-9][a-z0-9-]{0,62}){0,15}$",
+    "default": "",
+    "tab": "workloads",
+    "label": "The Incus instances the workloads daemon may run, names separated by spaces (e.g. ubuntudev). Any other instance, and any listed one that leaves the policy in docs/workloads.md, is stopped and kept from autostarting.",
+    "title": "Allowed instances"
+  },
+  "WORKLOADS_MEMORY_MB": {
+    "type": "int",
+    "min": 0,
+    "max": 4194304,
+    "default": "0",
+    "tab": "workloads",
+    "label": "Memory the workloads daemon and its containers may use together, in MB (0 = unlimited). A cap on the whole group: limits.* on an instance are not enforced one by one. Applies to the next start.",
+    "locked_while_running": true,
+    "title": "Workloads memory limit (MB)"
+  },
+  "WORKLOADS_CPUS": {
+    "type": "string",
+    "pattern": "^[0-9]{1,4}(?:-[0-9]{1,4})?(?:,[0-9]{1,4}(?:-[0-9]{1,4})?)*$",
+    "default": "",
+    "tab": "workloads",
+    "label": "The CPUs the workloads daemon and its containers may use, e.g. 0-15 or 0-7,16-19 (empty = all). Checked against the host's CPUs when saved and at start. Applies to the next start.",
+    "locked_while_running": true,
+    "title": "Workloads CPUs"
+  }
+}

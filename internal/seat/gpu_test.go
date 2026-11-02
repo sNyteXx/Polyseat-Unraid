@@ -430,6 +430,28 @@ func TestGPUDeviceNamesTheChosenCardOnAMachineWithTwo(t *testing.T) {
 	}
 }
 
+// An integrated GPU next to the card is a second card too. DetectGPU never
+// picks an Intel iGPU, so counting only the cards it could pick left the seat
+// with both, and wlroots rendered on the iGPU while Sunshine encoded on the
+// other: a black stream (an i7-14700K with an RTX 5070 Ti, 2026-11-01).
+func TestGPUDeviceNamesTheCardNextToAnIntegratedOne(t *testing.T) {
+	root := fakeSysfs(t, []fakeCard{
+		{pci: "0000:00:02.0", vendor: "0x8086", driver: "i915", nodes: []string{"card1", "renderD129"}},
+		nvidiaCard("0000:01:00.0", "card0", "renderD128"),
+	})
+
+	gpu, err := DetectGPU(root)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+
+	device := gpuDevice(root, gpu, false)
+
+	if device["pci"] != "0000:01:00.0" {
+		t.Errorf("the seat was given %q, want the NVIDIA card alone", device["pci"])
+	}
+}
+
 // The card that was chosen is gone, which is a card moved to another slot or
 // taken out. Writing the address anyway produces a seat that cannot be started
 // at all, measured against Incus 7.4:

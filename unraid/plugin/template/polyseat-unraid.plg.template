@@ -1,0 +1,107 @@
+<?xml version='1.0' standalone='yes'?>
+<!--
+  WIP / DO NOT USE. NOT an installable plugin: every at-sign delimited token is filled only by
+  unraid/scripts/render-plg.sh in a separately approved release job, and the file
+  deliberately does not end in ".plg". Unraid's plugin manager cannot parse a usable
+  plugin from it (empty URLs/hashes), and CI fails if a real .plg appears in the repo.
+
+  Semantics relied upon were verified from /usr/local/sbin/plugin on Unraid 7.3.3:
+  an existing FILE target is kept unless its SHA256 differs; INLINE/LOCAL FILEs with
+  Run= execute in order; Method="remove" FILEs run on `plugin remove`; Min= gates
+  FILE entries by Unraid version. All payload names are versioned/hash-addressed.
+-->
+<!DOCTYPE PLUGIN [
+<!ENTITY name       "polyseat-unraid">
+<!ENTITY author     "sNyteXx">
+<!ENTITY version    "@VERSION@">
+<!ENTITY min        "7.2.0">
+<!ENTITY baseURL    "@RELEASE_BASE_URL@">
+<!ENTITY pluginURL  "&baseURL;/&name;.plg">
+<!ENTITY supportURL "@SUPPORT_URL@">
+<!ENTITY emhttp     "/usr/local/emhttp/plugins/&name;">
+<!ENTITY boot       "/boot/config/plugins/&name;">
+<!ENTITY pkg        "&name;-&version;-noarch-1">
+<!ENTITY pkgSHA256  "@PACKAGE_SHA256@">
+<!ENTITY bundleSHA  "@BUNDLE_SHA256@">
+<!ENTITY manifestSHA256 "@MANIFEST_SHA256@">
+<!ENTITY sigSHA256  "@SIGNATURE_SHA256@">
+]>
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="&min;" support="&supportURL;" launch="Settings/PolyseatSettings">
+
+<CHANGES>
+##&name;
+###&version;
+- WIP release candidate. See repository documentation before use.
+</CHANGES>
+
+<!-- 1. Pre-flight: read-only checks; abort before anything is installed. -->
+<FILE Run="/bin/bash">
+<INLINE>
+fail() { echo "polyseat-unraid: $1" >&amp;2; exit 1; }
+for t in jq tar xz ssh-keygen flock ldconfig getconf sha256sum; do
+  command -v "$t" >/dev/null || fail "required tool missing: $t"
+done
+kernel=$(uname -r | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+[ "$(printf '%s\n%s\n' 6.12 "$kernel" | sort -V | head -n1)" = 6.12 ] || fail "kernel $kernel is older than 6.12"
+[ "$(stat -f -c %T /sys/fs/cgroup)" = cgroup2fs ] || fail "cgroup v2 required"
+exit 0
+</INLINE>
+</FILE>
+
+<!-- 2. Controller/WebUI/event package (RAM install at every boot by the plugin manager). -->
+<FILE Name="&boot;/pkg/&pkg;.txz" Run="upgradepkg --install-new">
+<URL>&baseURL;/&pkg;.txz</URL>
+<SHA256>&pkgSHA256;</SHA256>
+</FILE>
+
+<!-- 3. Hash-addressed runtime bundle, manifest and signature (kept on flash, verified again on use). -->
+<FILE Name="&boot;/bundles/&bundleSHA;.tar.gz">
+<URL>&baseURL;/&bundleSHA;.tar.gz</URL>
+<SHA256>&bundleSHA;</SHA256>
+</FILE>
+<FILE Name="&boot;/bundles/&bundleSHA;.manifest.json">
+<URL>&baseURL;/&bundleSHA;.manifest.json</URL>
+<SHA256>&manifestSHA256;</SHA256>
+</FILE>
+<FILE Name="&boot;/bundles/&bundleSHA;.manifest.json.sig">
+<URL>&baseURL;/&bundleSHA;.manifest.json.sig</URL>
+<SHA256>&sigSHA256;</SHA256>
+</FILE>
+
+<!-- 4. Pinned release signer. Settings are created by the WebUI/config-set; defaults live in schema.json. -->
+<FILE Name="&boot;/allowed_signers" Mode="0600">
+<INLINE>
+@SIGNER_LINE@
+</INLINE>
+</FILE>
+
+<!-- 5. Transactional activation: finishes an interrupted update first, then switches
+        (verify, smoke-run, journal, atomic switch, health check, automatic rollback). -->
+<FILE Run="/bin/bash">
+<INLINE>
+CTL=&emhttp;/scripts/polyseatctl
+[ -x "$CTL" ] || { echo "polyseat-unraid: controller missing after package install" >&amp;2; exit 1; }
+ln -sfn "$CTL" /usr/local/sbin/polyseatctl
+"$CTL" recover --approve || exit 1
+"$CTL" activate &bundleSHA; --approve || exit 1
+exit 0
+</INLINE>
+</FILE>
+
+<!-- Removal: stop the daemon, remove only manifest-listed runtime files and the managed
+     subuid block. Settings and DATA_DIR (seats, games, Incus state) are kept. -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+CTL=&emhttp;/scripts/polyseatctl
+if [ -x "$CTL" ]; then "$CTL" uninstall --approve || exit 1; fi
+if [ -L /usr/local/sbin/polyseatctl ] &amp;&amp; [ "$(readlink /usr/local/sbin/polyseatctl)" = "$CTL" ]; then
+  rm -f /usr/local/sbin/polyseatctl
+fi
+removepkg &pkg; >/dev/null 2>/dev/null
+rm -f "&boot;/pkg/&pkg;.txz" "&boot;/allowed_signers"
+rmdir "&boot;/pkg" 2>/dev/null
+exit 0
+</INLINE>
+</FILE>
+
+</PLUGIN>

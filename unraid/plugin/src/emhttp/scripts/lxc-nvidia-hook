@@ -1,0 +1,66 @@
+#!/bin/bash
+# Polyseat diagnostic wrapper around the verbatim LXC nvidia mount hook (nvidia.upstream, beside this file).
+#
+# LXC runs mount hooks as the container's root inside its user namespace and records their output only at log
+# level DEBUG; at the default level a failure is just "Script exited with status 1" (Tower run 6). This wrapper
+# keeps, size-capped, what is needed to diagnose it: selected environment (LXC_*, NVIDIA_*, CUDA_*, PATH), identity
+# and namespaces, the hook's complete stdout+stderr, its exit status, and nvidia-container-cli's own debug log.
+# The log directory is created by the controller, owned by the container root uid, mode 0700.
+#
+# Apart from the GPU admission below, it never changes the hook's exit status. It adds `--debug FILE`, which the upstream hook accepts, so the CLI
+# writes its log to a directory that uid can write (the hook's own default, the instance directory, is root-only,
+# and libnvidia-container 1.20.1 asserts that its debug log opens). And it puts the shim in cli/ (lxc-nvidia-cli)
+# first on the hook's PATH, which runs the real CLI with --no-pivot: pivot_root fails on Unraid's initramfs root.
+set -u
+here=$(cd -- "$(dirname -- "$0")" && pwd)
+log=${POLYSEAT_HOOK_LOG_DIR:-$(cd -- "$here/.." && pwd)/hook-log}
+cap=262144
+
+# GPU admission (step 4): every start of a GPU container passes here, polyseatd's own starts included. The
+# controller's supervisor rewrites gpu-admission every second from its VM-priority check ("allow EPOCH PCI");
+# without a fresh "allow" this start fails before the GPU is touched. Waits up to 5 s for the supervisor's next write.
+admission=${POLYSEAT_GPU_ADMISSION:-$(cd -- "$here/.." && pwd)/gpu-admission}
+admitted=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if read -r verdict stamp _ < "$admission" 2>/dev/null && [ "$verdict" = allow ] &&
+     case $stamp in '' | *[!0-9]*) false ;; *) true ;; esac &&
+     [ $(( $(date +%s) - stamp )) -ge -2 ] && [ $(( $(date +%s) - stamp )) -le 5 ]; then
+    admitted=1
+    break
+  fi
+  sleep 0.5
+done
+if [ "$admitted" != 1 ]; then
+  msg="polyseat: the GPU is not admitted (a VM has priority, or the Polyseat supervisor is not running); start refused"
+  echo "$msg" >&2
+  if [ -d "$log" ] && [ -w "$log" ]; then printf '%s\n' "$msg" > "$log/hook.out"; printf '1\n' > "$log/status"; fi
+  exit 1
+fi
+
+# Resolved like the upstream hook does (it appends the standard directories); without a CLI the hook reports it.
+if [ -x "$here/cli/nvidia-container-cli" ] &&
+   POLYSEAT_NVC_REAL=$(PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin command -v nvidia-container-cli); then
+  export POLYSEAT_NVC_REAL PATH="$here/cli:$PATH"
+fi
+
+if [ -d "$log" ] && [ -w "$log" ]; then
+  {
+    printf 'time=%s args=%s\n' "$(date -u +%FT%TZ)" "$*"
+    printf 'id=%s\n' "$(id 2>&1)"
+    printf 'uid_map=%s\n' "$(tr -s ' ' < /proc/self/uid_map 2>&1 | tr '\n' ';')"
+    printf 'gid_map=%s\n' "$(tr -s ' ' < /proc/self/gid_map 2>&1 | tr '\n' ';')"
+    for ns in user mnt pid cgroup net; do printf 'ns_%s=%s\n' "$ns" "$(readlink "/proc/self/ns/$ns" 2>&1)"; done
+    env | grep -E '^(LXC_[A-Z_]+|NVIDIA_[A-Z_]+|CUDA_VERSION|PATH|POLYSEAT_NVC_REAL)=' | sort
+    printf 'cli=%s\n' "$(command -v nvidia-container-cli 2>&1 || echo MISSING)"
+    printf 'rootfs=%s\n' "$(ls -ld -- "${LXC_ROOTFS_MOUNT:-/nonexistent}" 2>&1)"
+  } 2>&1 | head -c 16384 > "$log/env.txt"
+  # The sink keeps the first $cap bytes and drains the rest, so the hook never sees SIGPIPE or a full pipe.
+  "$here/nvidia.upstream" --debug "$log/nvidia-container-cli.log" "$@" \
+    > >({ head -c "$cap" > "$log/hook.out"; cat > /dev/null; }) 2>&1
+  rc=$?
+  wait
+  printf '%s\n' "$rc" > "$log/status"
+  exit "$rc"
+fi
+# No usable log directory: behave exactly like the plain hook.
+exec "$here/nvidia.upstream" "$@"

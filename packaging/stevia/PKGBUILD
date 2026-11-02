@@ -1,0 +1,53 @@
+# Polyseat - Stevia, the on-screen keyboard, with one patch.
+#
+# Next to the distribution's squeekboard rather than in conflict with it, because
+# a seat built before this has squeekboard installed and pacman -U --noconfirm
+# answers no to a conflict. See README.md next to this file for what the patch
+# does and why a seat needs it.
+#
+# Built with build.sh, which is the only supported way: a seat has no compiler,
+# and gets the finished package rather than this recipe.
+
+pkgname=polyseat-stevia
+pkgver=0.58.0
+pkgrel=1
+pkgdesc="Stevia on-screen keyboard for Polyseat seats, patched to run on sway"
+arch=('x86_64')
+url="https://github.com/superuser404notfound/Polyseat"
+license=('GPL-3.0-or-later')
+
+depends=('cairo' 'dconf' 'feedbackd' 'glib2' 'glibc' 'gnome-desktop' 'gtk3'
+         'hunspell' 'json-glib' 'libgcc' 'libgmobile' 'libhandy' 'pango'
+         'systemd-libs' 'wayland')
+makedepends=('gcc' 'glib2-devel' 'meson' 'ninja' 'pkgconf' 'wayland-protocols'
+             'gsettings-desktop-schemas')
+
+source=(
+  "stevia-v$pkgver.tar.gz::https://gitlab.gnome.org/World/Phosh/stevia/-/archive/v$pkgver/stevia-v$pkgver.tar.gz"
+  'sway.patch'
+)
+sha256sums=(
+  'b86120ae9bbbff2cf4878ff131a7955cf2f0fb4eac14897292c4ba967ddfe34d'
+  'SKIP'
+)
+
+prepare() {
+  cd "stevia-v$pkgver"
+  patch -Np1 -i "$srcdir/sway.patch"
+}
+
+build() {
+  meson setup build "stevia-v$pkgver" --prefix=/usr --buildtype=plain \
+    -Dtests=false -Dman=false
+  meson compile -C build
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+
+  # The files squeekboard has as well, which pacman would refuse, and which
+  # nothing here uses: sway starts the keyboard, so neither systemd nor D-Bus
+  # has to, and nobody picks it from a menu.
+  rm -rf "$pkgdir/usr/share/applications" "$pkgdir/usr/share/dbus-1" \
+    "$pkgdir/usr/lib/systemd"
+}

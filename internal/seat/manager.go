@@ -119,6 +119,10 @@ type Manager struct {
 	// the loop waits for it.
 	sweeper func(ctx context.Context, name string)
 
+	// standbyHooks answer standby's questions in place of the seat's, and are
+	// nil everywhere except in a test.
+	standbyHooks *standbyHooks
+
 	// syncing is set while a library pass started by the timer is running, so
 	// that a pass which outlasts the timer's minute is not joined by another
 	// queueing behind it on syncMu. Guarded by mu. See syncSoon.
@@ -241,6 +245,11 @@ type runtime struct {
 	// only the first says anything about the card. Both hold the app list back,
 	// see refreshSession.
 	unclear bool
+
+	// idleSince is when the seat was first found running with nobody streaming
+	// and no operation on it, or the zero time while it is not. Standby's
+	// clock, see standby.go.
+	idleSince time.Time
 
 	// quiet is when the seat's control connection was first found gone, or the
 	// zero time while it is there. A stream is only treated as over once it has
@@ -1071,6 +1080,8 @@ func (m *Manager) refreshSession(ctx context.Context, name string) {
 	busy := rt.streaming || rt.unclear
 	m.mu.Unlock()
 
+	m.standby(ctx, name, up, busy)
+
 	// The broker is the daemon's own child process, so bringing it back is
 	// supervision rather than a decision about somebody's session. This is also
 	// what adopts a seat that was already running when the daemon started, and
@@ -1604,6 +1615,7 @@ func (m *Manager) forgetStream(name string) {
 	rt.unclear = false
 	rt.quiet = time.Time{}
 	rt.session = nil
+	rt.idleSince = time.Time{}
 
 	// And no output. The card reads this as "what the screen is running at
 	// now", against the resolution the seat is configured with, so a stopped

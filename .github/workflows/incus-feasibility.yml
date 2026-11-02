@@ -1,0 +1,480 @@
+name: WIP Incus pinned build proof (never deploy)
+
+# FULL lane (pinned runtime, rehearsals, seat image, desktop canary). It runs automatically only when an input of
+# the runtime build, the seat image or this workflow changes; controller/hook/test-script changes get the FAST lane
+# (unraid-preflight-lint.yml: lint, unit suite, LXC hook rehearsal on a verified runtime). Every Tower candidate is
+# qualified from a full run of its exact commit: `gh workflow run incus-feasibility.yml --ref wip/unraid-native-plugin`.
+# See unraid/docs/ci-pipeline.md.
+on:
+  workflow_dispatch:
+  push:
+    branches: [wip/unraid-native-plugin]
+    paths:
+      - '.github/workflows/incus-feasibility.yml'
+      - '.github/workflows/seat-image.yml'
+      - 'unraid/scripts/build-incus-artifact.sh'
+      - 'unraid/scripts/lib/build-core.sh'
+      - 'unraid/scripts/prepare-incus-deps.py'
+      - 'unraid/dependency-overrides.json'
+      - 'unraid/scripts/check-bundle-abi.py'
+      - 'unraid/scripts/make-runtime-bundle.py'
+      - 'unraid/scripts/make-runtime-sbom.py'
+      - 'unraid/scripts/make_proof_sbom.py'
+      - 'unraid/scripts/prepare-canary-image.sh'
+      - 'unraid/scripts/make-canary-image.py'
+      - 'unraid/scripts/ci-runtime-key.py'
+      - 'unraid/scripts/ci-runtime-reuse.py'
+      - 'unraid/lab/abi.py'
+      - 'unraid/lab/bundle.py'
+      - 'unraid/lab/__init__.py'
+      - 'unraid/abi/**'
+      - 'unraid/build-pins.env'
+      - 'unraid/seat-image/**'
+      - 'unraid/scripts/ci-desktop-smoke.sh'
+
+permissions:
+  contents: read
+  actions: read  # read-only: the runtime reuse check looks up the producing run and its proof artifact
+
+jobs:
+  canary-cgroup:
+    if: github.ref == 'refs/heads/wip/unraid-native-plugin'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test canary limits and cgroup.kill on disposable CI host only
+        run: |
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_OS="$RUNNER_OS" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            bash unraid/scripts/ci-canary-cgroup.sh
+
+  build:
+    if: github.ref == 'refs/heads/wip/unraid-native-plugin'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # Signed Incus v7.5.1 tag (newest 7.5.x), immutable target commit.
+      INCUS_COMMIT: b20ec6c3cb17eaff28fc1145238b8769e44ce39d
+      INCUS_RELEASE: v7.5.1
+      INCUS_TAG_OBJECT: f3242b56ed7ab0127f5716d03e270224e24c0762
+      # Immutable v1.15.9 cowsql and v0.22.1 raft release commits.
+      COWSQL_COMMIT: 783815b901470e27b7dfbcce3a67c888dad19e78
+      RAFT_COMMIT: 9edb176a7924ce2b943cb56552366dc4b5a1a6b7
+      # Signed LXC v6.0.6 tag, immutable target commit (Incus 7.5 requires LXC >= 6.0.0).
+      LXC_COMMIT: 2597434ae2472114c70ad2bdf4ae5580c9e22717
+      LXC_RELEASE: v6.0.6
+      # Verbatim hooks/nvidia of that tag (bundled for nvidia.runtime); the build refuses any other bytes.
+      LXC_NVIDIA_HOOK_SHA256: d4e1bcdccfc5c1b41714ebc9bc6c609a80e12232b88a1f21be6efce0c9b11d1d
+      INCUS_PATCH_HOST_VETH_MAC_SHA256: bffbfc72c7fdbb2326f1229212e1c633b44dde79ec31e50f308ab34a11004e6a
+      # Signed squashfs-tools 4.7.5 tag: Incus requires unsquashfs, Unraid lacks it; bundled privately.
+      SQUASHFS_TOOLS_COMMIT: 708c59ae80853b0845017c33b42e56061cc546cd
+      SQUASHFS_TOOLS_RELEASE: 4.7.5
+      SQUASHFS_TOOLS_TAG_OBJECT: 1fdc2fe01d681438a04e2a137a9f51d829ba3358
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build dependencies on disposable runner only
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake autoconf-archive libtool libtool-bin \
+            build-essential binutils git pkg-config libsqlite3-dev libacl1-dev \
+            libcap-dev libseccomp-dev libudev-dev libuv1-dev \
+            liblz4-dev libzstd-dev zlib1g-dev liblzma-dev liblzo2-dev libbtrfs-dev libdevmapper-dev \
+            meson ninja-build patchelf protobuf-compiler \
+            rsync attr xz-utils iproute2 uidmap jq strace \
+            busybox-static
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.10'
+          cache: false
+
+      - name: Content-addressed key of the pinned runtime build
+        id: key
+        run: |
+          key=$(python3 unraid/scripts/ci-runtime-key.py --json-out "$RUNNER_TEMP/runtime-key.json")
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "runtime key $key"
+
+      # Every green fresh build saves under its own run id, so a rejected entry can never block a newer one; the
+      # lookup takes the newest entry whose prefix is exactly this content key. Restore and save must use the same
+      # path (it is part of the cache version), see test_ci_runtime_reuse.WorkflowCacheTests.
+      - name: Look up a cached build of exactly this recipe
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/runtime-snapshot
+          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: polyseat-runtime-v1-${{ steps.key.outputs.key }}-
+
+      - name: Verify the cached runtime before any reuse (any doubt means a full rebuild)
+        id: reuse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KEY: ${{ steps.key.outputs.key }}
+          MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
+        run: |
+          echo "reused=false" >> "$GITHUB_OUTPUT"
+          snap="$RUNNER_TEMP/runtime-snapshot"
+          if [ -z "$MATCHED" ]; then echo "cache miss: full build"; rm -rf "$snap"; exit 0; fi
+          case $MATCHED in
+            "polyseat-runtime-v1-$KEY-"*) echo "cache entry $MATCHED" ;;
+            *) echo "::warning::cache entry $MATCHED is not of this recipe; full build"; rm -rf "$snap"; exit 0 ;;
+          esac
+          if ! python3 unraid/scripts/ci-runtime-reuse.py verify --snapshot "$snap" \
+               --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/reuse-verdict.json"; then
+            echo "::warning::cached runtime not reusable: $(jq -r .reason "$RUNNER_TEMP/reuse-verdict.json"); full build"
+            rm -rf "$snap"; exit 0
+          fi
+          # Regression check of the verifier on this very snapshot: one flipped byte must be refused.
+          neg="$RUNNER_TEMP/runtime-snapshot-negative"; cp -a "$snap" "$neg"
+          f=$(ls "$neg"/proof/bundle/*.tar.gz); printf '\001' | dd of="$f" bs=1 seek=100 conv=notrunc status=none
+          if python3 unraid/scripts/ci-runtime-reuse.py verify --snapshot "$neg" \
+               --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" > /dev/null; then
+            echo "::error::the reuse verifier accepted a tampered snapshot"; exit 1
+          fi
+          rm -rf "$neg"
+          stage=$(mktemp -d "$RUNNER_TEMP/polyseat-incus-proof.XXXXXXXX"); rmdir "$stage"
+          python3 unraid/scripts/ci-runtime-reuse.py restore --snapshot "$snap" \
+            --proof-out "$GITHUB_WORKSPACE/incus-build-proof" --stage-out "$stage"
+          echo "INCUS_PROOF_STAGE=$stage" >> "$GITHUB_ENV"
+          # Checks that depend on files outside the key are re-run against the reused runtime.
+          ctl=$(sed -n 's/^INCUSD_REQUIRED_PROGRAMS="\(.*\)".*/\1/p' unraid/plugin/src/emhttp/scripts/polyseatctl)
+          [ "$(cat incus-build-proof/incusd-needed-programs.txt)" = "$ctl" ] ||
+            { echo "::error::controller INCUSD_REQUIRED_PROGRAMS differs from the reused runtime"; exit 1; }
+          python3 unraid/scripts/check-bundle-abi.py --payload incus-build-proof/payload \
+            --baseline unraid/abi/unraid-7.3.3-x86_64 --max-glibc 2.44 --json "$RUNNER_TEMP/abi-recheck.json" > /dev/null
+          jq -e '.ok == true' "$RUNNER_TEMP/abi-recheck.json" > /dev/null
+          jq --argjson v "$(cat "$RUNNER_TEMP/reuse-verdict.json")" --arg run "$GITHUB_RUN_ID" -n \
+            '{schema:1, reused:true, reused_in_run:($run|tonumber), key:$v.key, bundle_sha256:$v.bundle_sha256,
+              built_in:$v.producer, checks:["key+inputs","file list+hashes","SHA256SUMS","bundle identity",
+              "producer run success","producer artifact digest","tamper refusal","INCUSD_REQUIRED_PROGRAMS","ABI"]}' \
+            > incus-build-proof/runtime-provenance.json
+          echo "reused=true" >> "$GITHUB_OUTPUT"
+          echo "REUSED pinned runtime $(jq -r .bundle_sha256 "$RUNNER_TEMP/reuse-verdict.json") built in run $(jq -r .producer.run_id "$RUNNER_TEMP/reuse-verdict.json")"
+
+      - name: Build pinned source and record binary dependencies
+        if: steps.reuse.outputs.reused != 'true'
+        run: sh unraid/scripts/build-incus-artifact.sh
+
+      - name: Recheck the pinned GoBGP malformed-input regression
+        if: steps.reuse.outputs.reused != 'true'
+        timeout-minutes: 5
+        run: |
+          test -n "${INCUS_PROOF_STAGE:-}"
+          cd "$INCUS_PROOF_STAGE/incus"
+          go test -mod=readonly -p=2 -timeout=120s \
+            -run '^TestRecvMessageWithError_MalformedNextHop$' \
+            -count=1 -json github.com/osrg/gobgp/v4/pkg/server \
+            > "$GITHUB_WORKSPACE/incus-build-proof/gobgp-regression.jsonl"
+          jq -se 'any(.[]; .Action == "pass" and .Test == "TestRecvMessageWithError_MalformedNextHop")' \
+            "$GITHUB_WORKSPACE/incus-build-proof/gobgp-regression.jsonl"
+
+      - name: Snapshot the fresh runtime build (before any rehearsal writes evidence)
+        if: steps.reuse.outputs.reused != 'true'
+        run: |
+          python3 unraid/scripts/ci-runtime-reuse.py snapshot --proof incus-build-proof \
+            --stage "$INCUS_PROOF_STAGE" --out "$RUNNER_TEMP/runtime-snapshot" > /dev/null
+          jq -n --arg run "$GITHUB_RUN_ID" '{schema:1, reused:false, built_in_run:($run|tonumber)}' \
+            > incus-build-proof/runtime-provenance.json
+
+      - name: Build the polyseat daemon bundle (upstream polyseatd, its input helpers, bundled Python; pinned by the canary controller)
+        run: |
+          mkdir -p incus-build-proof/daemon
+          bash unraid/scripts/build-daemon-bundle.sh \
+            "$(sed -n 's/^pkgver=//p' packaging/aur/PKGBUILD)-unraid.${GITHUB_SHA::12}" incus-build-proof/daemon
+
+      - name: Exact CPU-only canary lifecycle and hard stop on disposable runner
+        timeout-minutes: 12
+        run: |
+          test -n "${INCUS_PROOF_STAGE:-}"
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_TEMP="$RUNNER_TEMP" GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            INCUS_PROOF_STAGE="$INCUS_PROOF_STAGE" \
+            bash unraid/scripts/ci-e2e-canary.sh
+
+      - name: Preserve exact canary diagnostics even if the rehearsal failed
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-canary-diagnostics-NOT-FOR-UNRAID
+          path: |
+            incus-build-proof/canary-e2e/
+            incus-build-proof/canary-e2e-result.txt
+            incus-build-proof/canary-rehearsal.json
+            incus-build-proof/gobgp-regression.jsonl
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Controller end-to-end with the real bundle (CPU-only, disposable runner)
+        timeout-minutes: 20
+        run: |
+          test -n "${INCUS_PROOF_STAGE:-}"
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            INCUS_PROOF_STAGE="$INCUS_PROOF_STAGE" \
+            sh unraid/scripts/ci-e2e-controller.sh
+
+      - name: Launch and stop a CPU-only BusyBox container on disposable runner
+        timeout-minutes: 10
+        run: |
+          test -n "${INCUS_PROOF_STAGE:-}"
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            INCUS_PROOF_STAGE="$INCUS_PROOF_STAGE" \
+            sh unraid/scripts/incus-cpu-smoke.sh
+
+      - name: Verify proof checksums and disabled installer
+        run: |
+          cd incus-build-proof
+          sha256sum --check SHA256SUMS
+          python3 -m json.tool SBOM-build-source-only.cdx.json >/dev/null
+          test ! -e ../unraid/plugin/polyseat-unraid.plg
+          test -f ../unraid/plugin/polyseat-unraid.plg.disabled
+
+      - name: Vulnerability lookups (report findings; fail on lookup errors)
+        run: |
+          python3 unraid/scripts/osv-check.py --modules incus-build-proof/go-modules.txt \
+            --buildinfo incus-build-proof/incusd-go-buildinfo.txt \
+            --cli-buildinfo incus-build-proof/incus-go-buildinfo.txt --pins unraid/build-pins.env \
+            --out-json incus-build-proof/osv-report.json --out-text incus-build-proof/osv-report.txt
+          python3 unraid/scripts/make-runtime-sbom.py --manifest incus-build-proof/bundle/*.manifest.json \
+            --abi-report incus-build-proof/abi-report.json --buildinfo incus-build-proof/incusd-go-buildinfo.txt \
+            --cli-buildinfo incus-build-proof/incus-go-buildinfo.txt \
+            --pins unraid/build-pins.env --osv-report incus-build-proof/osv-report.json --label ci \
+            --output incus-build-proof/SBOM-runtime-osv-triage.cdx.json
+
+      - name: Go binary vulnerability scan (fail on tool or format errors)
+        run: |
+          # Scan the original Go ELF, before patchelf adjusts RUNPATH for Unraid.
+          # Its module inventory must match the one recorded by the build.
+          diff -u <(go version -m incus-build-proof/bin/incusd | tail -n +2) \
+            <(tail -n +2 incus-build-proof/incusd-go-buildinfo.txt)
+          diff -u <(go version -m incus-build-proof/bin/incus | tail -n +2) \
+            <(tail -n +2 incus-build-proof/incus-go-buildinfo.txt)
+          GOBIN="$RUNNER_TEMP/govulncheck-bin" go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          mkdir -p "$RUNNER_TEMP/polyseatd-scan" && tar -xf incus-build-proof/daemon/polyseat-daemon.tar -C "$RUNNER_TEMP/polyseatd-scan" bin/polyseatd
+          sh unraid/scripts/ci-govulncheck.sh "$RUNNER_TEMP/govulncheck-bin/govulncheck" \
+            incus-build-proof/bin/incusd incus-build-proof/govulncheck.txt
+          sh unraid/scripts/ci-govulncheck.sh "$RUNNER_TEMP/govulncheck-bin/govulncheck" \
+            incus-build-proof/bin/incus incus-build-proof/govulncheck-cli.txt
+          sh unraid/scripts/ci-govulncheck.sh "$RUNNER_TEMP/govulncheck-bin/govulncheck" \
+            "$RUNNER_TEMP/polyseatd-scan/bin/polyseatd" incus-build-proof/govulncheck-polyseatd.txt
+
+      - name: Preserve scan diagnostics even if a scanner failed
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-security-scan-diagnostics-NOT-FOR-UNRAID
+          path: |
+            incus-build-proof/govulncheck.txt
+            incus-build-proof/govulncheck-cli.txt
+            incus-build-proof/osv-report.json
+            incus-build-proof/osv-report.txt
+            incus-build-proof/incusd-go-buildinfo.txt
+            incus-build-proof/incus-go-buildinfo.txt
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Assemble the CPU-only test artifact (reached only after a green controller end-to-end)
+        run: |
+          mkdir polyseat-test-package
+          sh unraid/scripts/build-plugin-package.sh "$(date -u +%Y.%m.%d).ci${GITHUB_RUN_NUMBER}" polyseat-test-package test-host
+          sh unraid/scripts/make-test-report.sh incus-build-proof polyseat-cpu-only-testbuild
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-cpu-only-testbuild-NOT-FOR-UNRAID
+          path: polyseat-cpu-only-testbuild/
+          retention-days: 14
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: proof
+        with:
+          name: incus-build-proof-NOT-FOR-UNRAID
+          path: incus-build-proof/
+          retention-days: 7
+          if-no-files-found: error
+
+      # Only a fresh build whose whole job is green is offered for reuse. It is bound to this run and its proof
+      # artifact; a later run reuses it only after `ci-runtime-reuse.py verify` (including that this run concluded
+      # successfully), otherwise it builds again.
+      - name: Seal the fresh runtime snapshot to this green run and its proof artifact
+        if: success() && steps.reuse.outputs.reused != 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.proof.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.proof.outputs.artifact-digest }}
+        run: |
+          python3 unraid/scripts/ci-runtime-reuse.py seal --snapshot "$RUNNER_TEMP/runtime-snapshot" \
+            --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --head-sha "$GITHUB_SHA" \
+            --artifact-id "$ARTIFACT_ID" --artifact-digest "sha256:${ARTIFACT_DIGEST#sha256:}"
+
+      - name: Offer the sealed snapshot to later runs (content-addressed key)
+        if: success() && steps.reuse.outputs.reused != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/runtime-snapshot
+          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  seat-image:
+    if: github.ref == 'refs/heads/wip/unraid-native-plugin'
+    uses: ./.github/workflows/seat-image.yml
+
+  desktop-canary:
+    if: github.ref == 'refs/heads/wip/unraid-native-plugin'
+    needs: [build, seat-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: incus-build-proof-NOT-FOR-UNRAID
+          path: incus-build-proof
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: polyseat-seat-image-NOT-FOR-UNRAID
+          path: seat-image-in
+
+      - name: Runtime prerequisites on the disposable runner only
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends rsync attr xz-utils iproute2 uidmap jq
+
+      - name: Exact M1 desktop canary sequence with the pinned runtime and the real seat image
+        timeout-minutes: 20
+        run: |
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            SEAT_IMAGE_DIR="$GITHUB_WORKSPACE/seat-image-in" \
+            bash unraid/scripts/ci-e2e-desktop-canary.sh
+
+      - name: Level-2 LXC nvidia hook rehearsal (real incusd/LXC; stub and real nvidia-container-cli; no GPU)
+        timeout-minutes: 10
+        run: |
+          cli=$(sh unraid/scripts/fetch-nvidia-cli-for-tests.sh "$RUNNER_TEMP/nvidia-cli")
+          bundle="incus-build-proof/bundle/$(sed -n 's/^BUNDLE_SHA256=//p' incus-build-proof/bundle.env).tar.gz"
+          bash unraid/scripts/local-hook-rehearsal.sh "$bundle" "$GITHUB_WORKSPACE/hook-rehearsal" "$cli"
+          grep -q '^DONE$' hook-rehearsal/summary.txt
+          ! grep -q '^FAIL' hook-rehearsal/summary.txt
+
+      - name: Preserve the hook rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-hook-rehearsal-NOT-FOR-UNRAID
+          path: hook-rehearsal/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Preserve desktop canary evidence even if the rehearsal failed
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-desktop-canary-NOT-FOR-UNRAID
+          path: |
+            incus-build-proof/desktop-canary-e2e/
+            incus-build-proof/desktop-canary-e2e-result.txt
+            incus-build-proof/desktop-canary-rehearsal.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  # Steam path (owner decision 2026-10-31): the real seat image with the controller's exact LAN NIC on a fixture br0
+  # (dnsmasq DHCP/DNS + NAT inside a disposable privileged container), the controller's deny-tools incl. its read-only
+  # nft stub, Steam's bootstrap and self-update from Valve, its sign-in window, and the veth gone after the stop.
+  # No GPU here (software GL); the NVIDIA part (compat32, NVENC) is Tower-only. Nobody signs in.
+  persist-canary:
+    if: github.ref == 'refs/heads/wip/unraid-native-plugin'
+    needs: [build, seat-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: incus-build-proof-NOT-FOR-UNRAID
+          path: incus-build-proof
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: polyseat-seat-image-NOT-FOR-UNRAID
+          path: seat-image-in
+
+      - name: Runtime prerequisites and ZFS on the disposable runner only
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends rsync attr xz-utils iproute2 uidmap jq zfsutils-linux
+          sudo modprobe zfs
+
+      - name: Persistent Incus state on a real ZFS dataset cache/polyseat (fresh, reused, refused without a clean stop)
+        timeout-minutes: 30
+        run: |
+          sudo env CI="$CI" GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            SEAT_IMAGE_DIR="$GITHUB_WORKSPACE/seat-image-in" \
+            bash unraid/scripts/ci-e2e-persist-canary.sh
+
+      - name: Preserve persist canary evidence even if the rehearsal failed
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-persist-canary-NOT-FOR-UNRAID
+          path: |
+            incus-build-proof/persist-canary-e2e/
+            incus-build-proof/persist-canary-e2e-result.txt
+            incus-build-proof/persist-canary-rehearsal.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  steam-rehearsal:
+    if: github.ref == 'refs/heads/wip/unraid-native-plugin'
+    needs: [build, seat-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: incus-build-proof-NOT-FOR-UNRAID
+          path: incus-build-proof
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: polyseat-seat-image-NOT-FOR-UNRAID
+          path: seat-image-in
+
+      - name: Steam rehearsal (real incusd/LXC, controller NIC on a fixture br0, Steam to its sign-in window)
+        timeout-minutes: 30
+        run: |
+          bundle="incus-build-proof/bundle/$(sed -n 's/^BUNDLE_SHA256=//p' incus-build-proof/bundle.env).tar.gz"
+          (cd seat-image-in && sha256sum --check --strict polyseat-desktop.tar.xz.sha256)
+          bash unraid/scripts/local-steam-rehearsal.sh "$bundle" seat-image-in/polyseat-desktop.tar.xz \
+            "$GITHUB_WORKSPACE/steam-rehearsal"
+          grep -q '^DONE$' steam-rehearsal/summary.txt
+          ! grep -q '^FAIL' steam-rehearsal/summary.txt
+
+      - name: Preserve the Steam rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-steam-rehearsal-NOT-FOR-UNRAID
+          path: steam-rehearsal/
+          retention-days: 14
+          if-no-files-found: warn

@@ -1,3 +1,14 @@
+# 🚧 **WIP — DO NOT USE — UNDER ACTIVE DEVELOPMENT**
+
+> [!CAUTION]
+> **EXPERIMENTAL UNRAID PORT — NOT INSTALLABLE, NOT PRODUCTION-READY, NOT SUPPORTED.**
+> This fork is actively being developed and is **not a drop-in replacement** for the upstream Polyseat project.
+> Do **not** install it on Unraid, run `polyseat-prepare`, change GPU passthrough, modify Docker/libvirt/networking, or remove your existing gaming setup.
+> The native Unraid `.plg` is intentionally disabled. Signed one-time canary runs on the owner's Unraid server showed a desktop seat, the GPU with NVENC, Steam, a first Moonlight stream, persistent Incus state and upstream's polyseatd on the LAN (acceptance J2–J7); **input, seats run by the upstream daemon, two seats and any installable plugin are not proven**.
+> Follow [Unraid WIP status and safety gates](UNRAID-WIP.md) and [Draft PR #1](https://github.com/sNyteXx/Polyseat-Unraid/pull/1).
+
+---
+
 # Polyseat
 
 **Several people playing on one Linux PC at the same time.** Each in their own
@@ -37,8 +48,9 @@ drifts.
 
   The installer refuses rather than warns if the driver does not answer, because
   a seat without it comes up, streams in software and looks perfectly healthy.
-  The AMD path has **never been run on real hardware**:
-  [docs/amd.md](docs/amd.md) says what was verified and what was not.
+  AMD cards have been run by testers and nothing has come back broken, but not
+  by the author: [docs/amd.md](docs/amd.md) says what was verified and what was
+  not.
 - **An ethernet port for the seats.** Each seat is a host of its own on the LAN,
   and Wi-Fi cannot do that: 802.11 carries one MAC address per station. The
   machine itself is free to stay on wifi — what the seats want from the card is
@@ -330,7 +342,8 @@ player types `flatpak install ...` in the seat, or somebody installs it into
 that seat from the web interface and watches the progress bar. **AppImages count
 too**, which matters because many emulators are published that way and no other:
 paste the address into the web interface, or drop the file in `~/Downloads`
-inside the seat, and it appears in both menus by itself.
+inside the seat, and it appears in both menus by itself. A shortcut an emulator
+writes for one game is picked up the same way.
 
 **A seat speaks the machine's language, uses its keyboard and keeps its time.**
 A plain Arch image has none of the three: systemd falls back to C.UTF-8, xkb to
@@ -386,9 +399,9 @@ with an RTX 4080, most recently on 2026-09-22. The logs of the milestones live
 in [`spike/`](spike/), and what was measured after them is written down in
 [`CHANGELOG.md`](CHANGELOG.md), release by release, with the numbers it was
 measured with. Whether any of it holds on a machine that is not that one is
-the open question this project would most like answered, and there are now three
-places it is open: an AMD card ([docs/amd.md](docs/amd.md)), a Debian host and a
-Fedora host. The last two are new in 0.9.0 and, like the first, are reasoned
+the open question this project would most like answered. An AMD card has since
+been run by testers ([docs/amd.md](docs/amd.md)), which leaves two places it is
+open: a Debian host and a Fedora host. Both are new in 0.9.0 and are reasoned
 about and tested as far as they can be tested without the hardware — which is
 not the same as working.
 

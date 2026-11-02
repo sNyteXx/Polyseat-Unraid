@@ -1,0 +1,137 @@
+name: Unraid WIP preflight checks
+
+on:
+  push:
+    paths:
+      - 'unraid/**'
+      - '.github/workflows/unraid-preflight-lint.yml'
+  pull_request:
+    paths:
+      - 'unraid/**'
+      - '.github/workflows/unraid-preflight-lint.yml'
+
+# FAST lane: lint, the complete offline/unit suite and the LXC nvidia hook rehearsal (Level 2) on a verified,
+# cached pinned runtime. Runs for every change below unraid/. The full pinned build is incus-feasibility.yml.
+# A pull_request from this same repository has the same commit as the push that triggered it, so its duplicate
+# run is skipped; pull requests from forks are still checked.
+permissions:
+  contents: read
+  actions: read  # read-only: the hook rehearsal verifies the producing run of a cached runtime
+
+jobs:
+  shell-check:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: POSIX shell syntax
+        run: |
+          for script in unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh; do
+            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh|unraid/scripts/ci-e2e-persist-canary.sh|unraid/scripts/build-daemon-bundle.sh|unraid/scripts/local-hook-rehearsal.sh|unraid/scripts/local-hook-rehearsal-inner.sh|unraid/scripts/local-steam-rehearsal.sh|unraid/scripts/local-steam-rehearsal-inner.sh|unraid/scripts/lib/ci-runner-noise.sh) continue ;; esac
+            sh -n "$script"
+          done
+          bash -n unraid/scripts/ci-canary-cgroup.sh
+          bash -n unraid/scripts/ci-e2e-canary.sh
+          bash -n unraid/scripts/ci-e2e-desktop-canary.sh unraid/scripts/ci-e2e-persist-canary.sh unraid/scripts/build-daemon-bundle.sh unraid/scripts/lib/ci-runner-noise.sh
+          bash -n unraid/scripts/local-hook-rehearsal.sh unraid/scripts/local-hook-rehearsal-inner.sh
+          bash -n unraid/scripts/local-steam-rehearsal.sh unraid/scripts/local-steam-rehearsal-inner.sh
+          sh -n unraid/seat-image/build-seat-image.sh
+          sh -n unraid/seat-image/provision.sh
+          bash -n unraid/seat-image/rootfs/usr/local/bin/polyseat-profile unraid/seat-image/rootfs/usr/local/bin/polyseat-selftest unraid/seat-image/rootfs/usr/local/bin/polyseat-session
+      - name: ShellCheck
+        run: |
+          for script in unraid/scripts/*.sh unraid/scripts/lib/*.sh unraid/tests/*.sh; do
+            case "$script" in unraid/scripts/ci-canary-cgroup.sh|unraid/scripts/ci-e2e-canary.sh|unraid/scripts/ci-e2e-desktop-canary.sh|unraid/scripts/ci-e2e-persist-canary.sh|unraid/scripts/build-daemon-bundle.sh|unraid/scripts/local-hook-rehearsal.sh|unraid/scripts/local-hook-rehearsal-inner.sh|unraid/scripts/local-steam-rehearsal.sh|unraid/scripts/local-steam-rehearsal-inner.sh|unraid/scripts/lib/ci-runner-noise.sh) continue ;; esac
+            shellcheck -x -s sh "$script"
+          done
+          shellcheck -s bash unraid/scripts/ci-canary-cgroup.sh
+          shellcheck -x -s bash unraid/scripts/ci-e2e-canary.sh unraid/scripts/ci-e2e-desktop-canary.sh unraid/scripts/ci-e2e-persist-canary.sh unraid/scripts/build-daemon-bundle.sh
+          shellcheck -s bash unraid/scripts/lib/ci-runner-noise.sh
+          shellcheck -s bash unraid/scripts/local-hook-rehearsal.sh unraid/scripts/local-hook-rehearsal-inner.sh
+          shellcheck -s bash unraid/scripts/local-steam-rehearsal.sh unraid/scripts/local-steam-rehearsal-inner.sh
+          shellcheck -s bash unraid/plugin/src/emhttp/scripts/lxc-nvidia-hook
+          shellcheck -s bash unraid/plugin/src/emhttp/scripts/lxc-nvidia-cli
+          python3 -m py_compile unraid/scripts/ci-runtime-key.py unraid/scripts/ci-runtime-reuse.py
+          shellcheck -x -s sh unraid/seat-image/build-seat-image.sh unraid/seat-image/provision.sh unraid/seat-image/rootfs/usr/local/bin/polyseat-sunshine-run
+          shellcheck -s bash unraid/seat-image/rootfs/usr/local/bin/polyseat-profile unraid/seat-image/rootfs/usr/local/bin/polyseat-selftest unraid/seat-image/rootfs/usr/local/bin/polyseat-session
+          shellcheck -s bash unraid/plugin/src/emhttp/scripts/polyseatctl unraid/plugin/src/emhttp/event/*
+      - name: Bash syntax of plugin scripts
+        run: |
+          for script in unraid/plugin/src/emhttp/scripts/* unraid/plugin/src/emhttp/event/*; do
+            bash -n "$script"
+          done
+      - name: JavaScript syntax
+        run: node --check unraid/plugin/src/emhttp/js/psu.js
+      - name: Disabled installer and CI-only build guardrails
+        run: sh unraid/tests/safety-contract.sh
+      - name: Tool versions used by the controller tests
+        run: |
+          jq --version; tar --version | head -n1; ssh-keygen -V 2>&1 | head -n1 || true
+          flock --version | head -n1; python3 --version
+          php --version | head -n1; node --version
+          command -v php >/dev/null || { echo "php is required for the WebUI tests"; exit 1; }
+      - name: Offline simulations, ABI/bundle checks and controller sandbox tests
+        run: |
+          python3 -W error::ResourceWarning -m compileall -q unraid/lab
+          python3 -m unittest discover -s unraid/tests -p 'test_*.py' -v
+
+  hook-l2:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/wip/unraid-native-plugin'
+    runs-on: ubuntu-24.04  # same runner image label as the pinned build: the runtime key includes it
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Content-addressed key of the pinned runtime build
+        id: key
+        run: |
+          key=$(python3 unraid/scripts/ci-runtime-key.py --json-out "$RUNNER_TEMP/runtime-key.json")
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Look up the cached runtime of exactly this recipe
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/runtime-snapshot
+          key: polyseat-runtime-v1-${{ steps.key.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: polyseat-runtime-v1-${{ steps.key.outputs.key }}-
+
+      - name: Verify it (otherwise the full lane rehearses the hook)
+        id: reuse
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KEY: ${{ steps.key.outputs.key }}
+          MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
+        run: |
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          case $MATCHED in
+            "polyseat-runtime-v1-$KEY-"*) echo "cache entry $MATCHED" ;;
+            *) echo "::notice::no cached runtime for this recipe; the hook rehearsal runs in the full lane"; exit 0 ;;
+          esac
+          if python3 unraid/scripts/ci-runtime-reuse.py verify --snapshot "$RUNNER_TEMP/runtime-snapshot" \
+               --key-json "$RUNNER_TEMP/runtime-key.json" --repository "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/verdict.json"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            jq -c . "$RUNNER_TEMP/verdict.json"
+          else
+            echo "::warning::cached runtime not reusable: $(jq -r .reason "$RUNNER_TEMP/verdict.json"); full lane needed"
+          fi
+
+      - name: Level-2 LXC nvidia hook rehearsal (real incusd/LXC; stub and real nvidia-container-cli; no GPU)
+        if: steps.reuse.outputs.ok == 'true'
+        run: |
+          cli=$(sh unraid/scripts/fetch-nvidia-cli-for-tests.sh "$RUNNER_TEMP/nvidia-cli")
+          proof="$RUNNER_TEMP/runtime-snapshot/proof"
+          bundle="$proof/bundle/$(sed -n 's/^BUNDLE_SHA256=//p' "$proof/bundle.env").tar.gz"
+          bash unraid/scripts/local-hook-rehearsal.sh "$bundle" "$GITHUB_WORKSPACE/hook-rehearsal" "$cli"
+          grep -q '^DONE$' hook-rehearsal/summary.txt
+          ! grep -q '^FAIL' hook-rehearsal/summary.txt
+
+      - name: Preserve the hook rehearsal evidence
+        if: always() && steps.reuse.outputs.ok == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: polyseat-hook-rehearsal-fast-NOT-FOR-UNRAID
+          path: hook-rehearsal/
+          retention-days: 7
+          if-no-files-found: warn
+

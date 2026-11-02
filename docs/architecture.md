@@ -897,6 +897,15 @@ short script that sets the cap and replaces itself with the game, rather
 than through an `env` line, because the launcher's way of starting an entry
 cannot carry the dollar sign in `LD_PRELOAD`.
 
+**It also runs the other way, for a shortcut no scan can see.** Eden writes a
+desktop entry per game, and nothing can be asked about those: the emulator is one
+AppImage and the game is an argument. So an entry in `~/.local/share/applications`
+with `Game` in its categories becomes a card in Moonlight, unless it is hidden or
+names a `steam://` or `lutris:` target, which the scans answer better, or its
+program is gone. The Exec line is translated rather than copied, because Sunshine
+expands `$` itself and Boost counts every double quote, so `\"` does not survive.
+No entry is generated for these, since the entry they came from is already there.
+
 **The pictures differ because the menus draw differently.** A client draws every
 entry as a portrait card, which is what the covers are for; that launcher draws
 a grid of square icons at a fixed size, and a cover put through it comes out as
@@ -1123,6 +1132,15 @@ Somebody else's choice wins. A setting that names a tool which is not ours stays
 because a seat where the player picked Proton Experimental on purpose is not a
 seat with a broken setting. What does get rewritten is a setting naming one of
 our own builds under an older, versioned name.
+
+The same pass keeps Steam's screensaver off running games. Steam counts input, a
+cutscene has none, and after five minutes of one the screensaver came up over
+the game. The switch is `Customization/Screensaver/WhileInGame` in that same
+file, per installation and on until somebody turns it off, so a seat nobody has
+signed in to yet can be given it too: Steam reads it from a file holding nothing
+else and keeps it when it writes the file out. This one is not somebody else's
+choice to keep, so a seat where it was turned on gets it turned off again. The
+idle screensaver over Steam's own menus is a different setting and stays.
 
 That versioned name is the reason the tool's own manifest is rewritten too.
 Upstream names it after the version and the instruction set, so every update
@@ -1500,8 +1518,9 @@ through it, with several open bugs on Linux about keys that do not type. Neither
 reaches a browser window inside a launcher.
 
 So both halves live in the seat and travel in the video stream like everything
-else. squeekboard draws the keyboard, which was written for phones and turns out
-to work on sway unchanged. `polyseat-pad-pointer` turns the gamepad into a
+else. Stevia draws the keyboard, written for Phosh and patched to run on sway, see
+[packaging/stevia](../packaging/stevia/README.md), and it takes its layout from
+the language of the seat while it runs. `polyseat-pad-pointer` turns the gamepad into a
 pointer to press it with, reachable from Super+K, the bar, and a gamepad button,
 because whoever needs it has the fewest ways to ask.
 
@@ -1740,14 +1759,15 @@ layer and costs nothing outside a Vulkan application. Measured through the entry
 form with glxgears: 21039 fps uncapped, 59.94 with a 60 fps cap. What is no
 longer capped is a game started from an entry Polyseat did not write.
 
-One thing had to be fixed before any of it worked. squeekboard registers a
-virtual keyboard with the compositor when it starts but only gives it a layout
-the first time it is shown, and until then sway hands out a zero length keymap.
-MangoHud maps that without checking the length and dereferences the failure, so
-every Vulkan application in the seat died with SIGSEGV before drawing a frame,
-and opening the on-screen keyboard during a game killed the game. The session
-therefore shows the keyboard once at startup and puts it away again, before
-anybody has connected and while there is nobody to see it.
+One thing had to be fixed before any of it worked. squeekboard registered a
+virtual keyboard with the compositor when it started but only gave it a layout
+the first time it was shown, and until then sway handed out a zero length keymap.
+MangoHud mapped that without checking the length and dereferenced the failure, so
+every Vulkan application in the seat died with SIGSEGV before drawing a frame. The
+session used to show the keyboard once at startup to get past it. Stevia starts
+only when it is asked for, so at startup there is no virtual keyboard to have an
+empty keymap, and `vkcube` under MangoHud was run in a seat both with none at all
+and with one open.
 
 ## Never reload the app list under somebody
 
@@ -2123,7 +2143,7 @@ reconsidering for that reason and not for the old one.
   wants DRM master, which a seat may not hold. Read in the sources rather than
   in announcements. The switching cost would be paid whatever the answer: six
   files here speak sway's IPC in 21 places, and three protocols a replacement
-  does not simply bring - `wlr-layer-shell` for waybar, squeekboard and the
+  does not simply bring - `wlr-layer-shell` for waybar, the keyboard and the
   grid, `wlr-screencopy` for Sunshine's `capture = wlr`, and XWayland for
   Steam. The lesson written down at the time still holds: the compositor is not
   the bottleneck, the capture protocol is.

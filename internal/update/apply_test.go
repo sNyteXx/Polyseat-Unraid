@@ -308,16 +308,16 @@ func TestApplyRefusesWithoutAPackage(t *testing.T) {
 	}
 }
 
-// A slow line is not a broken one. The body here takes several stall windows
-// to arrive in full, but never goes a whole window without a byte, which is a
-// download the old thirty second total would have cut off on any line below
-// about 3.8 Mbit/s.
+// A slow line is not a broken one. The body lasts longer than a stall window,
+// but never goes a whole window without a byte. Use generous per-chunk slack
+// for shared CI runners: the separate stalled-body test verifies the short
+// timeout path. This tests progress during a long download, not scheduler speed.
 func TestASlowDownloadThatKeepsMovingFinishes(t *testing.T) {
 	old := stallTimeout
-	stallTimeout = 150 * time.Millisecond
+	stallTimeout = time.Second
 	t.Cleanup(func() { stallTimeout = old })
 
-	const chunks = 10
+	const chunks = 30
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for range chunks {

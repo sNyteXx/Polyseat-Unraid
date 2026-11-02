@@ -10,6 +10,98 @@ that changes behaviour, including changes that need seats to be built again.
 When that happens it is written here, because it is the one kind of update that
 costs a few minutes per seat rather than a restart.
 
+## 0.46.0
+
+**Steam's screensaver stays off a running game.** Steam counts input and a
+cutscene has none, so five minutes into one the screensaver came up over the
+game. The switch is `WhileInGame` in Steam's `config.vdf`, on by default and kept
+per installation, so every seat had it on. It is now turned off along with the
+default Proton, in a seat being built before its Steam first starts as well as
+on the six hourly pass, and a seat where it was turned on gets it turned off
+again. The idle screensaver over Steam's own menus stays.
+
+No seat needs building again. A running seat picks it up on the next pass that
+finds its Steam idle, which closes Steam for a moment the way that pass already
+does. Steam was measured reading the switch in a seat nobody has signed in to, and
+keeping it across a restart, but the first sign in has not been tried, and neither
+has a cutscene longer than five minutes.
+
+## 0.45.0
+
+**A shortcut to a game reaches Moonlight too.** Eden writes a desktop entry per
+game, and those showed up in the seat's grid while Moonlight's list, which comes
+from Steam, Lutris and `~/Applications`, never heard of them. An entry in
+`~/.local/share/applications` with `Game` in its categories is now a card with
+the entry's icon, unless it is hidden, its program is gone, or it starts a Steam
+or Lutris title that already has a card. The entry stays the one row in the grid.
+
+No seat needs building again, the cards appear within a minute of the daemon
+being updated. The scan was run against two real seats and found the right games
+with the whole path to the ROM, and the command is tested against a copy of the
+splitting Sunshine does, but no game has been started from Moonlight this way.
+
+## 0.44.0
+
+**The on-screen keyboard is smaller, dark, and in the language of the seat.**
+squeekboard filled half the screen in white with a height no setting changes,
+showed US keys in a German seat, and sat underneath the application grid, so
+pressing L3 there opened it where nobody could see it. It is replaced by Stevia,
+which takes its layout from the seat's keyboard language at run time, about a
+quarter of the screen tall and on top of the grid. It runs only while it is open.
+A language Stevia has no layout for gets the US keys. Built as a package of its
+own because it needs a patch to run on sway, see `packaging/stevia`. A seat built
+before this keeps squeekboard installed and unused.
+
+**An emulator stays in the grid beside shortcuts to its games.** Eden writes a
+desktop entry per game, each naming Eden's own path, and one of them was enough
+to take Eden itself out of the grid while it stayed in Moonlight. The same
+comparison let a shortcut to Lutris game 23 hide game 2.
+
+Seats need building again, generation 69. Tried in one seat with simulated
+presses, typing into the grid's search field in German. A real controller over
+Moonlight, the keyboard over a running game, and 4K in this exact build have not
+been tried. If the grid is opened while the keyboard is already open, the grid
+covers it: press L3 twice.
+
+## 0.43.1
+
+**AMD cards are no longer described as never having run.** Testers have run
+Polyseat on AMD hardware and no problem specific to the card has come back, so
+the installer, the warning in the web interface, the README and the hardware
+report template stop saying otherwise. `docs/amd.md` says how far that goes:
+whether a card encodes in hardware has still not been reported. No seat needs
+building again.
+
+## 0.43.0
+
+**A controller's mouse can be seen in a game.** A Steam Input mouse binding
+moved the pointer without showing it, because Steam sends those over XTest into
+gamescope and sway, which draws the pointer, never hears of them. Crusader Kings
+III could be clicked on but not aimed at. gamescope now runs with
+`--force-grab-cursor` and draws the pointer itself, confirmed in Crusader Kings
+III with a controller, and a Siri Remote and Moonlight on iOS with touch work as
+before. Events written straight into the absolute mouse did land in the corners
+of the screen, so if a client's pointer does that, this is the change to look
+at. Seats need building again, generation 68.
+
+## 0.42.2
+
+**An uninstalled title leaves the list as soon as it is gone.** Uninstall
+answered only after Steam had been started again in every seat it closed, and
+that took about two minutes on 2026-10-30, so the title stayed in the list
+until somebody reloaded the page. Steam is now started again behind the
+answer, and the button reads Uninstalling… while Steam is being closed and
+the copies deleted. No seat needs building again.
+
+## 0.42.1
+
+**A failed update can be tried again.** When installing a release failed, a
+lookup that failed while the network was down for instance, the Updates panel
+and the line at the top showed the error and no button, and Check now did not
+bring one back: the only way past it was restarting the daemon. Both now offer
+Try again whenever installing from here is possible at all. Nothing else
+changed, and no seat needs building again.
+
 ## 0.42.0
 
 **A game uninstalled everywhere no longer comes back.** Uninstall deleted every

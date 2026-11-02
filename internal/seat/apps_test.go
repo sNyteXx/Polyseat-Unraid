@@ -661,6 +661,50 @@ func TestAGeneratedEntryStandsDownForOneSomebodyMade(t *testing.T) {
 	}
 }
 
+// Eden writes a shortcut per game on request, and each one names the emulator's
+// own path. That starts one game rather than the emulator, so the emulator has
+// to keep its entry, and in a seat it did not: it was in Moonlight and missing
+// from the launcher from the moment the first shortcut existed.
+func TestAnEntryThatStartsAGameInAnEmulatorIsNotTheEmulator(t *testing.T) {
+	const eden = "/home/player/Applications/Eden-Linux-v0.2.1-amd64-clang-pgo.AppImage"
+
+	shortcut := "Exec=" + eden + ` -f -g "/home/player/Downloads/Spiele/Pokemon [0100000011D90000].xci"` + "\n"
+
+	if alreadyListed(shortcut, eden) {
+		t.Error("the emulator was mistaken for a shortcut to one of its games, so it is in no menu")
+	}
+
+	// What the AppImage ships as its own entry, which really is the same thing:
+	// the field code and the quotes change nothing about what is started.
+	for _, theirs := range []string{
+		"Exec=" + eden + "\n",
+		"Exec=\"" + eden + "\" %f\n",
+	} {
+		if !alreadyListed(theirs, eden) {
+			t.Errorf("%q starts the emulator, so it would be listed twice", theirs)
+		}
+	}
+}
+
+// One id being the start of another is a different game. Lutris numbers from 1,
+// so this is not a corner: game 2 was hidden by a shortcut to game 23.
+func TestALongerIdIsADifferentGame(t *testing.T) {
+	theirs := "Exec=env LUTRIS_SKIP_INIT=1 lutris lutris:rungameid/23\n" +
+		"Exec=steam steam://rungameid/1562430\n"
+
+	if alreadyListed(theirs, "lutris lutris:rungameid/2") {
+		t.Error("a game was skipped because another game's id starts with its own")
+	}
+
+	if alreadyListed(theirs, "steam steam://rungameid/156243") {
+		t.Error("a game was skipped because another game's id starts with its own")
+	}
+
+	if !alreadyListed(theirs, "lutris lutris:rungameid/23") {
+		t.Error("the game would be listed twice, once by Lutris and once by Polyseat")
+	}
+}
+
 // The comparison is on what identifies the game. Anything short or wordlike
 // would match by accident, and a game that matches by accident is a game that
 // appears in no menu.
@@ -775,6 +819,41 @@ func TestTheWorkspaceSwitchComesFirst(t *testing.T) {
 		if !strings.Contains(a.PrepCmd[0].Do, "polyseat-workspace") {
 			t.Errorf("%s does something before it switches workspace: %q",
 				a.Name, a.PrepCmd[0].Do)
+		}
+	}
+}
+
+// A Steam game's own entry runs it in the Steam inside gamescope, so it has to
+// switch to that workspace first, exactly as Steam Big Picture's does. A Lutris
+// title stays on the desktop and must not be sent away from it.
+func TestASteamGameEntryGoesToGamescopeFirst(t *testing.T) {
+	apps, _ := polyseatApps(nil, []Game{
+		{Name: "Once Human", Launch: "steam steam://rungameid/2139460", Steam: "2139460", Source: "steam"},
+		{Name: "Some Lutris Game", Launch: "lutris lutris:rungameid/7", Source: "lutris"},
+	})
+
+	byName := map[string]app{}
+	for _, a := range apps {
+		byName[a.Name] = a
+	}
+
+	steam := byName["Once Human"]
+	if len(steam.PrepCmd) < 2 || steam.PrepCmd[0].Do != toGamescope || steam.PrepCmd[1].Do != hideLauncher {
+		t.Errorf("the Steam game's entry does not switch to gamescope first: %+v", steam.PrepCmd)
+	}
+
+	if len(steam.Detached) != 2 || steam.Detached[0] != showSteam || steam.Detached[1] != "setsid steam steam://rungameid/2139460" {
+		t.Errorf("the Steam game's entry does not bring Steam's window up with the game: %q", steam.Detached)
+	}
+
+	lutris := byName["Some Lutris Game"]
+	if len(lutris.Detached) != 1 {
+		t.Errorf("a Lutris title starts more than itself: %q", lutris.Detached)
+	}
+
+	for _, c := range lutris.PrepCmd {
+		if strings.Contains(c.Do, "polyseat-workspace") {
+			t.Errorf("a Lutris title was sent off the desktop: %+v", lutris.PrepCmd)
 		}
 	}
 }

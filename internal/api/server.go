@@ -796,11 +796,12 @@ func (s *Server) warnings() []string {
 	}
 
 	if s.manager.GPU().Vendor == seat.VendorAMD {
-		out = append(out, "This is an AMD machine, and Polyseat's AMD support "+
-			"has never been run on real hardware by its author. It is expected "+
-			"to work and it may well not. Whichever it turns out to be, please "+
-			"say so at github.com/superuser404notfound/Polyseat/issues, with "+
-			"the output of: sudo polyseatd -report")
+		out = append(out, "This is an AMD machine. Polyseat's AMD support has "+
+			"been run by testers and not by its author, so it is expected to "+
+			"work and your card may still be the first of its kind. If anything "+
+			"is wrong, please say so at "+
+			"github.com/superuser404notfound/Polyseat/issues, with the output "+
+			"of: sudo polyseatd -report")
 	}
 
 	return out

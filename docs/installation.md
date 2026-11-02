@@ -225,8 +225,8 @@ behind. Refused when the card came up on `simpledrm` or `vesa` instead, which
 usually means missing firmware and `linux-firmware-amdgpu`.
 
 `vainfo` is reported rather than refused over, both here and again inside the
-seat during provisioning. **The AMD path has never been run on real hardware:**
-[amd.md](amd.md) says what was verified and what was not.
+seat during provisioning. **AMD cards have been run by testers, not by the
+author:** [amd.md](amd.md) says what was verified and what was not.
 
 ### The NVIDIA driver
 

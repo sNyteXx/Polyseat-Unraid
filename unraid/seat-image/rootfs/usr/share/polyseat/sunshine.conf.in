@@ -1,0 +1,14 @@
+# Polyseat seat image - Sunshine configuration, written by polyseat-profile (edits are overwritten on a profile switch).
+# wlr capture is the only path that works in an unprivileged container (KMS capture needs cap_sys_admin).
+capture = wlr
+encoder = @ENCODER@
+# Web UI reachable from localhost only.
+origin_web_ui_allowed = pc
+# Never ask the router for port forwards; seats are LAN-only (unraid/docs/streaming-network.md).
+upnp = disabled
+# No input devices yet: Sunshine creates them with uinput on the HOST (a virtual keyboard reaches Unraid's text
+# console); that needs the input broker first. The seat has no /dev/uinput either.
+keyboard = disabled
+mouse = disabled
+controller = disabled
+log_path = /home/player/.config/sunshine/sunshine.log
