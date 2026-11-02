@@ -1095,6 +1095,31 @@ class PolyseatdTests(unittest.TestCase):
         res = source_ctl(script, str(d), "pin" if pin else "")
         return res.returncode, res.stderr, d / "var/lib/polyseat-unraid-daemon"
 
+    def test_bundle_removal_takes_the_bytecode_cache_and_nothing_else(self):
+        """Tower 2026-11-02: the bundle's Python wrote __pycache__ into recorded directories, the daemon directory could not
+        be removed and the next play-start failed. Plain *.pyc directly in a __pycache__ go; anything else keeps the dir."""
+        def run(extra):
+            d = Path(tempfile.mkdtemp(prefix="polyseat-ctl-pyc"))
+            self.addCleanup(shutil.rmtree, d)
+            daemon = d / "daemon"
+            (daemon / "lib/polyseat").mkdir(parents=True)
+            (daemon / "lib/polyseat/broker.py").write_text("x")
+            (daemon / "MANIFEST").write_text("x")
+            (daemon / ".entries").write_text("MANIFEST\nlib\nlib/polyseat\nlib/polyseat/broker.py\n")
+            (daemon / ".bundle-sha256").write_text("x")
+            cache = daemon / "lib/polyseat/__pycache__"
+            cache.mkdir()
+            (cache / "broker.cpython-312.pyc").write_bytes(b"\0")
+            for name, data in extra:
+                (cache / name).write_text(data)
+            res = source_ctl('polyseatd_bundle_remove "$1"', str(daemon))
+            self.assertEqual(res.returncode, 0, res.stderr)
+            return daemon
+        self.assertFalse(run([]).exists())
+        kept = run([("note.txt", "not bytecode")])
+        self.assertTrue((kept / "lib/polyseat/__pycache__/note.txt").is_file())
+        self.assertFalse((kept / "lib/polyseat/__pycache__/broker.cpython-312.pyc").exists())
+
     def test_daemon_stage_unpacks_only_a_clean_bundle_and_verifies_every_file(self):
         good = b"#!/bin/sh\n"
         manifest = hashlib.sha256(good).hexdigest().encode() + b"  bin/polyseatd\n"

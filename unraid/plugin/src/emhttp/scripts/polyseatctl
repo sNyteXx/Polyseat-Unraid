@@ -2952,12 +2952,23 @@ cmd_persist_smoke() ( # step 2: a seat whose Incus database and rootfs persist o
 
 # ------------------------------------------------------------ polyseatd ----
 polyseatd_bundle_remove() { # dir : the exact entries a staging recorded, deepest first; no recursion
-  local dir=$1 entry
+  local dir=$1 entry cache f
   [[ -d $dir && ! -L $dir ]] || return 0
   if [[ -f $dir/.entries && ! -L $dir/.entries ]]; then
     while IFS= read -r entry; do
       [[ $entry =~ ^(MANIFEST|(bin|etc|lib|py|rules)(/[A-Za-z0-9._+@-]+)*)$ ]] || continue
-      if [[ -d $dir/$entry && ! -L $dir/$entry ]]; then rmdir -- "$dir/$entry" 2>/dev/null || true
+      if [[ -d $dir/$entry && ! -L $dir/$entry ]]; then
+        # The one thing the bundle's Python may leave in a recorded directory: its bytecode cache (Tower 2026-11-02: a
+        # session's helpers wrote __pycache__ into lib/polyseat and py/lib/python3.12, the directory could not be removed and
+        # the next play-start failed). Only plain *.pyc files directly in a __pycache__ there; anything else stays.
+        cache=$dir/$entry/__pycache__
+        if [[ -d $cache && ! -L $cache ]]; then
+          for f in "$cache"/*; do
+            if [[ -f $f && ! -L $f && ${f##*/} == *.pyc ]]; then rm -f -- "$f"; fi
+          done
+          rmdir -- "$cache" 2>/dev/null || true
+        fi
+        rmdir -- "$dir/$entry" 2>/dev/null || true
       else rm -f -- "$dir/$entry"; fi
     done < <(LC_ALL=C sort -r -- "$dir/.entries")
   fi
@@ -3106,7 +3117,7 @@ polyseatd_launch() { # config : setsid in its own child of the canary group, so 
     if ! sandbox || ci_real_system; then printf '%s\n' "$BASHPID" > "$group/cgroup.procs" || exit 1; fi
     cd / || exit 1
     exec setsid env -i PATH="$(lxc_mount_real "$CANARY_DENY_DIR"):$POLYSEATD_DIR/bin:$CURRENT/payload/bin:$SAFE_PATH" \
-      HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" INCUS_CONF="$RUN_DIR/client" \
+      HOME="$RUN_DIR" LANG=C INCUS_DIR="$INCUS_DIR" INCUS_CONF="$RUN_DIR/client" PYTHONDONTWRITEBYTECODE=1 \
       "$POLYSEATD_BIN" -config "$config" >> "$LOG_DIR/polyseatd.log" 2>&1 < /dev/null 9>&-
   ) &
   pid=$!

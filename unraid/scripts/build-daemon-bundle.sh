@@ -27,7 +27,7 @@ for f in broker.py device_owner.py uhid_observer.py fakeudev.py; do
   install -m 0755 "$repo/spike/m2-input-broker/$f" "$b/lib/polyseat/$f"
 done
 # udev runs device_owner.py by its fixed path; on Unraid that copy needs this bundle's interpreter (no python3 there).
-{ printf '#!@BUNDLE@/py/bin/python3 -I\n'; tail -n +2 "$repo/spike/m2-input-broker/device_owner.py"; } > "$b/lib/polyseat/device_owner.udev"
+{ printf '#!@BUNDLE@/py/bin/python3 -IB\n'; tail -n +2 "$repo/spike/m2-input-broker/device_owner.py"; } > "$b/lib/polyseat/device_owner.udev"
 chmod 0644 "$b/lib/polyseat/device_owner.udev"
 install -m 0644 "$repo/host/72-polyseat-hide.rules" "$b/rules/72-polyseat-hide.rules"
 # The daemon's fixed settings on Unraid; the controller fills in @BUNDLE@, @LISTEN@, @STATE@, @LIBRARY@, @UPLINK@ and @IDLE@.
