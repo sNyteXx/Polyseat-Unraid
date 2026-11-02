@@ -1094,6 +1094,14 @@ remove_lxc_rootfs_mount() {
   rmdir -- "$(lxc_mount_real "$LXC_STATE_PARENT")" 2>/dev/null || true
 }
 
+# The play daemon's LXC state after its incusd is gone: exactly the files canary_launch made (remove_lxc_rootfs_mount, which
+# leaves liblxc's shared rootfs mount point while the workloads daemon claims it). Called only when no play incusd runs.
+play_lxc_state_remove() {
+  if svc_pid >/dev/null 2>&1; then log warn "play: the Incus daemon still runs; its LXC state is left in place"; return 0; fi
+  remove_lxc_rootfs_mount
+  log info "play: LXC state of the session removed"
+}
+
 wl_claimed() { [[ -e $WL_CLAIM || -L $WL_CLAIM ]]; }
 
 wl_shared_rmdir() { # dir : the shared LXC mount point goes away with a play stop unless the workloads daemon has claimed it
@@ -1889,9 +1897,11 @@ CANARY_DENIED_TOOLS="modprobe insmod rmmod btrfs lvm zfs zpool qemu-system-x86_6
 canary_deny_tools_prepare() {
   local tool out dir
   dir=$(lxc_mount_real "$CANARY_DENY_DIR")
-  [[ -d $(dirname -- "$dir") && ! -L $(dirname -- "$dir") ]] || return 1
-  [[ ! -e $dir && ! -L $dir ]] || return 1
-  mkdir -m 0700 -- "$dir" || return 1
+  [[ -d $(dirname -- "$dir") && ! -L $(dirname -- "$dir") ]] ||
+    { log error "canary: the LXC state directory $(dirname -- "$dir") is missing or a symlink"; return 1; }
+  [[ ! -e $dir && ! -L $dir ]] ||
+    { log error "canary: $dir is left over from an earlier daemon; it is removed when a session ends or by play-recover"; return 1; }
+  mkdir -m 0700 -- "$dir" || { log error "canary: cannot create $dir"; return 1; }
   for tool in $CANARY_DENIED_TOOLS; do
     # Fixed, root-private commands in OUR PATH. Never touch host /sbin tools.
     # CAP_SYS_MODULE alone would not block modprobe configuration install hooks.
@@ -3663,7 +3673,7 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
   CANARY_OPERATION=8
   # shellcheck disable=SC2154  # rc is assigned inside the trap itself
   trap 'rc=$?; if [[ -n $pid ]]; then polyseatd_stop "$pid" || true; fi
-    if [[ $CANARY_RUN_OWNED -eq 1 ]]; then play_stop_seats || true; svc_stop full || rc=4; fi
+    if [[ $CANARY_RUN_OWNED -eq 1 ]]; then play_stop_seats || true; svc_stop full || rc=4; play_lxc_state_remove; fi
     play_host_off || rc=4; polyseatd_run_state_remove || true; rm -f -- "$RUN_DIR/polyseatd-status.json"; exit "$rc"' EXIT
   svc_start || exit $EX_HEALTH
   if ! INCUS_CMD_TIMEOUT=10 run_incus query /1.0/storage-pools/default >/dev/null 2>&1; then
@@ -3726,6 +3736,7 @@ cmd_polyseatd_play() ( # steps 5+: polyseatd builds and runs seats with input, o
   log info "play phase: clean stop"
   persist_clean_stop "$(play_instances stopped)" || exit $EX_HEALTH
   svc_stop full || exit $EX_HEALTH
+  play_lxc_state_remove
   play_host_off || exit $EX_HEALTH
   polyseatd_run_state_remove || exit $EX_HEALTH
   rm -f -- "$RUN_DIR/polyseatd-stop" "$RUN_DIR/polyseatd-status.json" "$RUN_DIR/play-end-reason"
@@ -3811,6 +3822,10 @@ cmd_play_start() ( # owner mode: verify and stage what is on the flash, approve 
   # shellcheck disable=SC2086  # PLAY_RECORDS is a fixed word list
   play_records_remove play-start $PLAY_RECORDS play-last-end.json || die $EX_BLOCKED "cannot remove the records of the earlier session"
   play_evidence_rotate || die $EX_BLOCKED "the earlier session's evidence directory holds unexpected files; collect it first"
+  # And the play daemon's LXC state of an earlier session (its deny-tools, hooks, hook log, GPU admission): nothing of
+  # the play daemon runs (checked above), and canary_launch refuses to start over them (Tower 2026-11-02: every second
+  # session failed, because only uninstall removed them; the operator's test runs always uninstalled in between).
+  play_lxc_state_remove
   # What is on the flash, and that it is the release key's.
   sha=$(owner_bundle_select) || exit $EX_BLOCKED
   for f in "$OWNER_SEAT_IMAGE" "$OWNER_SEAT_MANIFEST" "$OWNER_SEAT_MANIFEST.sig" "$OWNER_DAEMON"; do
@@ -4218,6 +4233,7 @@ cmd_play_recover() ( # owner mode, root, under the lock: prove that nothing runs
     persist_clean_stop_valid "$DATA_REAL/clean-stop.json" || die $EX_CORRUPT "play-recover: the record just written is not accepted by the next start; it is kept for inspection"
     log info "play-recover: clean-stop record written for ${#PLAY_RECOVER_NAMES[@]} instance(s)"
   fi
+  play_lxc_state_remove
   # The watchdog's .reason and the session's records. The reason survives as a note for the card (play-last-end.json).
   # shellcheck disable=SC2086  # PLAY_RECORDS is a fixed word list
   play_records_remove play-recover $PLAY_RECORDS polyseatd-status.json polyseatd-status.json.new "${CANARY_SESSION##*/}.reason" ||

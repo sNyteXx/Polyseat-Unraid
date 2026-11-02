@@ -1467,6 +1467,38 @@ class CoexistenceTests(Fixture):
           [[ -d $LXC_STATE_PARENT/rootfs ]] || echo ROOTFS-REMOVED-WITHOUT-CLAIM''', api=False, check=0)
         self.assertEqual(res.stdout.split(), ["ROOTFS-KEPT", "PLAY-ROOT-GONE", "ROOTFS-REMOVED-WITHOUT-CLAIM"])
 
+    def test_a_play_session_end_removes_its_lxc_state_so_the_next_one_can_start(self):
+        """Tower 2026-11-02: only uninstall removed the play daemon's deny-tools, hooks, hook log and GPU admission, so
+        canary_deny_tools_prepare refused every second session. play_lxc_state_remove takes exactly those (the shared
+        rootfs stays while the workloads claim stands) and does nothing while the play incusd still runs."""
+        res = self.bash(r'''
+          wl_enter
+          lxc_mount_real() { printf '%s\n' "$1"; }
+          LXC_STATE_PARENT=$D/var/lib/polyseat-lxc CANARY_DENY_DIR=$D/var/lib/polyseat-lxc/deny-tools
+          mkdir -p "$LXC_STATE_PARENT/rootfs" "$LXC_STATE_PARENT/root" "$LXC_STATE_PARENT/hooks/cli" "$LXC_STATE_PARENT/hook-log" "$CANARY_DENY_DIR"
+          for t in $CANARY_DENIED_TOOLS nft; do : > "$CANARY_DENY_DIR/$t"; done
+          : > "$LXC_STATE_PARENT/hooks/nvidia"; : > "$LXC_STATE_PARENT/hooks/nvidia.upstream"; : > "$LXC_STATE_PARENT/hooks/cli/nvidia-container-cli"
+          : > "$LXC_STATE_PARENT/hook-log/status"; : > "$LXC_STATE_PARENT/gpu-admission"
+          : > "$WL_CLAIM"
+          svc_pid() { return 0; }
+          play_lxc_state_remove
+          [[ -d $CANARY_DENY_DIR ]] && echo KEPT-WHILE-RUNNING
+          svc_pid() { return 1; }
+          play_lxc_state_remove
+          [[ -e $CANARY_DENY_DIR || -e $LXC_STATE_PARENT/hooks || -e $LXC_STATE_PARENT/hook-log || -e $LXC_STATE_PARENT/gpu-admission ]] || echo STATE-GONE
+          [[ -d $LXC_STATE_PARENT/rootfs ]] && echo ROOTFS-KEPT
+          canary_deny_tools_prepare && echo DENY-TOOLS-READY''', api=False, check=0)
+        self.assertEqual(res.stdout.split(), ["KEPT-WHILE-RUNNING", "STATE-GONE", "ROOTFS-KEPT", "DENY-TOOLS-READY"])
+
+    def test_a_leftover_deny_tools_directory_is_refused_with_a_reason(self):
+        res = self.bash(r'''
+          lxc_mount_real() { printf '%s\n' "$1"; }
+          CANARY_DENY_DIR=$D/var/lib/polyseat-lxc/deny-tools
+          mkdir -p "$CANARY_DENY_DIR"
+          canary_deny_tools_prepare; echo "rc=$?"''', api=False, check=0)
+        self.assertIn("rc=1", res.stdout)
+        self.assertIn("left over from an earlier daemon", res.stdout + res.stderr)
+
     def test_claim_and_release_use_the_one_lock_a_play_stop_takes(self):
         res = self.bash(r'''
           lxc_mount_real() { printf '%s\n' "$D$1"; }

@@ -239,7 +239,8 @@ class RecoveryHappyPathTests(Fixture):
         self.assertIn("VALID", ok.stdout)
         # the watchdog's reason and every session record are gone, the evidence stays for the next start to rotate
         left = sorted(p.name for p in self.run_dir.iterdir())
-        self.assertEqual(left, ["lock"] * (1 if "lock" in left else 0) + ["play-evidence", "play-last-end.json"], left)
+        # lxc-shared.lock: the lock play_lxc_state_remove takes around the shared LXC mount point (shared with workloads).
+        self.assertEqual([f for f in left if f not in ("lock", "lxc-shared.lock")], ["play-evidence", "play-last-end.json"], left)
         end = json.loads((self.run_dir / "play-last-end.json").read_text())
         self.assertEqual((end["reason"], end["clean"], end["recovered"]), ("memory-floor-hard", False, True))
         # every step is logged, in the order of the checks
